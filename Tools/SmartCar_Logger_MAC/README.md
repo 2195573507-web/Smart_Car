@@ -12,8 +12,9 @@ viewer: it does not expose controls and has no API that writes serial bytes.
 - Opens the selected endpoint with fixed `115200 8N1` settings: 8 data bits,
   no parity, one stop bit, and no software or hardware flow control.
 - Streams UTF-8 USART1 output into a selectable monospaced log view.
-- Saves the current captured log as a UTF-8 `.txt` file using the macOS save
-  panel.
+- Retains the latest 500 complete log lines in a bounded Ring Buffer, with
+  `OFF`, `ERROR`, `WARN`, `INFO`, `DEBUG`, and `TRACE` display filtering. The
+  default is `INFO`; `TRACE` includes the complete serial diagnostics.
 
 The app does not alter or link with `STM32H757`, `ESPS3`, or `IOS_APP`.
 
@@ -40,13 +41,19 @@ same script. Useful modes are `--verify`, `--debug`, `--logs`, and
    automatically open any device.
 3. Select the `/dev/cu.*` endpoint and click Connect. The fixed serial format
    shown in the window is `115200 8N1`.
-4. View or select the live log text. Use the download icon or Command-Shift-S
-   to save the current captured output.
+4. View or select the live log text. Click `Copy All Logs` or press
+   `Command-Shift-C` to copy the complete current Ring Buffer window to the
+   macOS clipboard. The copy contains a header with the export time, selected
+   serial port, baud rate, current buffer line count, and cumulative dropped
+   line count, followed by the retained log lines.
 
-The display refreshes at most ten times a second and retains the latest two
-million characters so an unattended session cannot continually grow the SwiftUI
-view. When this limit is reached, the earliest captured output is removed and a
-marker is shown. `received bytes` remains the session total.
+The display refreshes at most ten times a second and publishes only the current
+Ring Buffer window to SwiftUI. When the default 500-line capacity is reached,
+the oldest line is discarded. Copying never adds historical storage: it builds
+one temporary clipboard string from at most 500 retained lines. `received
+bytes` remains the session total. The status bar shows Ring Buffer usage and
+the cumulative count of discarded oldest lines. See
+[LOGGER_ARCHITECTURE.md](LOGGER_ARCHITECTURE.md) for data flow and limits.
 
 ## Verification Boundary
 

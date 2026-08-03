@@ -13,11 +13,11 @@ struct SmartCarLoggerApp: App {
         }
         .commands {
             CommandGroup(after: .newItem) {
+                Button("Copy All Logs") { session.copyAllLogs() }
+                    .keyboardShortcut("c", modifiers: [.command, .shift])
+                    .disabled(session.loggerStatistics.storedLineCount == 0)
                 Button("刷新串口") { session.refreshPorts() }
                     .keyboardShortcut("r", modifiers: [.command, .option])
-                Button("保存日志...") { session.requestSave() }
-                    .keyboardShortcut("s", modifiers: [.command, .shift])
-                    .disabled(session.logText.isEmpty)
             }
         }
     }

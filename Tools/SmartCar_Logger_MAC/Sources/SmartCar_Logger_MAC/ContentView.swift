@@ -1,5 +1,4 @@
 import SwiftUI
-import UniformTypeIdentifiers
 
 struct ContentView: View {
     @Bindable var session: LoggerSession
@@ -13,16 +12,6 @@ struct ContentView: View {
             statusBar
         }
         .toolbar { toolbarActions }
-        .fileExporter(
-            isPresented: $session.saveRequest.isPresented,
-            document: LogDocument(text: session.logText),
-            contentType: .plainText,
-            defaultFilename: defaultFilename
-        ) { result in
-            if case .success(let url) = result {
-                try? session.save(to: url)
-            }
-        }
         .onAppear {
             session.refreshPorts()
             session.startPortScanning()
@@ -56,6 +45,12 @@ struct ContentView: View {
             .help("刷新串口设备")
 
             connectionButton
+            Picker("显示级别", selection: $session.displayLevel) {
+                ForEach(LogLevel.allCases, id: \.self) { level in
+                    Text(level.rawValue).tag(level)
+                }
+            }
+            .pickerStyle(.menu)
             Spacer()
         }
         .padding(.horizontal, 14)
@@ -80,58 +75,117 @@ struct ContentView: View {
     private var logViewer: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                Text(session.logText.isEmpty ? "等待 STM32 USART1 日志..." : session.logText)
-                    .font(.system(.body, design: .monospaced))
-                    .foregroundStyle(session.logText.isEmpty ? .secondary : .primary)
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .topLeading)
-                    .padding(14)
-                    .id("log")
+                LazyVStack(alignment: .leading, spacing: 2) {
+                    if session.visibleLogEntries.isEmpty {
+                        Text("等待 STM32 USART1 日志...")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(session.visibleLogEntries) { entry in
+                            logRow(entry)
+                        }
+                    }
+                }
+                .font(.system(.body, design: .monospaced))
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+                .padding(14)
             }
             .background(Color(nsColor: .textBackgroundColor))
-            .onChange(of: session.logText) {
+            .onChange(of: session.visibleLogEntries.last?.id) {
                 withAnimation(.easeOut(duration: 0.12)) {
-                    proxy.scrollTo("log", anchor: .bottom)
+                    if let id = session.visibleLogEntries.last?.id {
+                        proxy.scrollTo(id, anchor: .bottom)
+                    }
                 }
             }
         }
     }
 
+    private func logRow(_ entry: LogEntry) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(entry.level.rawValue)
+                .foregroundStyle(logLevelColor(entry.level))
+                .frame(width: 42, alignment: .leading)
+            Text(entry.message)
+                .foregroundStyle(.primary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .id(entry.id)
+    }
+
     private var statusBar: some View {
-        HStack(spacing: 10) {
-            Circle()
-                .fill(statusColor)
-                .frame(width: 8, height: 8)
-            Text(session.state.label)
-            Divider().frame(height: 14)
-            Text("\(session.receivedBytes.formatted()) bytes")
-                .monospacedDigit()
-            if let startedAt = session.startedAt {
-                Text("开始于 \(startedAt.formatted(date: .omitted, time: .shortened))")
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 10) {
+                Circle()
+                    .fill(statusColor)
+                    .frame(width: 8, height: 8)
+                Text(session.state.label)
+                Divider().frame(height: 14)
+                Text("\(session.receivedBytes.formatted()) bytes")
+                    .monospacedDigit()
+                Text("buffer \(session.loggerStatistics.storedLineCount)/\(session.loggerStatistics.capacity) (\(session.loggerStatistics.utilization, format: .percent.precision(.fractionLength(0))))")
+                    .monospacedDigit()
+                Text("dropped \(session.loggerStatistics.droppedLineCount)")
+                    .monospacedDigit()
+                if let startedAt = session.startedAt {
+                    Text("开始于 \(startedAt.formatted(date: .omitted, time: .shortened))")
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Text("仅查看")
                     .foregroundStyle(.secondary)
             }
-            Spacer()
-            Text("仅查看")
-                .foregroundStyle(.secondary)
+            HStack(spacing: 10) {
+                Text("RX \(session.lastReadByteCount) bytes")
+                    .monospacedDigit()
+                Text("fd \(session.fileDescriptor.map { String($0) } ?? "-")")
+                    .monospacedDigit()
+                Text(session.readSourceActive ? "source active" : "source inactive")
+                Text("read/s \(session.readCallsLastSecond)")
+                    .monospacedDigit()
+                if let lastReadAt = session.lastReadAt {
+                    Text("最近读取 \(lastReadAt.formatted(date: .omitted, time: .standard))")
+                        .foregroundStyle(.secondary)
+                }
+                if !session.lastReadHex.isEmpty {
+                    Text("HEX \(session.lastReadHex)")
+                        .font(.caption2.monospaced())
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
+                }
+            }
         }
         .font(.caption)
         .padding(.horizontal, 14)
-        .frame(height: 30)
+        .frame(minHeight: 46)
         .background(.bar)
     }
 
     @ToolbarContentBuilder private var toolbarActions: some ToolbarContent {
         ToolbarItemGroup(placement: .primaryAction) {
+            Button("Copy All Logs", systemImage: "doc.on.doc") {
+                session.copyAllLogs()
+            }
+            .help("Copy All Logs")
+            .disabled(session.loggerStatistics.storedLineCount == 0)
             Button { session.clearLog() } label: {
                 Image(systemName: "trash")
             }
             .help("清空日志")
-            .disabled(session.logText.isEmpty)
-            Button { session.requestSave() } label: {
-                Image(systemName: "square.and.arrow.down")
-            }
-            .help("保存日志")
-            .disabled(session.logText.isEmpty)
+            .disabled(session.loggerStatistics.storedLineCount == 0)
+        }
+    }
+
+    private func logLevelColor(_ level: LogLevel) -> Color {
+        switch level {
+        case .off: .secondary
+        case .debug: .secondary
+        case .trace: .secondary
+        case .info: .primary
+        case .warn: .orange
+        case .error: .red
         }
     }
 
@@ -144,25 +198,4 @@ struct ContentView: View {
         }
     }
 
-    private var defaultFilename: String {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "yyyyMMdd-HHmmss"
-        return "smartcar-usart1-\(formatter.string(from: Date()))"
-    }
-}
-
-struct LogDocument: FileDocument {
-    static var readableContentTypes: [UTType] { [.plainText] }
-    var text: String
-
-    init(text: String = "") { self.text = text }
-
-    init(configuration: ReadConfiguration) throws {
-        text = String(decoding: configuration.file.regularFileContents ?? Data(), as: UTF8.self)
-    }
-
-    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
-        FileWrapper(regularFileWithContents: Data(text.utf8))
-    }
 }

@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 import Observation
 
 @MainActor
@@ -6,20 +7,42 @@ import Observation
 final class LoggerSession {
     private(set) var ports: [SerialPortDescriptor] = []
     var selectedPortID: String = ""
+    var displayLevel: LogLevel = .info {
+        didSet {
+            publishVisibleLogEntries()
+        }
+    }
     private(set) var state: LoggerConnectionState = .disconnected
-    private(set) var logText = ""
+    private(set) var visibleLogEntries: [LogEntry] = []
+    private(set) var loggerStatistics = LoggerStatistics(
+        capacity: LoggerSession.defaultMaximumLogLines,
+        storedLineCount: 0,
+        droppedLineCount: 0
+    )
     private(set) var receivedBytes = 0
+    private(set) var lastReadByteCount = 0
+    private(set) var lastReadAt: Date?
+    private(set) var lastReadHex = ""
+    private(set) var fileDescriptor: Int32?
+    private(set) var readSourceActive = false
+    private(set) var readCallCount = 0
+    private(set) var readCallsLastSecond = 0
     private(set) var startedAt: Date?
-    var saveRequest = SaveRequest()
+
+    static let defaultMaximumLogLines = 500
+    static let serialBaudRate = 115_200
 
     private let serial = SerialPortService()
     private var decoder = UTF8StreamDecoder()
+    private var lineAssembler = LogLineAssembler()
+    private var logBuffer = LogRingBuffer<LogEntry>(capacity: LoggerSession.defaultMaximumLogLines)
     private var activeConnectionID: UUID?
-    private var pendingDisplayText = ""
     private var displayFlushScheduled = false
     private var portRefreshTimer: Timer?
+    private var readDiagnosticsTimer: Timer?
+    private var readCallsAtLastReport = 0
 
-    private let displayCharacterLimit = 2_000_000
+    private var nextLogID: UInt64 = 0
 
     init() {
         refreshPorts()
@@ -54,21 +77,43 @@ final class LoggerSession {
         disconnect()
         state = .connecting
         let connectionID = UUID()
+        // `SerialPortService.open` resumes its read source before it returns.
+        // Establish this connection first so reset-time bytes are not dropped.
+        decoder.reset()
+        lineAssembler.reset()
+        lastReadByteCount = 0
+        lastReadAt = nil
+        lastReadHex = ""
+        fileDescriptor = nil
+        readSourceActive = false
+        readCallCount = 0
+        readCallsLastSecond = 0
+        readCallsAtLastReport = 0
+        activeConnectionID = connectionID
         do {
-            try serial.open(
+            let openInfo = try serial.open(
                 path: port.path,
                 onData: { [weak self] data in
                     Task { @MainActor in self?.append(data: data, for: connectionID) }
+                },
+                onReadCall: { [weak self] in
+                    Task { @MainActor in self?.recordReadCall(for: connectionID) }
+                },
+                onDiagnostic: { [weak self] message in
+                    Task { @MainActor in self?.appendHostDiagnostic(message, level: .debug, for: connectionID) }
                 },
                 onError: { [weak self] message in
                     Task { @MainActor in self?.handleError(message, for: connectionID) }
                 }
             )
-            decoder.reset()
+            fileDescriptor = openInfo.fileDescriptor
+            readSourceActive = openInfo.readSourceActive
             startedAt = Date()
-            activeConnectionID = connectionID
             state = .connected
+            appendHostDiagnostic("OPEN fd=\(openInfo.fileDescriptor) read_source_active=\(openInfo.readSourceActive)", level: .info)
+            startReadDiagnostics()
         } catch {
+            activeConnectionID = nil
             state = .failed(error.localizedDescription)
         }
     }
@@ -76,40 +121,108 @@ final class LoggerSession {
     func disconnect() {
         activeConnectionID = nil
         serial.close()
+        readDiagnosticsTimer?.invalidate()
+        readDiagnosticsTimer = nil
+        fileDescriptor = nil
+        readSourceActive = false
         if state != .disconnected {
             state = .disconnected
         }
     }
 
     func clearLog() {
-        logText = ""
+        logBuffer.removeAll()
+        visibleLogEntries = []
+        updateLoggerStatistics()
         receivedBytes = 0
-        pendingDisplayText = ""
+        lastReadByteCount = 0
+        lastReadAt = nil
+        lastReadHex = ""
+        readCallCount = 0
+        readCallsLastSecond = 0
+        readCallsAtLastReport = 0
         decoder.reset()
+        lineAssembler.reset()
     }
 
-    func requestSave() {
-        flushDisplay()
-        saveRequest = SaveRequest(isPresented: true)
-    }
+    /// Copies one bounded snapshot of the Ring Buffer to the macOS clipboard.
+    /// The exported text is intentionally assembled locally and is not retained.
+    func copyAllLogs() {
+        let entries = logBuffer.elements
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let header = [
+            "时间: \(formatter.string(from: Date()))",
+            "串口: \(selectedPort?.path ?? "未选择")",
+            "波特率: \(Self.serialBaudRate)",
+            "当前buffer数量: \(entries.count)",
+            "dropped数量: \(logBuffer.droppedCount)",
+            ""
+        ]
+        let content = header + entries.map(\.message)
+        let exportText = content.joined(separator: "\n")
 
-    func save(to url: URL) throws {
-        flushDisplay()
-        try Data(logText.utf8).write(to: url, options: .atomic)
-        saveRequest = SaveRequest()
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        _ = pasteboard.setString(exportText, forType: .string)
     }
 
     private func append(data: Data, for connectionID: UUID) {
         guard activeConnectionID == connectionID else { return }
         receivedBytes += data.count
-        pendingDisplayText.append(decoder.decode(data))
+        lastReadByteCount = data.count
+        lastReadAt = Date()
+        lastReadHex = Self.hexPreview(data)
+        let lines = lineAssembler.append(decoder.decode(data))
+        for line in lines {
+            appendLine(line, level: LogLevel.inferred(from: line))
+        }
         scheduleDisplayFlush()
+    }
+
+    private func recordReadCall(for connectionID: UUID) {
+        guard activeConnectionID == connectionID else { return }
+        readCallCount += 1
+    }
+
+    private func startReadDiagnostics() {
+        readDiagnosticsTimer?.invalidate()
+        readCallsAtLastReport = readCallCount
+        readDiagnosticsTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.reportReadDiagnostics() }
+        }
+    }
+
+    private func reportReadDiagnostics() {
+        let calls = readCallCount - readCallsAtLastReport
+        readCallsAtLastReport = readCallCount
+        readCallsLastSecond = calls
+        appendHostDiagnostic("READ_CALLS last_1s=\(calls) total=\(readCallCount)", level: .debug)
+    }
+
+    private func appendHostDiagnostic(_ message: String, level: LogLevel, for connectionID: UUID? = nil) {
+        if let connectionID, activeConnectionID != connectionID { return }
+        flushDisplay()
+        appendLine("[LOGGER] \(message)", level: level)
+        publishVisibleLogEntries()
+    }
+
+    private static func hexPreview(_ data: Data) -> String {
+        let preview = data.prefix(64)
+            .map { String(format: "%02X", $0) }
+            .joined(separator: " ")
+        return data.count > 64 ? "\(preview) ..." : preview
     }
 
     private func handleError(_ message: String, for connectionID: UUID) {
         guard activeConnectionID == connectionID else { return }
         activeConnectionID = nil
         serial.close()
+        readDiagnosticsTimer?.invalidate()
+        readDiagnosticsTimer = nil
+        fileDescriptor = nil
+        readSourceActive = false
+        appendHostDiagnostic("READ_ERROR \(message)", level: .error)
         state = .failed(message)
     }
 
@@ -124,19 +237,26 @@ final class LoggerSession {
 
     private func flushDisplay() {
         displayFlushScheduled = false
-        guard !pendingDisplayText.isEmpty else { return }
-        logText.append(pendingDisplayText)
-        pendingDisplayText = ""
-
-        guard logText.count > displayCharacterLimit else { return }
-        let retainedCount = displayCharacterLimit - 96
-        let start = logText.index(logText.endIndex, offsetBy: -retainedCount)
-        logText = "[Earlier log output discarded to keep the viewer responsive.]\n" + String(logText[start...])
+        publishVisibleLogEntries()
     }
-}
 
-struct SaveRequest: Equatable {
-    var isPresented = false
+    private func appendLine(_ message: String, level: LogLevel) {
+        nextLogID &+= 1
+        logBuffer.append(LogEntry(id: nextLogID, level: level, message: message))
+    }
+
+    private func publishVisibleLogEntries() {
+        visibleLogEntries = logBuffer.elements.filter { displayLevel.includes($0.level) }
+        updateLoggerStatistics()
+    }
+
+    private func updateLoggerStatistics() {
+        loggerStatistics = LoggerStatistics(
+            capacity: logBuffer.capacity,
+            storedLineCount: logBuffer.count,
+            droppedLineCount: logBuffer.droppedCount
+        )
+    }
 }
 
 struct UTF8StreamDecoder {
