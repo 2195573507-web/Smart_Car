@@ -13,6 +13,9 @@ The logger emits one normalized line through the existing USART1 BSP logger:
 [BOOT][MODULE] STATUS t=<elapsed>ms
 ```
 
+The terminal `SYSTEM/READY` event is rendered as
+`[BOOT][SYSTEM] READY total=<elapsed>ms`.
+
 The public API is:
 
 ```c
