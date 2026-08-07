@@ -14,9 +14,9 @@ or runtime behavior.
 | Audit root, submodule, worktree, and nested Git metadata | Complete | `GIT_AUDIT_REPORT.md` |
 | Add ignore rules and Git workflow documentation | Complete | `.gitignore`, `docs/development/git_workflow.md` |
 | Remove exact nested Git metadata locations | Complete | Only root `.git` remains; metadata archived outside the workspace |
-| Stage intended unified content and verify ignores | Pending | `git status --ignored`, staged diff |
-| Create requested root commit | Pending | Commit hash and `GIT_MIGRATION_REPORT.md` |
-| Final one-repository verification | Pending | `find . -name .git`, submodule/worktree checks |
+| Stage intended unified content and verify ignores | Complete | Root ignore checks cover build, SDK, Apple, ROS2, cache, and temporary material |
+| Create requested root commit | Complete | `6de387a` (`chore: initialize unified Smart_Car repository`) |
+| Final one-repository verification | Complete | `GIT_MIGRATION_REPORT.md`; one `.git`, no submodules, one worktree |
 
 ## Safety Rules
 
