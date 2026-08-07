@@ -1,0 +1,5 @@
+menu "YDLIDAR X3PRO radar test configuration"
+
+comment "UART1 and M_CTR PWM pins and rates are fixed in main/radar/radar_uart.h"
+
+endmenu

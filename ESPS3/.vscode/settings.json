@@ -1,0 +1,28 @@
+{
+  "idf.espIdfPath": "/Users/zhiqin/.espressif/v5.5.4/esp-idf",
+  "idf.toolsPath": "/Users/zhiqin/.espressif/tools",
+  "idf.pythonBinPath": "/Users/zhiqin/.espressif/tools/python/v5.5.4/venv/bin/python",
+  "idf.pythonInstallPath": "/Users/zhiqin/.espressif/tools/python/v5.5.4/venv/bin/python",
+  "idf.adapterTargetName": "esp32c5",
+  "idf.currentSetup": "/Users/zhiqin/.espressif/v5.5.4/esp-idf",
+  "idf.port": "/dev/tty.usbmodem5B901601171",
+  "idf.customExtraVars": {},
+  "idf.customExtraPaths": [
+    "/opt/homebrew/bin",
+    "/opt/homebrew/sbin",
+    "/Users/zhiqin/.espressif/tools/ninja/1.12.1"
+  ],
+  "terminal.integrated.env.osx": {
+    "PATH": "/opt/homebrew/bin:/opt/homebrew/sbin:${env:PATH}"
+  },
+  "clangd.path": "/Users/zhiqin/.espressif/tools/esp-clang/esp-19.1.2_20250312/esp-clang/bin/clangd",
+  "clangd.arguments": [
+    "--background-index",
+    "--query-driver=**",
+    "--compile-commands-dir=/Users/zhiqin/Projects/ESP32-Project/Mic/build"
+  ],
+  "idf.flashType": "JTAG",
+  "idf.openOcdConfigs": [
+    "board/esp32c5-builtin.cfg"
+  ]
+}

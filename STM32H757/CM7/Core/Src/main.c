@@ -21,6 +21,13 @@
 #include "bsp_uart.h"
 #include "boot_log.h"
 #include "imu_runtime.h"
+#include "uart_link.h"
+#include "s3_service.h"
+#include "log_service.h"
+#include "rtos_health.h"
+#include "stm32h7xx_it.h"
+
+#include <stdio.h>
 
 #include "FreeRTOS.h"
 #include "task.h"
@@ -76,6 +83,51 @@ static void MX_TIM2_Init(void);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
+static void report_retained_fault(void)
+{
+  const volatile fault_record_t *record;
+  char line[64];
+
+  if (!fault_record_is_valid()) {
+    return;
+  }
+  record = fault_record_get();
+  LOG_ERROR("FAULT DETECTED");
+  (void)snprintf(line, sizeof(line), "PC=0x%08lX",
+                 (unsigned long)record->pc);
+  LOG_ERROR(line);
+  (void)snprintf(line, sizeof(line), "LR=0x%08lX",
+                 (unsigned long)record->lr);
+  LOG_ERROR(line);
+  (void)snprintf(line, sizeof(line), "CFSR=0x%08lX",
+                 (unsigned long)record->cfsr);
+  LOG_ERROR(line);
+  (void)snprintf(line, sizeof(line), "HFSR=0x%08lX",
+                 (unsigned long)record->hfsr);
+  LOG_ERROR(line);
+  fault_record_clear();
+}
+
+static void report_retained_rtos_health(void)
+{
+  rtos_health_snapshot_t snapshot;
+  char line[SMARTCAR_LOG_MAX_PAYLOAD + 1U];
+
+  if (!rtos_health_has_fatal_event() ||
+      !rtos_health_get_snapshot(&snapshot)) {
+    return;
+  }
+  (void)snprintf(line, sizeof(line),
+                 "[FAULT_PREVIOUS_BOOT] RTOS FAULT event=%u task=%s stack_overflow=%lu "
+                 "malloc_failed=%lu",
+                 (unsigned)snapshot.last_event,
+                 snapshot.last_task_name,
+                 (unsigned long)snapshot.stack_overflow_count,
+                 (unsigned long)snapshot.malloc_failed_count);
+  LOG_ERROR(line);
+  rtos_health_clear();
+}
+
 /* USER CODE END 0 */
 
 /**
@@ -106,10 +158,11 @@ int main(void)
 
   /* USER CODE BEGIN Init */
 
-  /* USER CODE END Init */
-
   boot_log_start();
+  log_service_init();
   boot_log("SYSTEM", "START");
+
+  /* USER CODE END Init */
 
   /* Configure the system clock */
   SystemClock_Config();
@@ -121,27 +174,29 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   boot_log("GPIO", "OK");
-  MX_I2C4_Init();
-  MX_TIM1_Init();
-  MX_TIM3_Init();
-  MX_TIM2_Init();
   /* USART1 owns PA9/PA10 for the CH340 debug adapter; initialize it last. */
   MX_USART1_UART_Init();
+  uart_link_init();
   /* USER CODE BEGIN 2 */
 
   if (bsp_uart_init(BSP_UART_USART1, 115200U) == BSP_STATUS_OK) {
     boot_log_uart_ready();
     boot_log("UART", "OK");
-    (void)uart_log_write(HAL_GPIO_ReadPin(BMI323_CS_GPIO_Port, BMI323_CS_Pin) == GPIO_PIN_SET
-                             ? "BMI323 CS EARLY INIT HIGH\r\n"
-                             : "BMI323 CS EARLY INIT LOW\r\n",
-                         100U);
-    (void)uart_log_write("SMART CAR H757 BOOT\r\n", 100U);
-    (void)uart_log_write("USART1 DEBUG READY\r\n", 100U);
   }
+
+  log_service_start();
+  report_retained_fault();
+  report_retained_rtos_health();
+
+  MX_I2C4_Init();
+  MX_TIM1_Init();
+  MX_TIM3_Init();
+  MX_TIM2_Init();
   imu_runtime_start();
   boot_log("RTOS", "READY");
   boot_log("SYSTEM", "READY");
+  uart_link_task_start();
+  s3_service_start();
   vTaskStartScheduler();
 
   /* USER CODE END 2 */

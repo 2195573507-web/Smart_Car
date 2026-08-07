@@ -1,0 +1,3 @@
+config load /Users/zhiqin/Projects/Smart_Car/STM32H757/Smart_Car_H757.ioc
+project generate
+exit

@@ -1,0 +1,5 @@
+menu "YDLIDAR X3PRO radar test configuration"
+
+comment "UART1 RX GPIO44 and M_CTR PWM GPIO4 are fixed in main/radar/radar_uart.h; STM UART2 uses GPIO17/18"
+
+endmenu

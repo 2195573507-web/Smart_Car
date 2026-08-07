@@ -18,16 +18,23 @@ project(${CMAKE_PROJECT_NAME})
 add_executable(${CMAKE_PROJECT_NAME})
 include("mx-generated.cmake")
 
-# Project-owned IMU sources. CubeMX IOC and generated source lists remain unchanged.
+# Project-owned sources. CubeMX IOC and generated source lists remain unchanged.
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/../Drivers/IMU/BMI323/bmi323.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../Drivers/IMU/LSM303/lsm303.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../Middleware/Sensor/imu_manager.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../Middleware/Calibration/imu_calibration.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../Middleware/Calibration/imu_vibration.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../Middleware/Calibration/imu_boot_manager.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../Middleware/Filter/imu_filter.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../Middleware/Sensor/Magnetometer/mag_filter.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../Middleware/Attitude/attitude.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../Middleware/Boot/boot_log.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../Application/RTOS/imu_runtime.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../Middleware/Communication/UART_Link/uart_link.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../Middleware/Communication/SmartCar_Frame/sc_frame.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../Middleware/Communication/Services/s3_service.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../Middleware/Communication/Services/log_service.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../System/Task/rtos_health.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../Middleware/FreeRTOS/tasks.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../Middleware/FreeRTOS/list.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../Middleware/FreeRTOS/queue.c
@@ -35,14 +42,19 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../Middleware/FreeRTOS/portable/GCC/ARM_CM7/r0p1/port.c
 )
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../Middleware/Communication/UART_Link
+    ${CMAKE_CURRENT_SOURCE_DIR}/../Middleware/Communication/SmartCar_Frame
+    ${CMAKE_CURRENT_SOURCE_DIR}/../Middleware/Communication/Services
     ${CMAKE_CURRENT_SOURCE_DIR}/../Drivers/IMU/BMI323
     ${CMAKE_CURRENT_SOURCE_DIR}/../Drivers/IMU/LSM303
     ${CMAKE_CURRENT_SOURCE_DIR}/../Middleware/Sensor
     ${CMAKE_CURRENT_SOURCE_DIR}/../Middleware/Calibration
     ${CMAKE_CURRENT_SOURCE_DIR}/../Middleware/Filter
+    ${CMAKE_CURRENT_SOURCE_DIR}/../Middleware/Sensor/Magnetometer
     ${CMAKE_CURRENT_SOURCE_DIR}/../Middleware/Attitude
     ${CMAKE_CURRENT_SOURCE_DIR}/../Middleware/Boot
     ${CMAKE_CURRENT_SOURCE_DIR}/../Application/RTOS
+    ${CMAKE_CURRENT_SOURCE_DIR}/../System/Task
     ${CMAKE_CURRENT_SOURCE_DIR}/../Middleware/FreeRTOS/include
     ${CMAKE_CURRENT_SOURCE_DIR}/../Middleware/FreeRTOS/portable/GCC/ARM_CM7/r0p1
     ${CMAKE_CURRENT_SOURCE_DIR}/../Config

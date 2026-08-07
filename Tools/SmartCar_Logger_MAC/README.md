@@ -14,7 +14,7 @@ viewer: it does not expose controls and has no API that writes serial bytes.
 - Streams UTF-8 USART1 output into a selectable monospaced log view.
 - Retains the latest 500 complete log lines in a bounded Ring Buffer, with
   `OFF`, `ERROR`, `WARN`, `INFO`, `DEBUG`, and `TRACE` display filtering. The
-  default is `INFO`; `TRACE` includes the complete serial diagnostics.
+  default is `INFO`; `TRACE` includes descriptor and termios diagnostics.
 
 The app does not alter or link with `STM32H757`, `ESPS3`, or `IOS_APP`.
 

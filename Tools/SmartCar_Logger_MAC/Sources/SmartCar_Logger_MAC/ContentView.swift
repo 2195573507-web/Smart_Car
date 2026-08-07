@@ -141,8 +141,6 @@ struct ContentView: View {
                 Text("fd \(session.fileDescriptor.map { String($0) } ?? "-")")
                     .monospacedDigit()
                 Text(session.readSourceActive ? "source active" : "source inactive")
-                Text("read/s \(session.readCallsLastSecond)")
-                    .monospacedDigit()
                 if let lastReadAt = session.lastReadAt {
                     Text("最近读取 \(lastReadAt.formatted(date: .omitted, time: .standard))")
                         .foregroundStyle(.secondary)

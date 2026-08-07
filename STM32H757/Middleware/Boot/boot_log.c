@@ -4,14 +4,13 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "bsp_uart.h"
 #include "main.h"
+#include "log_service.h"
 
 #define BOOT_LOG_QUEUE_DEPTH    16U
 #define BOOT_LOG_MODULE_LENGTH  16U
 #define BOOT_LOG_STATUS_LENGTH  64U
 #define BOOT_LOG_LINE_LENGTH    128U
-#define BOOT_LOG_TIMEOUT_MS     100U
 
 typedef struct
 {
@@ -46,14 +45,18 @@ static void boot_log_emit(const char *module, const char *status,
     if (module == NULL || status == NULL) {
         return;
     }
-    if (strcmp(module, "SYSTEM") == 0 && strcmp(status, "READY") == 0) {
-        (void)snprintf(line, sizeof(line), "[BOOT][SYSTEM] READY total=%lums\r\n",
-                       (unsigned long)elapsed_ms);
-    } else {
-        (void)snprintf(line, sizeof(line), "[BOOT][%s] %s t=%lums\r\n",
-                       module, status, (unsigned long)elapsed_ms);
+    (void)snprintf(line, sizeof(line), "BOOT[%s] %s t=%lums",
+                   module, status, (unsigned long)elapsed_ms);
+    if (strcmp(module, "SYSTEM") == 0 && strcmp(status, "START") == 0) {
+        (void)snprintf(line, sizeof(line), "BOOT_START");
+    } else if (strcmp(module, "SYSTEM") == 0 && strcmp(status, "READY") == 0) {
+        (void)snprintf(line, sizeof(line), "BOOT_READY");
+    } else if (strcmp(module, "LSM303") == 0 && strcmp(status, "INIT OK") == 0) {
+        (void)snprintf(line, sizeof(line), "LSM303_INIT_OK");
+    } else if (strcmp(module, "LSM303") == 0 && strcmp(status, "INIT FAIL") == 0) {
+        (void)snprintf(line, sizeof(line), "LSM303_INIT_FAIL");
     }
-    (void)uart_log_write(line, BOOT_LOG_TIMEOUT_MS);
+    LOG_INFO(line);
 }
 
 void boot_log_start(void)

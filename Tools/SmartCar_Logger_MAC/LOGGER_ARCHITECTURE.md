@@ -45,7 +45,7 @@ Each line has one presentation level: `DEBUG`, `INFO`, `WARN`, or `ERROR`.
 Leading forms such as `[ERROR]`, `ERROR:`, `[WARN]`, `WARN:`, `[DEBUG]`, and
 `DEBUG:` are recognized case-insensitively. Lines without a recognized prefix
 remain unchanged and are presented as `INFO`. Logger-originated open events
-are `INFO`, periodic read diagnostics are `DEBUG`, and reader errors are
+are `INFO`, descriptor/termios diagnostics are `DEBUG`, and reader errors are
 `ERROR`.
 
 Level classification changes only the local UI treatment. The stored message

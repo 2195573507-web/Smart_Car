@@ -1,0 +1,58 @@
+# STM32 and CMake build outputs
+**/Debug/
+**/Release/
+**/build/
+**/build-*/
+**/CMakeFiles/
+**/CMakeCache.txt
+**/cmake_install.cmake
+**/compile_commands.json
+*.elf
+*.hex
+*.bin
+*.map
+*.o
+*.d
+*.su
+*.lst
+
+# ESP-IDF generated configuration and outputs
+**/sdkconfig
+**/sdkconfig.*
+!**/sdkconfig.defaults
+!**/sdkconfig.defaults.*
+
+# Apple and SwiftPM
+**/DerivedData/
+**/.build/
+**/xcuserdata/
+*.xcuserstate
+
+# ROS2 generated workspaces
+**/install/
+**/log/
+
+# JavaScript and Python dependency/cache output
+**/node_modules/
+**/.cache/
+**/.superpowers/
+**/__pycache__/
+*.py[cod]
+
+# Packaged application output
+**/dist/
+**/*.app/
+
+# Generated analysis material and temporary files
+.analysis_extract/
+
+# External vendor archives, manuals, and training media are retained locally
+# as reference material but are not unified source-repository content.
+资料/
+
+.DS_Store
+Thumbs.db
+*.tmp
+*.log
+screenlog.*
+*.swp

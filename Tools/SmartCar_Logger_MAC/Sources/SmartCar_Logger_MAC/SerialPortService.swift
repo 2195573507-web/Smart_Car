@@ -10,7 +10,6 @@ final class SerialPortService: @unchecked Sendable {
     private let queue = DispatchQueue(label: "com.smartcar.logger.serial", qos: .userInitiated)
     private var fileDescriptor: Int32 = -1
     private var source: DispatchSourceRead?
-    private var pollingTimer: DispatchSourceTimer?
     private var dataHandler: (@Sendable (Data) -> Void)?
     private var diagnosticHandler: (@Sendable (String) -> Void)?
     private var errorHandler: (@Sendable (String) -> Void)?
@@ -18,7 +17,6 @@ final class SerialPortService: @unchecked Sendable {
     func open(
         path: String,
         onData: @escaping @Sendable (Data) -> Void,
-        onReadCall: @escaping @Sendable () -> Void,
         onDiagnostic: @escaping @Sendable (String) -> Void,
         onError: @escaping @Sendable (String) -> Void
     ) throws -> SerialPortOpenInfo {
@@ -47,22 +45,10 @@ final class SerialPortService: @unchecked Sendable {
 
             let readSource = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
             readSource.setEventHandler { [weak self] in
-                onReadCall()
                 self?.readAvailableBytes()
             }
             source = readSource
             readSource.resume()
-
-            // Temporary diagnostic path: exercise read(2) independently of the
-            // dispatch source so that missing events can be separated from an
-            // empty/non-responsive serial device.
-            let timer = DispatchSource.makeTimerSource(queue: queue)
-            timer.schedule(deadline: .now() + .milliseconds(100), repeating: .milliseconds(100))
-            timer.setEventHandler { [weak self] in
-                self?.pollReadOnce()
-            }
-            pollingTimer = timer
-            timer.resume()
             return SerialPortOpenInfo(fileDescriptor: fd, readSourceActive: true)
         }
     }
@@ -106,8 +92,7 @@ final class SerialPortService: @unchecked Sendable {
                 dataHandler?(Data(buffer[0..<count]))
             } else if count == 0 {
                 // With VMIN=0/VTIME=0 and O_NONBLOCK, zero means that no byte
-                // is currently available; it is not sufficient evidence of a
-                // hangup. The polling path records this result explicitly.
+                // is currently available; wait for the next dispatch event.
                 return
             } else if errno == EAGAIN || errno == EWOULDBLOCK {
                 return
@@ -118,22 +103,6 @@ final class SerialPortService: @unchecked Sendable {
                 closeLocked()
                 return
             }
-        }
-    }
-
-    private func pollReadOnce() {
-        guard fileDescriptor >= 0 else { return }
-        var buffer = [UInt8](repeating: 0, count: 4096)
-        let count = Darwin.read(fileDescriptor, &buffer, buffer.count)
-        let readErrno: Int32 = count < 0 ? errno : 0
-        let errnoText = readErrno == 0 ? "OK" : String(cString: strerror(readErrno))
-        diagnosticHandler?("POLL_READ fd=\(fileDescriptor) result=\(count) errno=\(readErrno) (\(errnoText))")
-
-        if count > 0 {
-            dataHandler?(Data(buffer[0..<count]))
-        } else if count < 0 && readErrno != EAGAIN && readErrno != EWOULDBLOCK {
-            errorHandler?(String(format: "串口读取失败：%@", errnoText))
-            closeLocked()
         }
     }
 
@@ -180,8 +149,6 @@ final class SerialPortService: @unchecked Sendable {
 
     // All descriptor and dispatch-source ownership remains on `queue`.
     private func closeLocked() {
-        pollingTimer?.cancel()
-        pollingTimer = nil
         source?.cancel()
         source = nil
         if fileDescriptor >= 0 {

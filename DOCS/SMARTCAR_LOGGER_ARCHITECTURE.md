@@ -34,20 +34,19 @@ OFF -> ERROR -> WARN -> INFO -> DEBUG -> TRACE
 ```
 
 The default level is `INFO`, so normal device log output is visible while
-internal reader diagnostics remain hidden. The following internal diagnostic
-labels are hidden at the default level:
+descriptor and termios diagnostics remain hidden. The remaining internal
+diagnostic labels are hidden at the default level:
 
 ```text
-POLL_READ
 FD_STATUS
 TERMIOS
-READ_CALLS
 ```
 
-`TRACE` preserves the complete serial diagnostic stream, including all of the
-internal labels above. `OFF` suppresses all displayed lines. Filtering is a
-display-stage operation after the reader thread and Ring Buffer, so it does
-not stop UART reads, alter RX ownership, or change the fixed 500-line buffer.
+`TRACE` preserves the complete serial diagnostic stream, including the
+descriptor and termios labels above. `OFF` suppresses all displayed lines.
+Filtering is a display-stage operation after the reader thread and Ring Buffer,
+so it does not stop UART reads, alter RX ownership, or change the fixed
+500-line buffer.
 
 ## Ownership Boundaries
 

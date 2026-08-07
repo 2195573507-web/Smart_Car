@@ -25,8 +25,6 @@ final class LoggerSession {
     private(set) var lastReadHex = ""
     private(set) var fileDescriptor: Int32?
     private(set) var readSourceActive = false
-    private(set) var readCallCount = 0
-    private(set) var readCallsLastSecond = 0
     private(set) var startedAt: Date?
 
     static let defaultMaximumLogLines = 500
@@ -39,9 +37,6 @@ final class LoggerSession {
     private var activeConnectionID: UUID?
     private var displayFlushScheduled = false
     private var portRefreshTimer: Timer?
-    private var readDiagnosticsTimer: Timer?
-    private var readCallsAtLastReport = 0
-
     private var nextLogID: UInt64 = 0
 
     init() {
@@ -86,18 +81,12 @@ final class LoggerSession {
         lastReadHex = ""
         fileDescriptor = nil
         readSourceActive = false
-        readCallCount = 0
-        readCallsLastSecond = 0
-        readCallsAtLastReport = 0
         activeConnectionID = connectionID
         do {
             let openInfo = try serial.open(
                 path: port.path,
                 onData: { [weak self] data in
                     Task { @MainActor in self?.append(data: data, for: connectionID) }
-                },
-                onReadCall: { [weak self] in
-                    Task { @MainActor in self?.recordReadCall(for: connectionID) }
                 },
                 onDiagnostic: { [weak self] message in
                     Task { @MainActor in self?.appendHostDiagnostic(message, level: .debug, for: connectionID) }
@@ -111,7 +100,6 @@ final class LoggerSession {
             startedAt = Date()
             state = .connected
             appendHostDiagnostic("OPEN fd=\(openInfo.fileDescriptor) read_source_active=\(openInfo.readSourceActive)", level: .info)
-            startReadDiagnostics()
         } catch {
             activeConnectionID = nil
             state = .failed(error.localizedDescription)
@@ -121,8 +109,6 @@ final class LoggerSession {
     func disconnect() {
         activeConnectionID = nil
         serial.close()
-        readDiagnosticsTimer?.invalidate()
-        readDiagnosticsTimer = nil
         fileDescriptor = nil
         readSourceActive = false
         if state != .disconnected {
@@ -138,9 +124,6 @@ final class LoggerSession {
         lastReadByteCount = 0
         lastReadAt = nil
         lastReadHex = ""
-        readCallCount = 0
-        readCallsLastSecond = 0
-        readCallsAtLastReport = 0
         decoder.reset()
         lineAssembler.reset()
     }
@@ -180,26 +163,6 @@ final class LoggerSession {
         scheduleDisplayFlush()
     }
 
-    private func recordReadCall(for connectionID: UUID) {
-        guard activeConnectionID == connectionID else { return }
-        readCallCount += 1
-    }
-
-    private func startReadDiagnostics() {
-        readDiagnosticsTimer?.invalidate()
-        readCallsAtLastReport = readCallCount
-        readDiagnosticsTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.reportReadDiagnostics() }
-        }
-    }
-
-    private func reportReadDiagnostics() {
-        let calls = readCallCount - readCallsAtLastReport
-        readCallsAtLastReport = readCallCount
-        readCallsLastSecond = calls
-        appendHostDiagnostic("READ_CALLS last_1s=\(calls) total=\(readCallCount)", level: .debug)
-    }
-
     private func appendHostDiagnostic(_ message: String, level: LogLevel, for connectionID: UUID? = nil) {
         if let connectionID, activeConnectionID != connectionID { return }
         flushDisplay()
@@ -218,8 +181,6 @@ final class LoggerSession {
         guard activeConnectionID == connectionID else { return }
         activeConnectionID = nil
         serial.close()
-        readDiagnosticsTimer?.invalidate()
-        readDiagnosticsTimer = nil
         fileDescriptor = nil
         readSourceActive = false
         appendHostDiagnostic("READ_ERROR \(message)", level: .error)

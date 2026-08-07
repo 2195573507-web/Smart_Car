@@ -1,0 +1,51 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "ESP-IDF Clean stale OpenOCD",
+      "type": "shell",
+      "command": "pkill -f openocd || true; for p in 3333 4444 6666; do PIDS=$(lsof -tiTCP:$p 2>/dev/null); [ -n \"$PIDS\" ] && kill -9 $PIDS || true; done; pkill -f riscv32-esp || true",
+      "problemMatcher": []
+    },
+    {
+      "label": "ESP-IDF Build ESP32-C5",
+      "type": "shell",
+      "command": "cd \"${workspaceFolder}\" && . /Users/zhiqin/.espressif/v5.5.4/esp-idf/export.sh && export PATH=\"/opt/homebrew/bin:/opt/homebrew/sbin:$PATH\" && idf.py set-target esp32c5 && idf.py build",
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "ESP-IDF Clean Build ESP32-C5",
+      "type": "shell",
+      "command": "cd \"${workspaceFolder}\" && . /Users/zhiqin/.espressif/v5.5.4/esp-idf/export.sh && export PATH=\"/opt/homebrew/bin:/opt/homebrew/sbin:$PATH\" && rm -rf build && idf.py set-target esp32c5 && idf.py build",
+      "problemMatcher": []
+    },
+    {
+      "label": "ESP-IDF Flash ESP32-C5",
+      "type": "shell",
+      "dependsOn": [
+        "ESP-IDF Clean stale OpenOCD"
+      ],
+      "command": "cd \"${workspaceFolder}\" && . /Users/zhiqin/.espressif/v5.5.4/esp-idf/export.sh && export PATH=\"/opt/homebrew/bin:/opt/homebrew/sbin:$PATH\" && PORT=$(ls /dev/cu.usbmodem* 2>/dev/null | head -n 1) && [ -n \"$PORT\" ] && idf.py -p \"$PORT\" flash",
+      "problemMatcher": []
+    },
+    {
+      "label": "ESP-IDF Monitor ESP32-C5",
+      "type": "shell",
+      "command": "cd \"${workspaceFolder}\" && . /Users/zhiqin/.espressif/v5.5.4/esp-idf/export.sh && export PATH=\"/opt/homebrew/bin:/opt/homebrew/sbin:$PATH\" && PORT=$(ls /dev/cu.usbmodem* 2>/dev/null | head -n 1) && [ -n \"$PORT\" ] && idf.py -p \"$PORT\" monitor",
+      "problemMatcher": []
+    },
+    {
+      "label": "ESP-IDF Flash Monitor ESP32-C5",
+      "type": "shell",
+      "dependsOn": [
+        "ESP-IDF Clean stale OpenOCD"
+      ],
+      "command": "cd \"${workspaceFolder}\" && . /Users/zhiqin/.espressif/v5.5.4/esp-idf/export.sh && export PATH=\"/opt/homebrew/bin:/opt/homebrew/sbin:$PATH\" && PORT=$(ls /dev/cu.usbmodem* 2>/dev/null | head -n 1) && [ -n \"$PORT\" ] && idf.py -p \"$PORT\" flash monitor",
+      "problemMatcher": []
+    }
+  ]
+}
