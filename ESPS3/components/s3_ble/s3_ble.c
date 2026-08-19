@@ -78,6 +78,7 @@ static uint16_t s_att_mtu = 23U;
 static volatile uint32_t s_ble_notify_fail_count;
 static s3_ble_rx_callback_t s_rx_callback;
 static void *s_rx_callback_context;
+static portMUX_TYPE s_rx_callback_lock = portMUX_INITIALIZER_UNLOCKED;
 static s3_ble_ready_callback_t s_ready_callback;
 static void *s_ready_callback_context;
 
@@ -191,6 +192,27 @@ static void update_ready_state(void)
     s_ble_state.ready = ready;
     if (became_ready && s_ready_callback != NULL) {
         s_ready_callback(s_ready_callback_context);
+    }
+}
+
+/* GATT owns the write buffer. The receiver must synchronously copy it into
+ * its queue, but callback registration itself can race BLE initialization. */
+static void s3_ble_dispatch_rx_write(const uint8_t *data, size_t length)
+{
+    s3_ble_rx_callback_t callback;
+    void *context;
+
+    if (data == NULL || length == 0U || length > S3_BLE_MAX_RX_LEN) {
+        return;
+    }
+
+    portENTER_CRITICAL(&s_rx_callback_lock);
+    callback = s_rx_callback;
+    context = s_rx_callback_context;
+    portEXIT_CRITICAL(&s_rx_callback_lock);
+
+    if (callback != NULL) {
+        callback(data, length, context);
     }
 }
 
@@ -339,12 +361,7 @@ static void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_
         break;
     case ESP_GATTS_WRITE_EVT:
         if (!param->write.is_prep && param->write.handle == s_handles[IDX_RX_VALUE]) {
-            uint16_t copy_len = param->write.len > S3_BLE_MAX_RX_LEN ?
-                                S3_BLE_MAX_RX_LEN : param->write.len;
-            ESP_LOGI(TAG, "[S3_BLE_RX] len=%u", (unsigned)copy_len);
-            if (s_rx_callback != NULL && copy_len != 0U) {
-                s_rx_callback(param->write.value, copy_len, s_rx_callback_context);
-            }
+            s3_ble_dispatch_rx_write(param->write.value, param->write.len);
         } else if (!param->write.is_prep && param->write.handle == s_handles[IDX_TX_CCC] &&
                    param->write.len >= sizeof(uint16_t)) {
             uint16_t ccc = (uint16_t)param->write.value[0] |
@@ -573,9 +590,17 @@ esp_err_t s3_ble_send(const uint8_t *data, uint16_t len)
     return s3_ble_notify_send(data, len);
 }
 
-esp_err_t s3_ble_set_rx_callback(s3_ble_rx_callback_t callback, void *context)
+esp_err_t s3_ble_register_rx_callback(s3_ble_rx_callback_t callback,
+                                      void *context)
 {
+    portENTER_CRITICAL(&s_rx_callback_lock);
     s_rx_callback = callback;
     s_rx_callback_context = context;
+    portEXIT_CRITICAL(&s_rx_callback_lock);
     return ESP_OK;
+}
+
+esp_err_t s3_ble_set_rx_callback(s3_ble_rx_callback_t callback, void *context)
+{
+    return s3_ble_register_rx_callback(callback, context);
 }

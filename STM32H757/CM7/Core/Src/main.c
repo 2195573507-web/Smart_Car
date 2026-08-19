@@ -32,6 +32,10 @@
 #include "FreeRTOS.h"
 #include "task.h"
 
+#ifndef SMARTCAR_BMI323_DEBUG_ONLY
+#define SMARTCAR_BMI323_DEBUG_ONLY 0
+#endif
+
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 
@@ -188,15 +192,21 @@ int main(void)
   report_retained_fault();
   report_retained_rtos_health();
 
+#if !SMARTCAR_BMI323_DEBUG_ONLY
   MX_I2C4_Init();
   MX_TIM1_Init();
   MX_TIM3_Init();
   MX_TIM2_Init();
+#else
+  boot_log("MODE", "BMI323 DEBUG ONLY");
+#endif
   imu_runtime_start();
   boot_log("RTOS", "READY");
   boot_log("SYSTEM", "READY");
   uart_link_task_start();
+#if !SMARTCAR_BMI323_DEBUG_ONLY
   s3_service_start();
+#endif
   vTaskStartScheduler();
 
   /* USER CODE END 2 */

@@ -15,12 +15,21 @@ enum SmartCarProtocol {
         case attitude = 0x11
         case imuCalibrationStatus = 0x12
         case imuCalibrationBias = 0x13
-            case radarPWMControl = 0x14
-            case radarStatus = 0x15
-            case pwmSet = 0x16
-            case pwmApplied = 0x17
-            case radarCalibrationStatus = 0x18
-            case pwmError = 0x19
+        case radarPWMControl = 0x14
+        case radarStatus = 0x15
+        case pwmSet = 0x16
+        case pwmApplied = 0x17
+        case radarVibrationStatus = 0x18
+        case pwmError = 0x19
+        case imuCalibrationResult = 0x25
+        case imuVibrationProfile = 0x26
+        case imuTelemetry = 0x27
+        case dualIMUStatus = 0x28
+
+        // Kept as a source-compatible alias for the former 0x18 query/status
+        // name. The wire type remains 0x18; payload length selects the
+        // legacy two-byte calibration status or the 17-byte vibration result.
+        static var radarCalibrationStatus: Self { .radarVibrationStatus }
 
         var displayName: String {
             switch self {
@@ -36,8 +45,12 @@ enum SmartCarProtocol {
             case .radarStatus: return "RADAR_STATUS"
             case .pwmSet: return "PWM_SET"
             case .pwmApplied: return "PWM_APPLIED"
-            case .radarCalibrationStatus: return "RADAR_CAL_STATUS"
+            case .radarVibrationStatus: return "RADAR_VIBRATION_STATUS"
             case .pwmError: return "PWM_ERROR"
+            case .imuCalibrationResult: return "IMU_CAL_RESULT"
+            case .imuVibrationProfile: return "IMU_VIBRATION_PROFILE"
+            case .imuTelemetry: return "IMU_TELEMETRY"
+            case .dualIMUStatus: return "DUAL_IMU_STATUS"
             }
         }
     }

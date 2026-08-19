@@ -39,9 +39,26 @@ esp_err_t s3_ble_set_ready_callback(s3_ble_ready_callback_t callback,
 /* Compatibility wrapper; new callers must use s3_ble_notify_send(). */
 esp_err_t s3_ble_send(const uint8_t *data, uint16_t len);
 
-/** Register the consumer for raw bytes written to the RX characteristic. */
+/**
+ * Register the consumer for raw bytes written to the RX characteristic.
+ *
+ * The callback runs in the Bluedroid GATT event context. It must copy the
+ * bytes before returning, avoid blocking, and only hand work to a task/queue;
+ * the input pointer is not valid after the callback returns.
+ */
 typedef void (*s3_ble_rx_callback_t)(const uint8_t *data, size_t len, void *context);
 
+/**
+ * Register the sole FFE1 write consumer.
+ *
+ * Registration only selects the transport handoff target. The receiver must
+ * remain valid for the life of the BLE service and must not parse frames or
+ * control hardware from the callback context.
+ */
+esp_err_t s3_ble_register_rx_callback(s3_ble_rx_callback_t callback,
+                                      void *context);
+
+/* Compatibility wrapper for callers using the original callback API. */
 esp_err_t s3_ble_set_rx_callback(s3_ble_rx_callback_t callback, void *context);
 
 #endif /* S3_BLE_H */

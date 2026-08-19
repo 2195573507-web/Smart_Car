@@ -15,6 +15,10 @@
 #define LOG_SERVICE_TASK_PRIORITY (tskIDLE_PRIORITY + 1U)
 #define LOG_SERVICE_HEALTH_PERIOD_MS UINT32_C(5000)
 
+#ifndef SMARTCAR_BMI323_DEBUG_ONLY
+#define SMARTCAR_BMI323_DEBUG_ONLY 0
+#endif
+
 typedef struct {
     uint8_t level;
     char text[SMARTCAR_LOG_MAX_PAYLOAD + 1U];
@@ -56,6 +60,7 @@ static void log_service_task(void *argument)
 
         if ((xTaskGetTickCount() - last_health_tick) >=
             pdMS_TO_TICKS(LOG_SERVICE_HEALTH_PERIOD_MS)) {
+#if !SMARTCAR_BMI323_DEBUG_ONLY
             rtos_health_snapshot_t snapshot;
             char line[SMARTCAR_LOG_MAX_PAYLOAD + 1U];
 
@@ -84,6 +89,9 @@ static void log_service_task(void *argument)
             (void)snprintf(line, sizeof(line), "LOG_STATS drop=%lu",
                            (unsigned long)s_log_drop_count);
             (void)bsp_uart_log_write_link_level(SMARTCAR_LOG_LEVEL_INFO, line);
+#else
+            last_health_tick = xTaskGetTickCount();
+#endif
         }
     }
 }

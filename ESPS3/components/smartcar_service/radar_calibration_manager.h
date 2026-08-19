@@ -6,7 +6,9 @@
 
 typedef enum
 {
-    RADAR_CAL_IDLE = 0,
+    RADAR_WAIT_SYNC = 0,
+    /* Source compatibility for the former idle state name. */
+    RADAR_CAL_IDLE = RADAR_WAIT_SYNC,
     RADAR_SET_PWM,
     RADAR_WAIT_ACK,
     RADAR_WAIT_EVENT,

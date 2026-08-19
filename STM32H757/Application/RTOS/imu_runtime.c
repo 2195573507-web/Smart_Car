@@ -3,28 +3,40 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 
 #include "FreeRTOS.h"
 #include "task.h"
 
 #include "attitude.h"
-#include "bsp_timer.h"
+#include "dual_ahrs.h"
 #include "boot_log.h"
 #include "imu_calibration.h"
 #include "imu_boot_manager.h"
 #include "imu_filter.h"
 #include "imu_manager.h"
+#include "imu_time.h"
 #include "mag_filter.h"
 #include "log_service.h"
+#include "s3_service.h"
+#include "sc_frame.h"
 
 #define IMU_RUNTIME_LOG_TIMEOUT_MS UINT32_C(100)
 #define IMU_DATA_PERIOD_MS         UINT32_C(100)
 #define IMU_STATUS_PERIOD_MS        UINT32_C(5000)
+#define IMU_TELEMETRY_TICK_MS       UINT32_C(10)
+#define IMU_TELEMETRY_IMU_PERIOD_MS UINT32_C(100)
+#define IMU_TELEMETRY_ATTITUDE_PERIOD_MS UINT32_C(50)
+#define IMU_DUAL_AHRS_LOG_PERIOD_MS  UINT32_C(1000)
 #define IMU_STACK_MONITOR_PERIOD_MS UINT32_C(5000)
 #define IMU_DATA_STACK_WORDS       UINT16_C(512)
 #define IMU_DATA_PRIORITY          (tskIDLE_PRIORITY + 1U)
 #define IMU_SAMPLE_PRIORITY        (tskIDLE_PRIORITY + 2U)
 #define IMU_RUNTIME_PI             3.14159265358979323846f
+#define RAD_TO_DEG                 57.295779513f
+#ifndef SMARTCAR_BMI323_DEBUG_ONLY
+#define SMARTCAR_BMI323_DEBUG_ONLY 0
+#endif
 #ifndef IMU_RUNTIME_ENABLE_RAW_DATA_LOG
 #define IMU_RUNTIME_ENABLE_RAW_DATA_LOG 0U
 #endif
@@ -32,6 +44,127 @@
 static volatile uint32_t imu_runtime_log_fail_count;
 static TaskHandle_t s_imu_task_handle;
 static TaskHandle_t s_imu_debug_task_handle;
+static uint8_t s_dual_attitude_payload[DUAL_AHRS_PAYLOAD_LENGTH];
+
+static void put_float_le(uint8_t *destination, float value)
+{
+    uint32_t bits = 0U;
+
+    (void)memcpy(&bits, &value, sizeof(bits));
+    destination[0] = (uint8_t)(bits & 0xFFU);
+    destination[1] = (uint8_t)((bits >> 8U) & 0xFFU);
+    destination[2] = (uint8_t)((bits >> 16U) & 0xFFU);
+    destination[3] = (uint8_t)(bits >> 24U);
+}
+
+static void put_u32_le(uint8_t *destination, uint32_t value)
+{
+    destination[0] = (uint8_t)(value & 0xFFU);
+    destination[1] = (uint8_t)((value >> 8U) & 0xFFU);
+    destination[2] = (uint8_t)((value >> 16U) & 0xFFU);
+    destination[3] = (uint8_t)(value >> 24U);
+}
+
+static void imu_send_telemetry(uint32_t now_ms, uint32_t *last_imu_ms,
+                               uint32_t *last_attitude_ms)
+{
+    lsm_accel_data_t accel = {0};
+    lsm_mag_data_t mag = {0};
+    attitude_state_t attitude = {0};
+
+    if (last_imu_ms != NULL &&
+        (uint32_t)(now_ms - *last_imu_ms) >= IMU_TELEMETRY_IMU_PERIOD_MS) {
+        uint8_t payload[38] = {0};
+        uint8_t lsm_payload[30] = {0};
+        uint8_t bmi_payload[30] = {0};
+        imu_raw_data_t snapshot = {0};
+        *last_imu_ms = now_ms;
+        (void)imu_manager_get_lsm_accel(&accel);
+        (void)imu_manager_get_lsm_mag(&mag);
+        payload[0] = 0x02U; /* LSM303 */
+        payload[1] = imu_manager_get_lsm303_online() != 0U ? 1U : 0U;
+        put_float_le(&payload[2], accel.ax);
+        put_float_le(&payload[6], accel.ay);
+        put_float_le(&payload[10], accel.az);
+        /* LSM303 is the active path; gyro fields remain explicit zeroes. */
+        put_float_le(&payload[26], mag.mx);
+        put_float_le(&payload[30], mag.my);
+        put_float_le(&payload[34], mag.mz);
+        s3_service_send_telemetry_frame(SC_TYPE_IMU_STATUS, payload,
+                                        (uint16_t)sizeof(payload));
+
+        if (imu_manager_get_snapshot(&snapshot) == BSP_STATUS_OK) {
+            /* New dual-IMU telemetry keeps the source and validity bits
+             * explicit. The legacy LSM status above remains untouched. */
+            lsm_payload[0] = IMU_SENSOR_LSM303;
+            lsm_payload[1] = (uint8_t)(
+                (snapshot.lsm_accel_valid != 0U
+                     ? SC_IMU_TELEMETRY_FLAG_ACCEL_VALID
+                     : 0U) |
+                (snapshot.lsm_mag_valid != 0U
+                     ? SC_IMU_TELEMETRY_FLAG_GYRO_OR_MAG_VALID
+                     : 0U) |
+                (snapshot.online != 0U ? SC_IMU_TELEMETRY_FLAG_ONLINE : 0U));
+            put_u32_le(&lsm_payload[2], snapshot.lsm_timestamp);
+            put_float_le(&lsm_payload[6], snapshot.lsm_ax);
+            put_float_le(&lsm_payload[10], snapshot.lsm_ay);
+            put_float_le(&lsm_payload[14], snapshot.lsm_az);
+            put_float_le(&lsm_payload[18], snapshot.lsm_mx);
+            put_float_le(&lsm_payload[22], snapshot.lsm_my);
+            put_float_le(&lsm_payload[26], snapshot.lsm_mz);
+            s3_service_send_telemetry_frame(SC_TYPE_IMU_TELEMETRY,
+                                            lsm_payload,
+                                            (uint16_t)sizeof(lsm_payload));
+
+            bmi_payload[0] = IMU_SENSOR_BMI323;
+            bmi_payload[1] = (uint8_t)(
+                (snapshot.bmi_accel_valid != 0U
+                     ? SC_IMU_TELEMETRY_FLAG_ACCEL_VALID
+                     : 0U) |
+                (snapshot.bmi_gyro_valid != 0U
+                     ? SC_IMU_TELEMETRY_FLAG_GYRO_OR_MAG_VALID
+                     : 0U) |
+                (bmi323_is_online() != 0U ? SC_IMU_TELEMETRY_FLAG_ONLINE : 0U));
+            put_u32_le(&bmi_payload[2], snapshot.bmi_timestamp);
+            put_float_le(&bmi_payload[6], snapshot.bmi_ax);
+            put_float_le(&bmi_payload[10], snapshot.bmi_ay);
+            put_float_le(&bmi_payload[14], snapshot.bmi_az);
+            put_float_le(&bmi_payload[18], snapshot.bmi_gx);
+            put_float_le(&bmi_payload[22], snapshot.bmi_gy);
+            put_float_le(&bmi_payload[26], snapshot.bmi_gz);
+            s3_service_send_telemetry_frame(SC_TYPE_IMU_TELEMETRY,
+                                            bmi_payload,
+                                            (uint16_t)sizeof(bmi_payload));
+        }
+    }
+
+    if (last_attitude_ms != NULL &&
+        (uint32_t)(now_ms - *last_attitude_ms) >=
+            IMU_TELEMETRY_ATTITUDE_PERIOD_MS) {
+        uint8_t payload[SC_ATTITUDE_PAYLOAD_LENGTH] = {0};
+        *last_attitude_ms = now_ms;
+        attitude = attitude_get_state();
+        /* AHRS state remains radians; only this wire serialization derives
+         * the display-oriented degree triplet. */
+        put_float_le(&payload[0], attitude.roll);
+        put_float_le(&payload[4], attitude.pitch);
+        put_float_le(&payload[8], attitude.yaw);
+        put_float_le(&payload[12], attitude.roll * RAD_TO_DEG);
+        put_float_le(&payload[16], attitude.pitch * RAD_TO_DEG);
+        put_float_le(&payload[20], attitude.yaw * RAD_TO_DEG);
+        put_u32_le(&payload[24], now_ms);
+        payload[28] = 0x01U; /* LSM303-derived AHRS */
+        payload[29] = attitude_get_status() == AHRS_READY ? 1U : 0U;
+        s3_service_send_telemetry_frame(SC_TYPE_ATTITUDE, payload,
+                                        (uint16_t)sizeof(payload));
+        if (dual_ahrs_pack_payload(s_dual_attitude_payload,
+                                   sizeof(s_dual_attitude_payload)) ==
+            (int)DUAL_AHRS_PAYLOAD_LENGTH) {
+            s3_service_send_dual_attitude(
+                s_dual_attitude_payload, DUAL_AHRS_PAYLOAD_LENGTH);
+        }
+    }
+}
 
 static void imu_runtime_log_event(smartcar_log_level_t level,
                                   const char *category,
@@ -60,21 +193,53 @@ static void imu_runtime_log_event(smartcar_log_level_t level,
 
 static void imu_runtime_log(const char *text)
 {
-    /* Raw/text diagnostics stay disabled; telemetry remains on 0x10/0x11/0x12. */
+    /* Raw/text diagnostics stay disabled; binary telemetry uses the SC frame. */
     (void)text;
 }
 
-static void imu_runtime_log_stack(const char *task_name, TaskHandle_t task)
+static UBaseType_t imu_runtime_stack_high_water(TaskHandle_t task)
 {
-    char line[80];
-    const UBaseType_t free_stack = task == NULL
-                                       ? 0U
-                                       : uxTaskGetStackHighWaterMark(task);
+    return task == NULL ? 0U : uxTaskGetStackHighWaterMark(task);
+}
+
+static void imu_runtime_log_resources(void)
+{
+    char line[SMARTCAR_LOG_MAX_PAYLOAD + 1U];
+    const TaskHandle_t bmi_task = xTaskGetHandle("bmi323_task");
 
     (void)snprintf(line, sizeof(line),
-                   "[TASK_STACK]\r\ntask=%s\r\nfree_stack=%lu\r\n",
-                   task_name == NULL ? "UNKNOWN" : task_name,
-                   (unsigned long)free_stack);
+                   "IMU_RES heap_free=%lu hwm_imu/dbg/bmi=%lu/%lu/%lu",
+                   (unsigned long)xPortGetFreeHeapSize(),
+                   (unsigned long)imu_runtime_stack_high_water(
+                       s_imu_task_handle),
+                   (unsigned long)imu_runtime_stack_high_water(
+                       s_imu_debug_task_handle),
+                   (unsigned long)imu_runtime_stack_high_water(bmi_task));
+    LOG_INFO(line);
+}
+
+static void imu_runtime_log_dual_ahrs(void)
+{
+    dual_ahrs_output_t output = {0};
+    char line[SMARTCAR_LOG_MAX_PAYLOAD + 1U];
+
+    dual_ahrs_get_output(&output);
+    if (output.state != DUAL_AHRS_STATE_READY &&
+        output.state != DUAL_AHRS_STATE_TRACKING) {
+        return;
+    }
+    (void)snprintf(
+        line, sizeof(line),
+        "[DUAL_AHRS] pri_deg=%.2f,%.2f,%.2f red_deg=%.2f,%.2f,%.2f diff_deg=%.2f,%.2f,%.2f",
+        (double)(output.primary.roll * RAD_TO_DEG),
+        (double)(output.primary.pitch * RAD_TO_DEG),
+        (double)(output.primary.yaw * RAD_TO_DEG),
+        (double)(output.redundant.roll * RAD_TO_DEG),
+        (double)(output.redundant.pitch * RAD_TO_DEG),
+        (double)(output.redundant.yaw * RAD_TO_DEG),
+        (double)(output.delta_rad.x * RAD_TO_DEG),
+        (double)(output.delta_rad.y * RAD_TO_DEG),
+        (double)(output.delta_rad.z * RAD_TO_DEG));
     LOG_INFO(line);
 }
 
@@ -186,7 +351,8 @@ static const char *imu_cal_state_name(imu_boot_state_t state)
 {
     switch (state) {
     case IMU_BOOT_INIT: return "IMU_BOOT_INIT";
-    case WAIT_RADAR_ZERO: return "WAIT_RADAR_ZERO";
+    case WAIT_SYNC: return "WAIT_SYNC";
+    case SYNCED: return "SYNCED";
     case STATIC_CAL_WAIT: return "STATIC_CAL_WAIT";
     case STATIC_CAL_SAMPLE: return "STATIC_CAL_SAMPLE";
     case STATIC_CAL_DONE: return "STATIC_CAL_DONE";
@@ -429,9 +595,16 @@ void imu_runtime_start(void)
     bsp_status_t init_status;
     BaseType_t task_status;
 
+#if !SMARTCAR_BMI323_DEBUG_ONLY
     attitude_init();
+    dual_ahrs_init();
+#endif
     imu_runtime_log("[INFO] IMU_INIT_BEGIN\r\n");
+#if SMARTCAR_BMI323_DEBUG_ONLY
+    imu_runtime_log_event(SMARTCAR_LOG_LEVEL_INFO, "BMI323 DEBUG", "BEGIN");
+#else
     imu_runtime_log_event(SMARTCAR_LOG_LEVEL_INFO, "IMU INIT", "BEGIN");
+#endif
     init_status = imu_init();
     (void)snprintf(init_status_line, sizeof(init_status_line),
                    "[INFO] IMU_INIT_DONE status=%d\r\n", (int)init_status);
@@ -441,8 +614,29 @@ void imu_runtime_start(void)
     imu_runtime_log_event(init_status == BSP_STATUS_OK
                               ? SMARTCAR_LOG_LEVEL_INFO
                               : SMARTCAR_LOG_LEVEL_ERROR,
+#if SMARTCAR_BMI323_DEBUG_ONLY
+                          init_status == BSP_STATUS_OK ? "BMI323 INIT" : "BMI323 ERROR",
+#else
                           init_status == BSP_STATUS_OK ? "IMU INIT" : "ERROR",
+#endif
                           init_status == BSP_STATUS_OK ? "COMPLETE" : init_status_line);
+
+#if SMARTCAR_BMI323_DEBUG_ONLY
+    const bsp_status_t bmi_task_status = imu_manager_start_bmi323_task();
+    if (bmi_task_status != BSP_STATUS_OK) {
+        boot_log("TASK", "BMI323_TASK CREATE FAIL");
+        imu_runtime_log("[INFO] BMI323 TASK CREATE FAIL\r\n");
+        imu_runtime_log_event(SMARTCAR_LOG_LEVEL_ERROR, "ERROR",
+                              "BMI323 TASK CREATE FAIL");
+    } else {
+        boot_log("TASK", "BMI323_TASK CREATE OK");
+        imu_runtime_log("[INFO] TASK_CREATE_OK task=bmi323_task\r\n");
+    }
+#else
+    /* DUAL_IMU_BOOT starts the independent BMI task only after both INIT
+     * workers have completed successfully. */
+    imu_runtime_log("[INFO] BMI323_TASK deferred=DUAL_IMU_INIT\r\n");
+#endif
 
     task_status = xTaskCreate(imu_task, "imu_task", IMU_DATA_STACK_WORDS,
                               NULL, IMU_SAMPLE_PRIORITY, &s_imu_task_handle);
@@ -471,29 +665,50 @@ void imu_runtime_start(void)
 
 void imu_debug_task(void *argument)
 {
+#if SMARTCAR_BMI323_DEBUG_ONLY
+    (void)argument;
+    /* BMI323 RAW diagnostics are emitted once during imu_init(). */
+    for (;;) {
+        vTaskDelay(portMAX_DELAY);
+    }
+#else
     TickType_t last_wake;
     uint32_t last_status_ms;
     uint32_t last_stack_monitor_ms;
+    uint32_t last_imu_telemetry_ms;
+    uint32_t last_attitude_telemetry_ms;
+    uint32_t last_dual_ahrs_log_ms;
 
     (void)argument;
     imu_runtime_log("[INFO] SCHEDULER_RUNNING\r\n");
     last_wake = xTaskGetTickCount();
-    last_status_ms = timer_get_ms();
+    last_status_ms = imu_time_now_ms();
     last_stack_monitor_ms = last_status_ms;
+    last_imu_telemetry_ms = last_status_ms;
+    last_attitude_telemetry_ms = last_status_ms;
+    last_dual_ahrs_log_ms = last_status_ms;
     for (;;) {
+        const uint32_t now_ms = imu_time_now_ms();
 #if IMU_RUNTIME_ENABLE_RAW_DATA_LOG
         imu_data_print();
 #endif
-        if ((uint32_t)(timer_get_ms() - last_status_ms) >= IMU_STATUS_PERIOD_MS) {
-            last_status_ms = timer_get_ms();
+        imu_send_telemetry(now_ms, &last_imu_telemetry_ms,
+                           &last_attitude_telemetry_ms);
+        if ((uint32_t)(now_ms - last_status_ms) >= IMU_STATUS_PERIOD_MS) {
+            last_status_ms = now_ms;
             imu_status_print();
         }
-        if ((uint32_t)(timer_get_ms() - last_stack_monitor_ms) >=
+        if ((uint32_t)(now_ms - last_stack_monitor_ms) >=
             IMU_STACK_MONITOR_PERIOD_MS) {
-            last_stack_monitor_ms = timer_get_ms();
-            imu_runtime_log_stack("imu_task", s_imu_task_handle);
-            imu_runtime_log_stack("imu_debug_task", s_imu_debug_task_handle);
+            last_stack_monitor_ms = now_ms;
+            imu_runtime_log_resources();
         }
-        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(IMU_DATA_PERIOD_MS));
+        if ((uint32_t)(now_ms - last_dual_ahrs_log_ms) >=
+            IMU_DUAL_AHRS_LOG_PERIOD_MS) {
+            last_dual_ahrs_log_ms = now_ms;
+            imu_runtime_log_dual_ahrs();
+        }
+        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(IMU_TELEMETRY_TICK_MS));
     }
+#endif
 }

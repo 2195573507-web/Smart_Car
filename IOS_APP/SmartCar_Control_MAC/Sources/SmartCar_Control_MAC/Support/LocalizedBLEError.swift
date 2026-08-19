@@ -69,13 +69,19 @@ enum AppPresentationStrings {
         case "ATTITUDE": key = "protocol.attitude"
         case "IMU_CAL_STATUS": key = "protocol.imu_cal_status"
         case "IMU_CAL_BIAS": key = "protocol.imu_cal_bias"
+        case "IMU_CAL_RESULT": key = "protocol.imu_cal_result"
+        case "IMU_VIBRATION_PROFILE": key = "protocol.imu_vibration_profile"
+        case "IMU_TELEMETRY": key = "protocol.imu_telemetry"
+        case "DUAL_IMU_STATUS": return "DUAL_IMU_STATUS"
         case "RADAR_STATUS": key = "protocol.radar_status"
+        case "RADAR_VIBRATION_STATUS": key = "protocol.radar_status"
         default: return type
         }
         return AppStrings.text(key, locale: locale)
     }
 
-    static func decodedMessage(_ record: DecodedMessageRecord, locale: Locale) -> String {
+    static func decodedMessage(_ record: DecodedMessageRecord, locale: Locale,
+                               angleUnit: AngleUnit = .degree) -> String {
         let timestamp = record.receivedAt.formatted(date: .omitted, time: .standard)
         let summary: String
         switch record.message {
@@ -116,10 +122,15 @@ enum AppPresentationStrings {
             summary = AppStrings.format(
                 "debug.attitude",
                 locale: locale,
-                attitude.roll.displayDegreeValue,
-                attitude.pitch.displayDegreeValue,
-                attitude.yaw.displayDegreeValue
+                angleUnit.format(attitude.value(for: .roll, unit: angleUnit), precision: 2),
+                angleUnit.format(attitude.value(for: .pitch, unit: angleUnit), precision: 2),
+                angleUnit.format(attitude.value(for: .yaw, unit: angleUnit), precision: 2)
             )
+        case .dualAttitude(let dual):
+            summary = String(format: "DUAL_ATTITUDE dR=%.2f dP=%.2f dY=%.2f",
+                             angleUnit == .degree ? dual.deltaRad.x * 57.29578 : dual.deltaRad.x,
+                             angleUnit == .degree ? dual.deltaRad.y * 57.29578 : dual.deltaRad.y,
+                             angleUnit == .degree ? dual.deltaRad.z * 57.29578 : dual.deltaRad.z)
         case .imuCalibrationStatus(let status):
             summary = AppStrings.format(
                 "debug.imu_cal_status",
@@ -135,6 +146,38 @@ enum AppPresentationStrings {
                 bias.y.displayValue,
                 bias.z.displayValue
             )
+        case .imuCalibrationResult(let result):
+            let sensor = result.sensorID == .bmi323 ? "BMI323" : "LSM303"
+            let accel = result.accelBias.map { "accel=(\($0.x.displayValue), \($0.y.displayValue), \($0.z.displayValue))" } ?? "accel=n/a"
+            let gyro = result.gyroBias.map { "gyro=(\($0.x.displayValue), \($0.y.displayValue), \($0.z.displayValue))" } ?? "gyro=n/a"
+            summary = "IMU_CAL_RESULT \(sensor) \(accel) \(gyro)"
+        case .calibrationEvent(let event):
+            summary = "CAL_EVENT id=\(event.rawValue) \(event.displayName)"
+        case .imuVibrationProfile(let profile):
+            switch profile {
+            case .lsm303(let value):
+                summary = String(format: "IMU_VIBRATION_PROFILE LSM303 pwm=%u rms=(%.3f, %.3f, %.3f) total=%.3f",
+                                 value.pwm, value.accelRMS.x, value.accelRMS.y,
+                                 value.accelRMS.z, value.totalRMS)
+            case .bmi323(let value):
+                summary = String(format: "IMU_VIBRATION_PROFILE BMI323 pwm=%u accel=(%.3f, %.3f, %.3f) gyro=(%.3f, %.3f, %.3f)",
+                                 value.pwm, value.accelRMS.x, value.accelRMS.y,
+                                 value.accelRMS.z, value.gyroRMS.x, value.gyroRMS.y,
+                                 value.gyroRMS.z)
+            }
+        case .imuTelemetry(let telemetry):
+            switch telemetry {
+            case .lsm303(let value):
+                summary = String(format: "IMU_TELEMETRY LSM303 accel=(%.3f, %.3f, %.3f) mag=(%.3f, %.3f, %.3f)",
+                                 value.accel.x, value.accel.y, value.accel.z,
+                                 value.mag.x, value.mag.y, value.mag.z)
+            case .bmi323(let value):
+                summary = String(format: "IMU_TELEMETRY BMI323 accel=(%.3f, %.3f, %.3f) gyro=(%.3f, %.3f, %.3f)",
+                                 value.accel.x, value.accel.y, value.accel.z,
+                                 value.gyro.x, value.gyro.y, value.gyro.z)
+            }
+        case .dualIMUStatus(let status):
+            summary = "DUAL_IMU_STATUS phase=\(status.phase.displayName) lsm=\(status.lsmProgress)% bmi=\(status.bmiProgress)% overall=\(status.overallProgress)% error=\(status.errorCode)"
         case .radarStatus(let status):
             summary = AppStrings.format(
                 "debug.radar_status",
@@ -144,6 +187,10 @@ enum AppPresentationStrings {
             )
         case .radarCalibrationStatus(let status):
             summary = "RADAR_CAL_STATUS pwm=\(status.currentPWM)% active=\(status.active ? 1 : 0)"
+        case .radarVibrationStatus(let status):
+            summary = String(format: "RADAR_VIBRATION_STATUS pwm=%u rms=(%.3f, %.3f, %.3f) total=%.3f",
+                             status.speedPercent, status.rmsX, status.rmsY,
+                             status.rmsZ, status.rmsTotal)
         }
         return "\(timestamp)  \(summary)"
     }

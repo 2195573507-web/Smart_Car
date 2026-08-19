@@ -32,7 +32,9 @@ typedef enum
 #define ATTITUDE_ZERO_SAMPLE_COUNT 500U
 
 void attitude_init(void);
+void attitude_zero_reset(void);
 void attitude_zero_init(void);
+uint8_t attitude_zero_capture_current(void);
 uint8_t attitude_zero_is_ready(void);
 void attitude_update(void);
 attitude_state_t attitude_get_state(void);

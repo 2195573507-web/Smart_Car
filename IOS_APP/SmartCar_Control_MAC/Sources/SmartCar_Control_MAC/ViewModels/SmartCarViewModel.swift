@@ -9,12 +9,19 @@ enum DeveloperPage: Equatable {
 
 @MainActor
 final class SmartCarViewModel: ObservableObject {
+    private static let angleUnitDefaultsKey = "smartcar.angleUnit"
+
     let bleManager: BLEManager
     let telemetryStore: TelemetryStore
     let calibrationViewModel: CalibrationViewModel
 
     @Published var mode: AppMode = .control
     @Published var developerPage: DeveloperPage = .overview
+    @Published var angleUnit: AngleUnit {
+        didSet {
+            UserDefaults.standard.set(angleUnit.rawValue, forKey: Self.angleUnitDefaultsKey)
+        }
+    }
     @Published var speed: Double = 50
     @Published var radarSpeed: Double = 0
     @Published private(set) var status: BLEConnectionStatus
@@ -44,6 +51,9 @@ final class SmartCarViewModel: ObservableObject {
         self.discoveredDeviceName = manager.discoveredDeviceName
         self.lastError = manager.lastError
         self.vehicleStatus = manager.telemetryStore.status.snapshot
+        self.angleUnit = AngleUnit(
+            rawValue: UserDefaults.standard.string(forKey: Self.angleUnitDefaultsKey) ?? "degree"
+        ) ?? .degree
 
         statusCancellable = manager.telemetryStore.status.$snapshot
             .removeDuplicates()
@@ -67,7 +77,7 @@ final class SmartCarViewModel: ObservableObject {
         }
 
         debugTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            self?.flushDebugMetrics()
+            Task { @MainActor [weak self] in self?.flushDebugMetrics() }
         }
     }
 
@@ -134,10 +144,17 @@ final class SmartCarViewModel: ObservableObject {
         case .ack: return "ACK"
         case .imuStatus: return "IMU_STATUS"
         case .attitude: return "ATTITUDE"
+        case .dualAttitude: return "DUAL_ATTITUDE"
         case .imuCalibrationStatus: return "IMU_CAL_STATUS"
         case .imuCalibrationBias: return "IMU_CAL_BIAS"
+        case .imuCalibrationResult: return "IMU_CAL_RESULT"
+        case .calibrationEvent: return "CAL_EVENT"
+        case .imuVibrationProfile: return "IMU_VIBRATION_PROFILE"
+        case .imuTelemetry: return "IMU_TELEMETRY"
+        case .dualIMUStatus: return "DUAL_IMU_STATUS"
         case .radarStatus: return "RADAR_STATUS"
         case .radarCalibrationStatus: return "RADAR_CAL_STATUS"
+        case .radarVibrationStatus: return "RADAR_VIBRATION_STATUS"
         }
     }
 }

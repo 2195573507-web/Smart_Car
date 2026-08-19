@@ -33,6 +33,7 @@ struct ContentView: View {
                 StatusBadge(label: AppStrings.text("label.ble", locale: locale), value: AppPresentationStrings.connectionStatus(viewModel.status, locale: locale), active: viewModel.status == .connected)
                 StatusBadge(label: "SmartCar_S3", value: AppPresentationStrings.smartCarStatus(viewModel.vehicleStatus.smartCarS3Status, locale: locale), active: viewModel.vehicleStatus.smartCarS3Status == "ONLINE")
                 ConnectionActions(viewModel: viewModel)
+                AngleUnitMenu(selection: $viewModel.angleUnit)
                 LanguageMenu()
             }
             .padding(.horizontal, 24)
@@ -77,13 +78,37 @@ struct ContentView: View {
 
             Group {
                 switch viewModel.mode {
-                case .control: ControlModeView(viewModel: viewModel, telemetryStore: viewModel.telemetryStore)
-                case .developer: DeveloperModeView(viewModel: viewModel, telemetryStore: viewModel.telemetryStore)
+                case .control: ControlModeView(viewModel: viewModel, telemetryStore: viewModel.telemetryStore, angleUnit: viewModel.angleUnit)
+                case .developer: DeveloperModeView(viewModel: viewModel, telemetryStore: viewModel.telemetryStore, angleUnit: viewModel.angleUnit)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(minWidth: 920, minHeight: 680)
+    }
+}
+
+private struct AngleUnitMenu: View {
+    @Binding var selection: AngleUnit
+    @Environment(\.locale) private var locale
+
+    var body: some View {
+        Menu {
+            ForEach(AngleUnit.allCases) { unit in
+                Button {
+                    selection = unit
+                } label: {
+                    if selection == unit {
+                        Label(AppStrings.text(unit.titleKey, locale: locale), systemImage: "checkmark")
+                    } else {
+                        Text(AppStrings.text(unit.titleKey, locale: locale))
+                    }
+                }
+            }
+        } label: {
+            Label(AppStrings.text("angle_unit.label", locale: locale), systemImage: "circle.lefthalf.filled")
+        }
+        .help(AppStrings.text("angle_unit.label", locale: locale))
     }
 }
 

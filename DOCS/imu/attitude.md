@@ -22,6 +22,11 @@ Filtered calibrated IMU data and readiness state.
 
 `attitude_state_t`, `AHRS_WAIT_CAL/AHRS_READY`, logs, and telemetry source data.
 
+The `attitude_state_t.roll`, `.pitch`, and `.yaw` fields remain radians. The
+communication layer serializes the same radian values plus derived degree
+values, `timestamp_ms`, `source`, and `valid` in the 30-byte `ATTITUDE`
+payload; this unit conversion is outside the AHRS algorithm.
+
 ## Public Interfaces
 
 `attitude_init`, `attitude_zero_init`, `attitude_update`, state getter, and

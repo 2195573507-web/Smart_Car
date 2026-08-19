@@ -9,15 +9,16 @@
 #define LOG_BRIDGE_PAYLOAD_HEADER_SIZE 8U
 
 static const char *TAG = "UART_LOG_BRIDGE";
+/* SCBP LOG currently enters only from the serialized service parser. */
+static uint8_t s_legacy_frame[SMARTCAR_LOG_MAX_FRAME_SIZE];
 
 void log_bridge_handle(const sc_frame_view_t *frame)
 {
-    uint8_t legacy_frame[SMARTCAR_LOG_MAX_FRAME_SIZE];
     size_t legacy_length = 0U;
     const uint8_t *payload;
     uint16_t text_length;
 
-    if (frame == NULL || frame->type != SC_TYPE_LOG ||
+    if (frame == NULL || frame->msg_id != SCBP_MSG_ID_LOG ||
         frame->length < LOG_BRIDGE_PAYLOAD_HEADER_SIZE) {
         return;
     }
@@ -39,8 +40,8 @@ void log_bridge_handle(const sc_frame_view_t *frame)
                                 ((uint32_t)payload[4] << 16U) |
                                 ((uint32_t)payload[5] << 24U),
                             &payload[LOG_BRIDGE_PAYLOAD_HEADER_SIZE],
-                            (uint8_t)text_length, legacy_frame,
-                            sizeof(legacy_frame), &legacy_length) != SMARTCAR_LOG_OK) {
+                            (uint8_t)text_length, s_legacy_frame,
+                            sizeof(s_legacy_frame), &legacy_length) != SMARTCAR_LOG_OK) {
         ESP_LOGW(TAG, "LOG_DROP encode failed");
         return;
     }
@@ -48,5 +49,5 @@ void log_bridge_handle(const sc_frame_view_t *frame)
     if (payload[0] == SMARTCAR_LOG_SOURCE_STM32) {
         ESP_LOGI(TAG, "STM_LOG_RX");
     }
-    (void)s3_ble_log_notify_send(legacy_frame, (uint16_t)legacy_length);
+    (void)s3_ble_log_notify_send(s_legacy_frame, (uint16_t)legacy_length);
 }

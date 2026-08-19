@@ -3,6 +3,7 @@ import SwiftUI
 struct ControlModeView: View {
     @ObservedObject var viewModel: SmartCarViewModel
     let telemetryStore: TelemetryStore
+    let angleUnit: AngleUnit
     @Environment(\.locale) private var locale
 
     var body: some View {
@@ -11,8 +12,12 @@ struct ControlModeView: View {
             VStack(alignment: .leading, spacing: 16) {
                 ConnectionPanel(viewModel: viewModel)
                 VehicleCard(statusStore: telemetryStore.status, imuStore: telemetryStore.imu)
-                AttitudeCard(store: telemetryStore.attitude)
-                CalibrationCard(viewModel: viewModel.calibrationViewModel)
+                AttitudeCard(store: telemetryStore.attitude, angleUnit: angleUnit)
+                CalibrationCard(
+                    viewModel: viewModel.calibrationViewModel,
+                    staticCalibration: telemetryStore.staticCalibration,
+                    vibration: telemetryStore.vibration
+                )
             }
             .frame(maxWidth: 365)
 
@@ -45,6 +50,8 @@ struct ControlModeView: View {
 
 struct CalibrationCard: View {
     @ObservedObject var viewModel: CalibrationViewModel
+    @ObservedObject var staticCalibration: StaticCalibrationState
+    @ObservedObject var vibration: RadarVibrationState
     @Environment(\.locale) private var locale
 
     var body: some View {
@@ -103,6 +110,37 @@ struct CalibrationCard: View {
                 CalibrationBiasValue(label: "Z", value: viewModel.bias?.z)
             }
 
+            let staticResult = staticCalibration.snapshot.result
+            Divider()
+            Text("IMU Calibration Result")
+                .font(.caption.weight(.bold))
+                .foregroundStyle(.secondary)
+            CalibrationVectorRow(title: "LSM303 Accel Bias", vector: staticResult.lsmAccelBias)
+            CalibrationVectorRow(title: "BMI323 Accel Bias", vector: staticResult.bmiAccelBias)
+            CalibrationVectorRow(title: "BMI323 Gyro Bias", vector: staticResult.bmiGyroBias)
+
+            let pwmValues = Set(vibration.snapshot.lsmProfiles.map(\.pwm))
+                .union(vibration.snapshot.bmiProfiles.map(\.pwm))
+                .sorted()
+            if !pwmValues.isEmpty {
+                Divider()
+                Text("Vibration RMS")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(.secondary)
+                ForEach(pwmValues, id: \.self) { pwm in
+                    let lsm = vibration.snapshot.lsmProfiles.first { $0.pwm == pwm }
+                    let bmi = vibration.snapshot.bmiProfiles.first { $0.pwm == pwm }
+                    HStack(spacing: 8) {
+                        Text("\(pwm)%")
+                            .frame(width: 42, alignment: .leading)
+                        VibrationRMSValue(label: "LSM", value: lsm?.totalRMS)
+                        VibrationRMSValue(label: "BMI A", value: bmi?.accelTotalRMS)
+                        VibrationRMSValue(label: "BMI G", value: bmi?.gyroTotalRMS)
+                    }
+                }
+                .font(.caption.monospaced())
+            }
+
             if viewModel.status.state == .complete {
                 Label(AppStrings.text("calibration.completed", locale: locale),
                       systemImage: "checkmark.circle.fill")
@@ -137,6 +175,39 @@ struct CalibrationCard: View {
         case .setPWM, .waitStable, .sample: return .orange
         case .idle: return .secondary
         }
+    }
+}
+
+private struct CalibrationVectorRow: View {
+    let title: String
+    let vector: Vector3?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.caption2.weight(.bold))
+                .foregroundStyle(.secondary)
+            HStack {
+                CalibrationBiasValue(label: "X", value: vector?.x)
+                CalibrationBiasValue(label: "Y", value: vector?.y)
+                CalibrationBiasValue(label: "Z", value: vector?.z)
+            }
+        }
+    }
+}
+
+private struct VibrationRMSValue: View {
+    let label: String
+    let value: Float?
+
+    var body: some View {
+        VStack(alignment: .trailing, spacing: 2) {
+            Text(label)
+                .font(.caption2.weight(.bold))
+                .foregroundStyle(.secondary)
+            Text(value?.displayValue ?? "--")
+        }
+        .frame(maxWidth: .infinity, alignment: .trailing)
     }
 }
 
@@ -191,7 +262,7 @@ private struct VehicleCard: View {
             }
             Divider()
             KeyValueRow(label: "LSM303", value: AppPresentationStrings.availability(imu.lsm303.online, locale: locale))
-            KeyValueRow(label: "BMI323", value: AppPresentationStrings.availability(imu.bmi323.online, locale: locale))
+            KeyValueRow(label: "BMI323", value: AppPresentationStrings.availability(imu.model.bmi323.online, locale: locale))
             KeyValueRow(label: AppStrings.text("label.error", locale: locale), value: String(format: "0x%04X", state.errorCode))
         }
         .padding(16).background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
@@ -200,6 +271,7 @@ private struct VehicleCard: View {
 
 private struct AttitudeCard: View {
     @ObservedObject var store: AttitudeState
+    let angleUnit: AngleUnit
     @Environment(\.locale) private var locale
 
     var body: some View {
@@ -214,18 +286,23 @@ private struct AttitudeCard: View {
             ZStack {
                 RoundedRectangle(cornerRadius: 5).fill(.blue.gradient).frame(width: 150, height: 82)
                     .overlay { Capsule().fill(.white.opacity(0.8)).frame(width: 48, height: 12).offset(y: -18) }
-                    .rotation3DEffect(.degrees(Double(attitude.pitch)), axis: (x: 1, y: 0, z: 0))
-                    .rotation3DEffect(.degrees(Double(attitude.roll)), axis: (x: 0, y: 1, z: 0))
-                    .rotationEffect(.degrees(Double(attitude.yaw)))
+                    .rotation3DEffect(rotation(attitude, axis: .pitch), axis: (x: 1, y: 0, z: 0))
+                    .rotation3DEffect(rotation(attitude, axis: .roll), axis: (x: 0, y: 1, z: 0))
+                    .rotationEffect(rotation(attitude, axis: .yaw))
             }
             .frame(maxWidth: .infinity, minHeight: 118)
             HStack {
-                AngleReadout(label: AppStrings.text("label.roll", locale: locale), value: attitude.roll, precision: 1)
-                AngleReadout(label: AppStrings.text("label.pitch", locale: locale), value: attitude.pitch, precision: 1)
-                AngleReadout(label: AppStrings.text("label.yaw", locale: locale), value: attitude.yaw, precision: 1)
+                AngleReadout(label: AppStrings.text("label.roll", locale: locale), attitude: attitude, axis: .roll, unit: angleUnit, precision: 1)
+                AngleReadout(label: AppStrings.text("label.pitch", locale: locale), attitude: attitude, axis: .pitch, unit: angleUnit, precision: 1)
+                AngleReadout(label: AppStrings.text("label.yaw", locale: locale), attitude: attitude, axis: .yaw, unit: angleUnit, precision: 1)
             }
         }
         .padding(16).background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func rotation(_ attitude: AttitudeData, axis: AttitudeAxis) -> Angle {
+        let value = attitude.value(for: axis, unit: angleUnit)
+        return angleUnit == .degree ? .degrees(Double(value)) : .radians(Double(value))
     }
 
     private var statusText: String {
@@ -321,13 +398,15 @@ struct ValueReadout: View {
 
 struct AngleReadout: View {
     let label: String
-    let value: Float
+    let attitude: AttitudeData
+    let axis: AttitudeAxis
+    let unit: AngleUnit
     let precision: Int
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(label).font(.caption2.weight(.bold)).foregroundStyle(.secondary)
-            Text(precision == 1 ? value.displayControlDegreeValue : value.displayDegreeValue)
+            Text(unit.format(attitude.value(for: axis, unit: unit), precision: precision))
                 .font(.caption.monospaced())
         }
         .frame(maxWidth: .infinity, alignment: .leading)

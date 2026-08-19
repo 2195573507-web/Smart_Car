@@ -10,9 +10,7 @@ static const char *TAG = "RADAR";
 #define RADAR_UART_HEX_LOG_BYTES 32U
 
 static TaskHandle_t s_uart_task;
-static TaskHandle_t s_gpio_monitor_task;
 static bool s_uart_ready;
-static bool s_gpio_monitor_ready;
 static bool s_pwm_ready;
 static uint8_t s_read_buffer[RADAR_UART_READ_BUFFER_SIZE];
 static char s_hex_buffer[RADAR_UART_HEX_LOG_BYTES * 3U];
@@ -59,50 +57,6 @@ static void radar_uart_task(void *context)
             vTaskDelay(pdMS_TO_TICKS(10U));
         }
     }
-}
-
-static void radar_gpio_monitor_task(void *context)
-{
-    (void)context;
-
-    for (;;) {
-        ESP_LOGI(TAG, "RADAR_GPIO44_LEVEL=%d", gpio_get_level(GPIO_NUM_44));
-        vTaskDelay(pdMS_TO_TICKS(RADAR_GPIO_MONITOR_INTERVAL_MS));
-    }
-}
-
-esp_err_t radar_gpio_monitor_init(void)
-{
-    if (s_gpio_monitor_ready) {
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    const gpio_config_t config = {
-        .pin_bit_mask = 1ULL << GPIO_NUM_44,
-        .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
-    };
-
-    esp_err_t ret = gpio_config(&config);
-    if (ret != ESP_OK) {
-        return ret;
-    }
-
-    BaseType_t created = xTaskCreate(radar_gpio_monitor_task,
-                                     "radar_gpio_monitor",
-                                     RADAR_GPIO_MONITOR_TASK_STACK_SIZE,
-                                     NULL,
-                                     RADAR_GPIO_MONITOR_TASK_PRIORITY,
-                                     &s_gpio_monitor_task);
-    if (created != pdPASS) {
-        s_gpio_monitor_task = NULL;
-        return ESP_ERR_NO_MEM;
-    }
-
-    s_gpio_monitor_ready = true;
-    return ESP_OK;
 }
 
 esp_err_t radar_uart_init(void)

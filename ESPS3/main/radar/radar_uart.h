@@ -27,11 +27,6 @@
 /* 雷达 UART 接收任务优先级。 */
 #define RADAR_UART_TASK_PRIORITY 10U
 
-/* GPIO44 电平监测任务参数。 */
-#define RADAR_GPIO_MONITOR_TASK_STACK_SIZE 2048U
-#define RADAR_GPIO_MONITOR_TASK_PRIORITY 5U
-#define RADAR_GPIO_MONITOR_INTERVAL_MS 1000U
-
 /* X3PRO M_CTR 电机 PWM 输出引脚。 */
 #define RADAR_PWM_GPIO GPIO_NUM_4
 /* 电机 PWM 频率，单位为 Hz。 */
@@ -51,9 +46,6 @@
 /* Starts the UART driver and its continuous receive/parser task. */
 esp_err_t radar_uart_init(void);
 bool radar_uart_is_running(void);
-
-/* Configures GPIO44 as the radar RX input and starts its level monitor. */
-esp_err_t radar_gpio_monitor_init(void);
 
 /* Starts the X3PRO M_CTR motor output at the required duty and frequency. */
 esp_err_t radar_pwm_init(void);

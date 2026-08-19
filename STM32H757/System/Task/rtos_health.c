@@ -31,6 +31,7 @@ static const char *const s_monitored_task_names[RTOS_HEALTH_MONITORED_TASK_COUNT
     "logger",
     "protocol",
     "imu_data_logger",
+    "bmi323_task",
 };
 
 static uint32_t rtos_health_checksum(const volatile rtos_health_record_t *record)

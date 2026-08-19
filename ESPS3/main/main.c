@@ -13,6 +13,10 @@
 
 static const char *TAG = "MAIN";
 
+#ifndef SMARTCAR_BMI323_DEBUG_ONLY
+#define SMARTCAR_BMI323_DEBUG_ONLY 0
+#endif
+
 static esp_err_t main_nvs_init(void)
 {
     esp_err_t ret = nvs_flash_init();
@@ -44,17 +48,13 @@ void app_main(void)
         ESP_LOGE(TAG, "BLE init failed: %s", esp_err_to_name(ble_ret));
     }
 
+#if !SMARTCAR_BMI323_DEBUG_ONLY
     s3_log_info("RADAR INIT START");
     bool radar_init_ok = true;
     esp_err_t radar_uart_ret = radar_uart_init();
     if (radar_uart_ret != ESP_OK) {
         radar_init_ok = false;
         ESP_LOGE(TAG, "Radar UART1 init failed: %s", esp_err_to_name(radar_uart_ret));
-    }
-    esp_err_t radar_gpio_ret = radar_gpio_monitor_init();
-    if (radar_gpio_ret != ESP_OK) {
-        radar_init_ok = false;
-        ESP_LOGE(TAG, "Radar GPIO44 init failed: %s", esp_err_to_name(radar_gpio_ret));
     }
     esp_err_t radar_pwm_ret = radar_pwm_init();
     if (radar_pwm_ret != ESP_OK) {
@@ -68,6 +68,7 @@ void app_main(void)
     } else {
         s3_log_error("RADAR INIT FAILED");
     }
+#endif
 
     if (stm_uart_ret == ESP_OK) {
         esp_err_t service_ret = smartcar_service_init();
@@ -76,7 +77,11 @@ void app_main(void)
         }
     }
 
+#if SMARTCAR_BMI323_DEBUG_ONLY
+    s3_log_info("BMI323 DEBUG LOG FORWARDING");
+#else
     s3_log_info("S3 SYSTEM READY");
+#endif
 
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(1000U));

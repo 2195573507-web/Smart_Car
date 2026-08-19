@@ -1,0 +1,40 @@
+#ifndef SMARTCAR_SENSOR_BMI323_REG_H
+#define SMARTCAR_SENSOR_BMI323_REG_H
+
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#define BMI323_REG_CHIP_ID       UINT8_C(0x00)
+#define BMI323_REG_STATUS        UINT8_C(0x02)
+#define BMI323_REG_ACC_DATA_X    UINT8_C(0x03)
+#define BMI323_REG_GYR_DATA_X    UINT8_C(0x06)
+#define BMI323_REG_TEMP_DATA     UINT8_C(0x09)
+#define BMI323_REG_ACC_CONF      UINT8_C(0x20)
+#define BMI323_REG_GYR_CONF      UINT8_C(0x21)
+#define BMI323_REG_CMD            UINT8_C(0x7E)
+
+/* ACC_CONF/GYR_CONF ODR field values used by the BMI323 register contract. */
+#define BMI323_CONF_ODR_MASK      UINT16_C(0x000F)
+#define BMI323_CONF_ODR_100HZ     UINT16_C(0x0008)
+#define BMI323_CONF_ODR_200HZ     UINT16_C(0x0009)
+#define BMI323_CONF_ODR_400HZ     UINT16_C(0x000A)
+#define BMI323_CONF_ODR_800HZ     UINT16_C(0x000B)
+
+#define BMI323_SPI_READ_MASK     UINT8_C(0x80)
+#define BMI323_WHO_AM_I_REG      BMI323_REG_CHIP_ID
+#define BMI323_WHO_AM_I_VALUE    UINT8_C(0x43)
+
+#define BMI323_SOFT_RESET_LSB    UINT8_C(0xAF)
+#define BMI323_SOFT_RESET_MSB    UINT8_C(0xDE)
+
+#define BMI323_STATUS_ACC_DATA_READY UINT8_C(0x80)
+#define BMI323_STATUS_GYR_DATA_READY UINT8_C(0x40)
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* SMARTCAR_SENSOR_BMI323_REG_H */

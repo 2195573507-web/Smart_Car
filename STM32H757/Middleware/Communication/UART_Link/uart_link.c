@@ -15,6 +15,10 @@
 #define UART_LINK_TASK_PRIORITY (tskIDLE_PRIORITY + 1U)
 #define UART_LINK_STACK_MONITOR_PERIOD_MS UINT32_C(5000)
 
+#ifndef SMARTCAR_BMI323_DEBUG_ONLY
+#define SMARTCAR_BMI323_DEBUG_ONLY 0
+#endif
+
 static UART_HandleTypeDef s_handle;
 static SemaphoreHandle_t s_tx_mutex;
 static uint8_t s_ready;
@@ -198,10 +202,14 @@ void uart_link_get_stats(uart_link_stats_t *stats)
 
 void uart_link_task(void *argument)
 {
+#if !SMARTCAR_BMI323_DEBUG_ONLY
     uint32_t last_stack_monitor_ms;
+#endif
 
     (void)argument;
+#if !SMARTCAR_BMI323_DEBUG_ONLY
     last_stack_monitor_ms = HAL_GetTick();
+#endif
     uint8_t chunk[UART_LINK_RX_CHUNK_SIZE];
     for (;;) {
         uint16_t received = 0U;
@@ -234,11 +242,13 @@ void uart_link_task(void *argument)
             taskEXIT_CRITICAL();
             (void)HAL_UART_AbortReceive(&s_handle);
         }
+#if !SMARTCAR_BMI323_DEBUG_ONLY
         if ((uint32_t)(HAL_GetTick() - last_stack_monitor_ms) >=
             UART_LINK_STACK_MONITOR_PERIOD_MS) {
             last_stack_monitor_ms = HAL_GetTick();
             uart_link_log_stack();
         }
+#endif
         taskYIELD();
     }
 }
