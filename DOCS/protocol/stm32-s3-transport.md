@@ -1,97 +1,68 @@
-# STM32-S3 Transport Frame
+# STM32H757 To ESP32-S3 Transport
 
-## Function
+## Active Contract
 
-Record the C frame currently used by the STM32 UART link and S3 service.
-
-## Source Location
-
-- STM32: `STM32H757/Middleware/Communication/SmartCar_Frame/sc_frame.c`
-- S3: `ESPS3/components/smartcar_protocol/frame.c`
-
-## Current Contract
-
-Status: CONFIRMED source/build contract.
-
-The active STM32-S3 UART frame is [SCBP-V3](SCBP_V3_REFERENCE.md):
+The active UART2 transport is SCBP-CAN at 921600 baud, 8N1, with no hardware
+flow control:
 
 ```text
-AA | 55 | VER | PRIORITY | SRC | DST | MSG_ID_LO | MSG_ID_HI |
-SEQ | FLAGS | LEN_LO | LEN_HI | PAYLOAD[LEN] | CRC_LO | CRC_HI
+STM32H757 USART2 PA2/PA3 <-> ESP32-S3 UART2 GPIO17/GPIO18
+5A A5 | CAN_ID_LE | FLAGS | LEN | HCS | SEQ | PAYLOAD | FCS_LE | 0D 0A
 ```
 
-It has 14 bytes of overhead and CRC16-MODBUS covers `VER` through the payload.
-`BOOT_READY=0x0007` is STM32 to S3 with `state,result`; `RADAR_PWM_READY=0x0302`
-is S3 to STM32 with `speed_percent`; and `PWM_SET=0x0101` remains an explicit
-active-PWM command. `ATTITUDE=0x0201` accepts the legacy 30-byte layout and the
-schema=2 80-byte DualAHRS layout; exact length/schema validation is required.
-Its field layout, ACK/ERROR behavior, parser recovery, and full message table
-are authoritative in the linked reference.
+The complete frame and payload definitions live in
+`Common/SCBP_CAN/include/scbp_protocol_defs.h`. Neither endpoint owns a local
+copy of SCBP-CAN wire structures or message IDs.
 
-## Legacy Frame (Pre-SCBP-V3)
+## Endpoint Ownership
 
-```text
-AA | 55 | 01 | TYPE | LEN_LO | LEN_HI | PAYLOAD[LEN] | CRC_LO | CRC_HI
-```
+| Endpoint | Responsibility |
+| --- | --- |
+| STM32H757 CM7 | Sensor/calibration producer, DualAHRS producer, log producer, and `RADAR_PWM_READY` consumer. |
+| ESP32-S3 | UART gateway, radar calibration owner, App BLE re-enveloper, and link recovery owner on its UART side. |
+| App BLE | Separate `AA 01 ... CRC16 ... 55` envelope; never a raw SCBP-CAN frame. |
 
-`SC_FRAME_MAX_PAYLOAD` is 128 and overhead is 8. CRC16-MODBUS covers the
-version through payload bytes. The C parsers accept fragmented chunks and
-report header/version/length/CRC errors through callbacks.
+STM32 uses a 512-byte circular RX DMA buffer with IDLE receive events,
+cache invalidation, a software ring, and UART/DMA error recovery. ESP32-S3
+uses the ESP-IDF UART2 driver plus a bounded newest-data queue. Both endpoints
+feed arbitrary byte chunks into the shared stream parser.
 
-## Legacy Type Set (Adapter Inputs Only)
+## Calibration Transaction
 
-`PING 0x01`, `PONG 0x02`, `ACK 0x03`, `PWM_READY 0x10`,
-`IMU_CAL_BIAS 0x13`,
-`RADAR_PWM_READY 0x16`, `RADAR_PWM_ACK 0x17`, `CAL_EVENT 0x18`,
-`CAL_EVENT_ACK 0x19`, `STM_BOOT_READY 0x1C`, `IMU_STATUS 0x20`,
-`ATTITUDE 0x21`, `IMU_CAL_STATUS 0x22`, `RADAR_STATUS 0x23` (gateway-owned
-reservation), `RADAR_VIBRATION_STATUS 0x24`, and `LOG 0x30`.
+1. STM emits `BOOT_READY(0x007)` with `ACK_REQUIRED` after it reaches the
+   zero-radar wait state.
+2. S3 admits the event into `radar_calibration_manager` and replies with a
+   fast ACK or ERROR.
+3. S3 sets radar calibration PWM to zero, then sends transactional
+   `RADAR_PWM_READY(0x302, speed_percent=0)`.
+4. STM admits the value only at the expected state and replies with fast ACK
+   or ERROR.
+5. After its static window completes, STM sends `CAL_EVENT(0x001, event=1)`
+   transactionally. S3 releases the radar calibration lock only after it
+   admits that event.
 
-`0x13` is 12 bytes: static `accel_offset_x/y/z` IEEE-754 float32 LE values.
-STM emits it once after the final static `0x22` status and before the static
-`CAL_EVENT`; it deliberately has no static noise-RMS field. `0x22` is 11 bytes:
-stage, PWM, sample_count u32 LE, total_sample u32 LE, error. Stages are
-`0 WAIT_RADAR_READY`, `1 STATIC_STABLE_WAIT`,
-`2 STATIC_SAMPLE`, `3 VIBRATION_STABLE_WAIT`, `4 VIBRATION_SAMPLE`,
-`5 COMPLETE`, `6 ERROR`. `0x24` is 17 bytes: speed_percent followed by
-`rms_x/y/z/total_rms` IEEE-754 float32 LE values, emitted after each completed
-PWM profile. STM `CAL_EVENT 0x18` remains the calibration handshake.
+The event and response logic is idempotent for retries. `CAL_EVENT=0x001` is
+the SCBP-CAN 10-bit message value; do not use historical V3 value `0x0401`.
 
-`0x27 IMU_TELEMETRY` is a source-tagged 30-byte payload: sensor id, flags,
-timestamp u32 LE, accel xyz, and either LSM303 mag xyz or BMI323 gyro xyz.
-Flags bit 0/1 remain the two channel-valid bits; bit 2 is the explicit sensor
-online state. The S3 bridge forwards the payload unchanged.
+## Telemetry And Logs
 
-`0x21 ATTITUDE` is the legacy adapter input. The active STM32 producer and
-SCBP-V3 wire payload use the same 30-byte layout. STM32 keeps the AHRS state in
-radians and the communication boundary derives degree values without changing
-the attitude algorithm:
+STM emits only these IMU-related UART payloads:
 
-| Offset | Field | Unit |
-| ---: | --- | --- |
-| 0 | `roll_rad` | radian |
-| 4 | `pitch_rad` | radian |
-| 8 | `yaw_rad` | radian |
-| 12 | `roll_deg` | degree |
-| 16 | `pitch_deg` | degree |
-| 20 | `yaw_deg` | degree |
-| 24 | `timestamp_ms` | u32, little-endian |
-| 28 | `source` | u8, source ID |
-| 29 | `valid` | u8, 0/1 |
+- `ATTITUDE(0x201)`: exactly 80-byte schema-2 DualAHRS.
+- `IMU_CAL_STATUS(0x202)`: exactly 11 bytes.
+- `IMU_TELEMETRY(0x207)`: exactly 30 bytes, with sensor ID 1 or 2.
 
-The S3 bridge accepts exactly 30 bytes for SCBP-V3 `ATTITUDE=0x0201` and also
-accepts exactly 80 bytes when byte 0 is schema `0x02`. Both payloads are
-forwarded unchanged into the App BLE telemetry envelope. S3 performs no unit
-conversion or field translation.
+S3 validates lengths and identifiers before re-enveloping selected payloads
+for App BLE. `LOG(0x3F0)` is converted to the existing bounded FFE3 log
+notification format. No `0x0200`, `0x0208`, 30-byte attitude, bias/result
+transport, or `SC_TYPE_*` compatibility code participates in this link.
 
-## Migration Status
+## Failure Handling
 
-The legacy table above is retained only as a callback-adapter migration record.
-The active wire contract is SCBP-V3. Both endpoints compile against it; UART,
-BLE, and radar runtime behavior remain UNVERIFIED.
+HCS failure never consumes the advertised length. ACK-required frames retry
+every 500 ms up to three times. Error counters progress through active,
+warning, passive, and bus-off states. A bus-off callback flushes or rebuilds
+the endpoint UART receive path before link counters are reset.
 
-## Modification Notes
-
-Keep the C frame independent from App BLE framing unless a named translation
-layer is added and tested. Preserve bounded buffers, parser resynchronization,
-CRC diagnostics, and local safety ownership.
+Build and host-test results are source evidence only; device UART, DMA, radar,
+BLE, sensor, and vehicle acceptance remain separate validation work.

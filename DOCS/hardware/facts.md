@@ -24,7 +24,7 @@ unverified.
 
 | Resource | Current assignment | State |
 | --- | --- | --- |
-| STM link | UART2, TX GPIO17, RX GPIO18, 115200 | Source-confirmed, physical link unverified |
+| STM link | UART2, TX GPIO17, RX GPIO18, 921600 8N1, SCBP-CAN | Source-confirmed, physical link unverified |
 | Radar receive | UART1 RX GPIO44, TX disabled, 115200 | Source-confirmed, radar stream unverified |
 | Radar motor | GPIO4 LEDC 10 kHz, 10-bit, configured 0% | Source-confirmed, rotation unverified |
 | BLE | Device `SmartCar_S3`, FFE0-FFE3 | Source-confirmed, session unverified |

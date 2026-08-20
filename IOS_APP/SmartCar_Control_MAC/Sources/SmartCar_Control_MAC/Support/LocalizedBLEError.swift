@@ -70,11 +70,9 @@ enum AppPresentationStrings {
         case "IMU_CAL_STATUS": key = "protocol.imu_cal_status"
         case "IMU_CAL_BIAS": key = "protocol.imu_cal_bias"
         case "IMU_CAL_RESULT": key = "protocol.imu_cal_result"
-        case "IMU_VIBRATION_PROFILE": key = "protocol.imu_vibration_profile"
         case "IMU_TELEMETRY": key = "protocol.imu_telemetry"
         case "DUAL_IMU_STATUS": return "DUAL_IMU_STATUS"
         case "RADAR_STATUS": key = "protocol.radar_status"
-        case "RADAR_VIBRATION_STATUS": key = "protocol.radar_status"
         default: return type
         }
         return AppStrings.text(key, locale: locale)
@@ -153,18 +151,6 @@ enum AppPresentationStrings {
             summary = "IMU_CAL_RESULT \(sensor) \(accel) \(gyro)"
         case .calibrationEvent(let event):
             summary = "CAL_EVENT id=\(event.rawValue) \(event.displayName)"
-        case .imuVibrationProfile(let profile):
-            switch profile {
-            case .lsm303(let value):
-                summary = String(format: "IMU_VIBRATION_PROFILE LSM303 pwm=%u rms=(%.3f, %.3f, %.3f) total=%.3f",
-                                 value.pwm, value.accelRMS.x, value.accelRMS.y,
-                                 value.accelRMS.z, value.totalRMS)
-            case .bmi323(let value):
-                summary = String(format: "IMU_VIBRATION_PROFILE BMI323 pwm=%u accel=(%.3f, %.3f, %.3f) gyro=(%.3f, %.3f, %.3f)",
-                                 value.pwm, value.accelRMS.x, value.accelRMS.y,
-                                 value.accelRMS.z, value.gyroRMS.x, value.gyroRMS.y,
-                                 value.gyroRMS.z)
-            }
         case .imuTelemetry(let telemetry):
             switch telemetry {
             case .lsm303(let value):
@@ -185,12 +171,6 @@ enum AppPresentationStrings {
                 AppPresentationStrings.availability(status.online, locale: locale),
                 Int(status.speedPercent)
             )
-        case .radarCalibrationStatus(let status):
-            summary = "RADAR_CAL_STATUS pwm=\(status.currentPWM)% active=\(status.active ? 1 : 0)"
-        case .radarVibrationStatus(let status):
-            summary = String(format: "RADAR_VIBRATION_STATUS pwm=%u rms=(%.3f, %.3f, %.3f) total=%.3f",
-                             status.speedPercent, status.rmsX, status.rmsY,
-                             status.rmsZ, status.rmsTotal)
         }
         return "\(timestamp)  \(summary)"
     }

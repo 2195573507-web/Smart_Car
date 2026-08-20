@@ -31,14 +31,8 @@
 "label.elapsed" = "ELAPSED";
 "label.imu_calibration_analysis" = "IMU CALIBRATION ANALYSIS";
 "label.static_calibration" = "STATIC CALIBRATION (PWM 0%)";
-"label.radar_vibration_analysis" = "RADAR VIBRATION ANALYSIS";
 "label.samples" = "Samples";
 "label.acc_offset" = "ACC OFFSET";
-"label.noise_rms" = "NOISE RMS";
-"label.rms_x" = "RMS X";
-"label.rms_y" = "RMS Y";
-"label.rms_z" = "RMS Z";
-"label.rms_total" = "TOTAL";
 "label.roll" = "ROLL";
 "label.pitch" = "PITCH";
 "label.yaw" = "YAW";
@@ -91,10 +85,8 @@
 "protocol.imu_cal_status" = "IMU CAL STATUS";
 "protocol.imu_cal_bias" = "IMU CAL BIAS";
 "protocol.imu_cal_result" = "IMU CAL RESULT";
-"protocol.imu_vibration_profile" = "IMU VIBRATION PROFILE";
 "protocol.imu_telemetry" = "IMU TELEMETRY";
 "protocol.radar_status" = "RADAR STATUS";
-"protocol.radar_vibration_status" = "RADAR VIBRATION STATUS";
 "calibration.title" = "LSM303 Accelerometer Calibration";
 "calibration.keep_still" = "Keep the device still";
 "calibration.status" = "Status";
@@ -106,7 +98,6 @@
 "calibration.stabilize" = "PWM Stabilizing";
 "calibration.collecting" = "Sampling";
 "calibration.static_sampling" = "Static Sampling";
-"calibration.vibration_sampling" = "Vibration Sampling";
 "calibration.done" = "LSM303 Calibration Ready";
 "calibration.failed" = "Calibration failed";
 "calibration.completed" = "LSM303 Calibration Ready";

@@ -97,7 +97,9 @@ uint8_t attitude_zero_capture_current(void)
     const float pitch = atan2f(-filtered.ax,
                                sqrtf((filtered.ay * filtered.ay) +
                                      (filtered.az * filtered.az)));
-    const float yaw = atan2f(-filtered.my, filtered.mx);
+    /* Body X points forward and Body Y points right; positive heading is
+     * therefore atan2(+Y, +X) in the right-handed body frame. */
+    const float yaw = atan2f(filtered.my, filtered.mx);
 
     if (imu_calibration_is_complete() == 0U || filtered.online == 0U ||
         !isfinite(filtered.ax) || !isfinite(filtered.ay) ||
@@ -127,9 +129,8 @@ void attitude_update(void)
     const float pitch = atan2f(-filtered.ax,
                                sqrtf((filtered.ay * filtered.ay) +
                                      (filtered.az * filtered.az)));
-    /* The LSM303 Y axis is mirrored in the vehicle horizontal plane. Keep
-     * the legacy path aligned with the body-frame map used by DualAHRS. */
-    const float yaw = atan2f(-filtered.my, filtered.mx);
+    /* imu_manager supplies LSM303 data in the vehicle Body Frame. */
+    const float yaw = atan2f(filtered.my, filtered.mx);
 
     if (imu_calibration_is_complete() == 0U || filtered.online == 0U ||
         !isfinite(filtered.ax) || !isfinite(filtered.ay) ||

@@ -7,6 +7,7 @@
 #include "FreeRTOS.h"
 #include "task.h"
 #include "rtos_health.h"
+#include "uart_link.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 /* USER CODE END Includes */
@@ -338,6 +339,16 @@ void SysTick_Handler(void)
 /******************************************************************************/
 
 /* USER CODE BEGIN 1 */
+void DMA1_Stream0_IRQHandler(void)
+{
+  uart_link_handle_dma_rx_irq();
+}
+
+void USART2_IRQHandler(void)
+{
+  uart_link_handle_usart_irq();
+}
+
 void vApplicationStackOverflowHook(TaskHandle_t task, char *task_name)
 {
   rtos_health_record_stack_overflow((uintptr_t)task, task_name);

@@ -135,8 +135,3 @@ uint32_t log_service_get_drop_count(void)
 {
     return s_log_drop_count;
 }
-
-void log_service_handle(const sc_frame_view_t *frame)
-{
-    (void)frame;
-}

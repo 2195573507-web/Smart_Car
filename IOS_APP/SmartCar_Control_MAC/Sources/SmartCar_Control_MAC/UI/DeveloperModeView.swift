@@ -39,9 +39,8 @@ struct DeveloperModeView: View {
                     DualAttitudeLogConsole(store: telemetryStore.dualAttitude)
                     DeveloperCalibrationCard(viewModel: viewModel.calibrationViewModel)
                     RadarControlCard(viewModel: viewModel, store: telemetryStore.radar)
-                    IMUCalibrationAnalysisCard(
-                        staticCalibration: telemetryStore.staticCalibration,
-                        vibration: telemetryStore.vibration
+                    StaticCalibrationAnalysisCard(
+                        staticCalibration: telemetryStore.staticCalibration
                     )
                     ProtocolMonitor(viewModel: viewModel)
                 }.frame(maxWidth: 500)
@@ -100,7 +99,6 @@ private struct DualIMULifecycleCard: View {
             progressRow(label: "BMI323", value: status?.bmiProgress ?? 0)
             progressRow(label: "TOTAL", value: status?.overallProgress ?? 0)
             if let status {
-                KeyValueRow(label: "PWM", value: "\(status.radarPWM)%")
                 KeyValueRow(label: "WINDOW", value: "\(status.phaseStartTimeMs) / \(status.phaseEndTimeMs)")
                 if status.errorCode != 0 {
                     KeyValueRow(label: "ERROR", value: "\(status.errorCode)")
@@ -155,7 +153,6 @@ private struct RadarControlCard: View {
                     .font(.caption.monospaced())
             }
             KeyValueRow(label: AppStrings.text("label.target_speed", locale: locale), value: "\(Int(viewModel.radarSpeed))%")
-            KeyValueRow(label: AppStrings.text("label.radar_pwm", locale: locale), value: "\(Int(snapshot.calibrationPWM))%")
             Slider(
                 value: $viewModel.radarSpeed,
                 in: 0...100,
@@ -358,12 +355,9 @@ private struct DeveloperCalibrationCard: View {
     }
 }
 
-private struct IMUCalibrationAnalysisCard: View {
+private struct StaticCalibrationAnalysisCard: View {
     @ObservedObject var staticCalibration: StaticCalibrationState
-    @ObservedObject var vibration: RadarVibrationState
     @Environment(\.locale) private var locale
-
-    private let speedSteps: [UInt8] = [20, 40, 60, 80, 100]
 
     var body: some View {
         let staticResult = staticCalibration.snapshot.result
@@ -371,72 +365,11 @@ private struct IMUCalibrationAnalysisCard: View {
             Text(AppStrings.text("label.imu_calibration_analysis", locale: locale))
                 .font(.headline.monospaced())
             StaticCalibrationSection(result: staticResult)
-            Divider()
-            Text(AppStrings.text("label.radar_vibration_analysis", locale: locale))
-                .font(.subheadline.monospaced().weight(.bold))
-            vibrationHeader
-            ForEach(speedSteps, id: \.self) { speed in
-                let result = vibration.snapshot.result(for: speed)
-                vibrationRow(speed, vector: result.map { Vector3(x: $0.rmsX, y: $0.rmsY, z: $0.rmsZ) }, total: result?.rmsTotal)
-            }
-            Divider()
-            Text("LSM303 RMS").font(.caption.weight(.bold)).foregroundStyle(.secondary)
-            vibrationHeader
-            ForEach(speedSteps, id: \.self) { speed in
-                let result = vibration.snapshot.lsmProfiles.first { $0.pwm == speed }
-                vibrationRow(speed, vector: result?.accelRMS, total: result?.totalRMS)
-            }
-            Text("BMI323 RMS (ACCEL)").font(.caption.weight(.bold)).foregroundStyle(.secondary)
-            vibrationHeader
-            ForEach(speedSteps, id: \.self) { speed in
-                let result = vibration.snapshot.bmiProfiles.first { $0.pwm == speed }
-                vibrationRow(speed, vector: result?.accelRMS, total: result?.accelTotalRMS)
-            }
-            Text("BMI323 RMS (GYRO)").font(.caption.weight(.bold)).foregroundStyle(.secondary)
-            vibrationHeader
-            ForEach(speedSteps, id: \.self) { speed in
-                let result = vibration.snapshot.bmiProfiles.first { $0.pwm == speed }
-                vibrationRow(speed, vector: result?.gyroRMS, total: result?.gyroTotalRMS)
-            }
         }
         .padding(16)
         .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
     }
 
-    @ViewBuilder
-    private func vibrationValue(_ value: Float?) -> some View {
-        Text(value.map { String(format: "%.3f", $0) } ?? "--")
-            .frame(maxWidth: .infinity, alignment: .trailing)
-    }
-
-    private var vibrationHeader: some View {
-        HStack(spacing: 8) {
-            Text(AppStrings.text("label.pwm", locale: locale))
-                .frame(width: 42, alignment: .leading)
-            Text(AppStrings.text("label.rms_x", locale: locale))
-                .frame(maxWidth: .infinity, alignment: .trailing)
-            Text(AppStrings.text("label.rms_y", locale: locale))
-                .frame(maxWidth: .infinity, alignment: .trailing)
-            Text(AppStrings.text("label.rms_z", locale: locale))
-                .frame(maxWidth: .infinity, alignment: .trailing)
-            Text(AppStrings.text("label.rms_total", locale: locale))
-                .frame(maxWidth: .infinity, alignment: .trailing)
-        }
-        .font(.caption2.weight(.bold))
-        .foregroundStyle(.secondary)
-    }
-
-    private func vibrationRow(_ pwm: UInt8, vector: Vector3?, total: Float?) -> some View {
-        HStack(spacing: 8) {
-            Text("\(pwm)%")
-                .frame(width: 42, alignment: .leading)
-            vibrationValue(vector?.x)
-            vibrationValue(vector?.y)
-            vibrationValue(vector?.z)
-            vibrationValue(total)
-        }
-        .font(.caption.monospaced())
-    }
 }
 
 private struct StaticCalibrationSection: View {
@@ -469,11 +402,6 @@ private struct StaticCalibrationSection: View {
             Text("BMI323 gyro bias").font(.caption.weight(.bold)).foregroundStyle(.secondary)
             CalibrationVectorReadout(result.bmiGyroBias, unit: .angularVelocityDps)
 
-            Text(AppStrings.text("label.noise_rms", locale: locale))
-                .font(.caption.weight(.bold))
-                .foregroundStyle(.secondary)
-            Text(calibrationValue(result.noiseRms))
-                .font(.caption.monospaced())
         }
     }
 

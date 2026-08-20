@@ -9,7 +9,6 @@
 #include "imu_calibration.h"
 #include "imu_boot_manager.h"
 #include "imu_filter.h"
-#include "imu_vibration.h"
 #include "mag_filter.h"
 #include "log_service.h"
 
@@ -179,6 +178,39 @@ static uint8_t imu_try_lock_bmi(void)
 #else
     return 1U;
 #endif
+}
+
+/*
+ * LSM303 sensor frame -> vehicle Body Frame.
+ *
+ * The selected board mapping is a 180-degree rotation about Body Z.  Keep the
+ * map as one proper rotation instead of distributing axis sign changes across
+ * the acquisition and attitude paths.  PCB orientation remains a hardware
+ * acceptance item; this is the source-level mapping recorded by the project:
+ *
+ *                  [-1  0  0]
+ *     R_lsm_body = [ 0 -1  0], det(R) = +1
+ *                  [ 0  0  1]
+ */
+static const float lsm303_sensor_to_body[3][3] = {
+    {-1.0f, 0.0f, 0.0f},
+    {0.0f, -1.0f, 0.0f},
+    {0.0f, 0.0f, 1.0f},
+};
+
+static Vector3f lsm303_to_body(Vector3f sensor)
+{
+    return (Vector3f){
+        (lsm303_sensor_to_body[0][0] * sensor.x) +
+            (lsm303_sensor_to_body[0][1] * sensor.y) +
+            (lsm303_sensor_to_body[0][2] * sensor.z),
+        (lsm303_sensor_to_body[1][0] * sensor.x) +
+            (lsm303_sensor_to_body[1][1] * sensor.y) +
+            (lsm303_sensor_to_body[1][2] * sensor.z),
+        (lsm303_sensor_to_body[2][0] * sensor.x) +
+            (lsm303_sensor_to_body[2][1] * sensor.y) +
+            (lsm303_sensor_to_body[2][2] * sensor.z),
+    };
 }
 
 static void imu_lock_bmi_driver(void)
@@ -639,12 +671,12 @@ static void imu_publish_filter_snapshot(const imu_raw_data_t *data)
         float accel_input[3] = {calibrated_data.ax, calibrated_data.ay,
                                 calibrated_data.az};
         float accel_output[3];
-        float mag_input[3] = {calibrated_data.mx, -calibrated_data.my,
+        float mag_input[3] = {calibrated_data.mx, calibrated_data.my,
                               calibrated_data.mz};
         float mag_output[3];
 
-        /* LSM accel enters in the established body-axis map. Magnetometer Y
-         * is mirrored before rotation and restored for the legacy yaw formula. */
+        /* LSM303 values were mapped to the Body Frame at acquisition. Apply
+         * only the frozen leveling matrix here; do not mirror an axis twice. */
         imu_leveling_rotate_vector(&g_leveling_lsm, accel_input, accel_output);
         imu_leveling_rotate_vector(&g_leveling_lsm, mag_input, mag_output);
         calibrated_data.ax = accel_output[0];
@@ -654,7 +686,7 @@ static void imu_publish_filter_snapshot(const imu_raw_data_t *data)
         calibrated_data.lsm_ay = accel_output[1];
         calibrated_data.lsm_az = accel_output[2];
         calibrated_data.mx = mag_output[0];
-        calibrated_data.my = -mag_output[1];
+        calibrated_data.my = mag_output[1];
         calibrated_data.mz = mag_output[2];
         calibrated_data.lsm_mx = calibrated_data.mx;
         calibrated_data.lsm_my = calibrated_data.my;
@@ -829,19 +861,19 @@ static void imu_dual_ahrs_feed_bmi(const bmi323_data_t *bmi_sample)
     input.bmi_accel = (dual_ahrs_vector3_t){bmi_sample->accel_x,
                                              bmi_sample->accel_y,
                                              bmi_sample->accel_z};
+    /* BMI acceleration and gyro share the same frozen leveling rotation in
+     * DualAHRS; no axis-specific sign change is permitted between them. */
     input.gyro = (dual_ahrs_vector3_t){bmi_sample->gyro_x, bmi_sample->gyro_y,
                                       bmi_sample->gyro_z};
     input.lsm_accel = (dual_ahrs_vector3_t){lsm_accel.ax, lsm_accel.ay,
                                             lsm_accel.az};
-    /* LSM303 magnetometer Y is mirrored relative to the vehicle body frame. */
-    input.mag = (dual_ahrs_vector3_t){lsm_mag.mx, -lsm_mag.my, lsm_mag.mz};
+    input.mag = (dual_ahrs_vector3_t){lsm_mag.mx, lsm_mag.my, lsm_mag.mz};
     input.bmi_timestamp_us = bmi_sample->timestamp_us;
     input.lsm_timestamp_us = lsm_accel.timestamp_us != 0U
                                  ? lsm_accel.timestamp_us
                                  : lsm_mag.timestamp_us;
     input.bmi_accel_valid = bmi_sample->accel_valid;
     input.bmi_gyro_valid = bmi_sample->gyro_valid;
-    input.radar_pwm_percent = imu_filter_get_radar_pwm();
     dual_ahrs_update(&input);
 }
 
@@ -878,19 +910,22 @@ static bsp_status_t imu_update_lsm303(void)
     status = acc_status != BSP_STATUS_OK ? acc_status : mag_status;
     timestamp = imu_time_now_ms();
     if (acc_status == BSP_STATUS_OK) {
-        /* The LSM303 accelerometer already follows the vehicle body axes used
-         * by BMI323: X forward, Y right, Z vertical. Preserve X here so both
-         * estimators use the same pitch polarity before leveling. */
-        next_accel.ax = acc.x;
-        next_accel.ay = acc.y;
-        next_accel.az = acc.z;
+        const Vector3f body_acc = lsm303_to_body(acc);
+
+        /* Convert the installed LSM303 sensor frame to the vehicle Body
+         * Frame before calibration and leveling. BMI323 remains unchanged. */
+        next_accel.ax = body_acc.x;
+        next_accel.ay = body_acc.y;
+        next_accel.az = body_acc.z;
         next_accel.timestamp = accel_success_tick;
         next_accel.timestamp_us = accel_timestamp_us;
     }
     if (mag_status == BSP_STATUS_OK) {
-        next_mag.mx = mag.x;
-        next_mag.my = mag.y;
-        next_mag.mz = mag.z;
+        const Vector3f body_mag = lsm303_to_body(mag);
+
+        next_mag.mx = body_mag.x;
+        next_mag.my = body_mag.y;
+        next_mag.mz = body_mag.z;
         next_mag.timestamp = mag_success_tick;
         next_mag.timestamp_us = mag_timestamp_us;
     }
@@ -922,15 +957,6 @@ static bsp_status_t imu_update_lsm303(void)
 
     if (mag_status == BSP_STATUS_OK) {
         mag_filter_update(&next_mag);
-    }
-
-    /* Capture at the LSM303 acquisition point. The vibration layer admits
-     * this only when its shared dual-IMU time window is active. */
-    if (acc_status == BSP_STATUS_OK) {
-        imu_vibration_capture_lsm(acc.x, acc.y, acc.z, accel_timestamp_us, 1U);
-    } else {
-        imu_vibration_capture_lsm(0.0f, 0.0f, 0.0f,
-                                  imu_time_now_us(), 0U);
     }
 
     return status;
@@ -1014,7 +1040,6 @@ static void imu_bmi323_task(void *argument)
         bmi323_raw_sample_t sample = {0};
         bool read_ok = false;
         uint64_t capture_timestamp_us;
-        bmi323_sample_rate_t capture_rate;
 
         if (bmi323_acquisition_enabled == 0U) {
             vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(IMU_TASK_PERIOD_MS));
@@ -1026,7 +1051,6 @@ static void imu_bmi323_task(void *argument)
                       bmi323_read_raw_sample(sample.accel, sample.gyro);
             imu_unlock_bmi_driver();
             capture_timestamp_us = imu_time_now_us();
-            capture_rate = bmi323_get_sample_rate();
             if (read_ok) {
                 sample.timestamp_us = capture_timestamp_us;
                 sample.valid = 1U;
@@ -1058,16 +1082,6 @@ static void imu_bmi323_task(void *argument)
                     };
                     imu_dual_ahrs_feed_bmi(&dual_sample);
                 }
-                /* BMI records are emitted at the independent acquisition
-                 * cadence, not from the manager's 100 Hz latest-sample view. */
-                imu_vibration_capture_bmi(
-                    bmi323_accel_raw_to_mps2(sample.accel[0]),
-                    bmi323_accel_raw_to_mps2(sample.accel[1]),
-                    bmi323_accel_raw_to_mps2(sample.accel[2]),
-                    bmi323_gyro_raw_to_rads(sample.gyro[0]),
-                    bmi323_gyro_raw_to_rads(sample.gyro[1]),
-                    bmi323_gyro_raw_to_rads(sample.gyro[2]),
-                    capture_timestamp_us, (uint16_t)capture_rate, 1U);
             } else {
                 const bmi323_data_t dual_sample = {
                     .timestamp = (uint32_t)(capture_timestamp_us /
@@ -1079,17 +1093,12 @@ static void imu_bmi323_task(void *argument)
                 };
                 imu_bmi_capture_failed();
                 imu_dual_ahrs_feed_bmi(&dual_sample);
-                imu_vibration_capture_bmi(0.0f, 0.0f, 0.0f,
-                                          0.0f, 0.0f, 0.0f,
-                                          capture_timestamp_us,
-                                          (uint16_t)capture_rate, 0U);
             }
         } else {
             /* Recovery or ODR reconfiguration owns the driver briefly. Do not
              * delay the high-rate producer; record the skipped interval. */
             imu_bmi_capture_note_contention_drop();
             capture_timestamp_us = imu_time_now_us();
-            capture_rate = bmi323_get_sample_rate();
             {
                 const bmi323_data_t dual_sample = {
                     .timestamp = (uint32_t)(capture_timestamp_us /
@@ -1101,10 +1110,6 @@ static void imu_bmi323_task(void *argument)
                 };
                 imu_dual_ahrs_feed_bmi(&dual_sample);
             }
-            imu_vibration_capture_bmi(0.0f, 0.0f, 0.0f,
-                                      0.0f, 0.0f, 0.0f,
-                                      capture_timestamp_us,
-                                      (uint16_t)capture_rate, 0U);
         }
 
         const bmi323_sample_rate_t current_rate = bmi323_get_sample_rate();
@@ -1268,6 +1273,13 @@ uint8_t imu_manager_finalize_dual_initialization(void)
         status.lsm_success == 0U || status.bmi_success == 0U) {
         return 0U;
     }
+    /* Primary AHRS is designed for the fixed 200 Hz BMI323 input stream.
+     * Apply the ODR after hardware init so a previous runtime-rate request
+     * cannot silently desynchronize the estimator and its anti-alias filter. */
+    if (imu_manager_set_bmi323_sample_rate(BMI323_SAMPLE_RATE_200HZ) !=
+        BSP_STATUS_OK) {
+        return 0U;
+    }
     imu_initialized = 1U;
     bmi323_acquisition_enabled = 1U;
     if (imu_manager_start_bmi323_task() != BSP_STATUS_OK) {
@@ -1282,6 +1294,13 @@ bsp_status_t imu_manager_set_bmi323_sample_rate(bmi323_sample_rate_t sample_rate
 {
     uint8_t success;
 
+    /* The active Primary AHRS filter is designed for BMI323 ODR=200 Hz.
+     * Reject other manager-level rates instead of allowing a silent LPF and
+     * decimation mismatch. The low-level driver enum remains available for
+     * isolated diagnostics that do not feed DualAHRS. */
+    if (sample_rate != BMI323_SAMPLE_RATE_200HZ) {
+        return BSP_STATUS_INVALID_ARG;
+    }
     if (imu_create_data_locks() != BSP_STATUS_OK) {
         return BSP_STATUS_ERROR;
     }
@@ -1366,7 +1385,6 @@ static bsp_status_t imu_prepare_lifecycle(uint8_t reset_count)
 
 #if !SMARTCAR_BMI323_DEBUG_ONLY
     imu_calibration_init();
-    imu_vibration_init();
     imu_filter_init();
     mag_filter_init();
     imu_boot_manager_init();

@@ -173,10 +173,6 @@ final class BLEManager: NSObject {
         sendFrame(SmartCarProtocol.encode(type: .radarPWMControl, payload: Data([clampedSpeed])))
     }
 
-    func sendRadarCalibrationStatusQuery() {
-        sendFrame(SmartCarProtocol.encode(type: .radarCalibrationStatus))
-    }
-
     private func sendFrame(_ data: Data) {
         guard let peripheral, let writeCharacteristic else {
             setError(.notConnected)

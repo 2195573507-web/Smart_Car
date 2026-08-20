@@ -116,12 +116,6 @@ final class SmartCarViewModel: ObservableObject {
         bleManager.sendRadarSpeed(percent)
     }
 
-    func queryRadarCalibrationPWM() {
-        guard status == .connected else { return }
-        transmittedFrameCount += 1
-        bleManager.sendRadarCalibrationStatusQuery()
-    }
-
     func refreshLogs() {
         logSnapshot = bleManager.decodedMessages
     }
@@ -149,12 +143,9 @@ final class SmartCarViewModel: ObservableObject {
         case .imuCalibrationBias: return "IMU_CAL_BIAS"
         case .imuCalibrationResult: return "IMU_CAL_RESULT"
         case .calibrationEvent: return "CAL_EVENT"
-        case .imuVibrationProfile: return "IMU_VIBRATION_PROFILE"
         case .imuTelemetry: return "IMU_TELEMETRY"
         case .dualIMUStatus: return "DUAL_IMU_STATUS"
         case .radarStatus: return "RADAR_STATUS"
-        case .radarCalibrationStatus: return "RADAR_CAL_STATUS"
-        case .radarVibrationStatus: return "RADAR_VIBRATION_STATUS"
         }
     }
 }

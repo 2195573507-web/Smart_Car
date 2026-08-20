@@ -11,11 +11,11 @@ extern "C" {
 #endif
 
 #define UART_LINK_USART USART2
-#define UART_LINK_BAUD_RATE UINT32_C(115200)
-#define UART_LINK_RX_RING_SIZE UINT16_C(512)
+#define UART_LINK_BAUD_RATE UINT32_C(921600)
+#define UART_LINK_RX_RING_SIZE UINT16_C(2048)
+#define UART_LINK_RX_DMA_SIZE UINT16_C(512)
 #define UART_LINK_TX_TIMEOUT_MS UINT32_C(20)
 
-/* uart_link_send() preserves the HAL status; these aliases name its outcome. */
 #define UART_TX_OK HAL_OK
 #define UART_TX_FAIL HAL_ERROR
 
@@ -36,6 +36,10 @@ uint32_t uart_link_get_last_rx_time(void);
 HAL_StatusTypeDef uart_link_send(const uint8_t *data, uint16_t length);
 size_t uart_link_read(uint8_t *data, size_t capacity);
 void uart_link_get_stats(uart_link_stats_t *stats);
+void uart_link_recover(void);
+/* IRQ vector dispatchers keep the HAL handles private to this transport layer. */
+void uart_link_handle_dma_rx_irq(void);
+void uart_link_handle_usart_irq(void);
 void uart_link_task(void *argument);
 void uart_link_task_start(void);
 

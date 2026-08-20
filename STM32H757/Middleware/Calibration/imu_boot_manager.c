@@ -3,92 +3,51 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "imu_filter.h"
 #include "imu_manager.h"
 #include "imu_time.h"
 #include "log_service.h"
-#include "sc_frame.h"
+#include "scbp_protocol_defs.h"
 
 #if defined(IMU_MANAGER_USE_FREERTOS)
 #include "FreeRTOS.h"
 #include "semphr.h"
 #endif
 
-/* Every lifecycle phase has a wall-clock guard. Shared capture windows close
- * on time, then their per-sensor sampling-quality gates decide completion. */
-#define DUAL_IMU_INIT_TIMEOUT_MS            UINT32_C(5000)
-#define DUAL_IMU_SELF_TEST_WINDOW_MS        UINT32_C(1000)
-#define DUAL_IMU_STATIC_SETTLE_MS           UINT32_C(2000)
-#define DUAL_IMU_STATIC_PWM_WAIT_MS         UINT32_C(30000)
-#define DUAL_IMU_STATIC_TIMEOUT_MARGIN_MS   UINT32_C(5000)
-#define DUAL_IMU_VIBRATION_PWM_WAIT_MS      UINT32_C(5000)
-#define DUAL_IMU_VIBRATION_TIMEOUT_MARGIN_MS UINT32_C(5000)
-#define DUAL_IMU_EVENT_ACK_TIMEOUT_MS       UINT32_C(500)
-#define DUAL_IMU_EVENT_MAX_RETRY            UINT8_C(3)
-#define DUAL_IMU_VERIFY_WINDOW_MS           UINT32_C(5000)
-#define DUAL_IMU_STATUS_PERIOD_MS           UINT32_C(200)
-#define DUAL_IMU_BOOT_READY_PERIOD_MS       UINT32_C(500)
-#define DUAL_IMU_PRIMARY_GRAVITY_MIN_MPS2   (9.4f)
-#define DUAL_IMU_PRIMARY_GRAVITY_MAX_MPS2   (10.2f)
+#define DUAL_IMU_INIT_TIMEOUT_MS UINT32_C(5000)
+#define DUAL_IMU_SELF_TEST_WINDOW_MS UINT32_C(1000)
+#define DUAL_IMU_STATIC_SETTLE_MS UINT32_C(2000)
+#define DUAL_IMU_STATIC_PWM_WAIT_MS UINT32_C(30000)
+#define DUAL_IMU_STATIC_TIMEOUT_MARGIN_MS UINT32_C(5000)
+#define DUAL_IMU_STATUS_PERIOD_MS UINT32_C(200)
+#define DUAL_IMU_BOOT_READY_PERIOD_MS UINT32_C(500)
+#define DUAL_IMU_PRIMARY_GRAVITY_MIN_MPS2 (9.4f)
+#define DUAL_IMU_PRIMARY_GRAVITY_MAX_MPS2 (10.2f)
 #define DUAL_IMU_STATIC_PHASE_TIMEOUT_MS \
     (DUAL_IMU_STATIC_PWM_WAIT_MS + DUAL_IMU_STATIC_SETTLE_MS + \
      IMU_CAL_STATIC_WINDOW_MS + DUAL_IMU_STATIC_TIMEOUT_MARGIN_MS)
-/* One vibration level budgets PWM_READY wait (5 s), settle (2 s), capture
- * window (10 s), and 5 s communication/scheduling margin: 22 s. */
-#define DUAL_IMU_VIBRATION_LEVEL_BUDGET_MS \
-    (DUAL_IMU_VIBRATION_PWM_WAIT_MS + DUAL_IMU_STATIC_SETTLE_MS + \
-     IMU_VIBRATION_STEP_WINDOW_MS + DUAL_IMU_VIBRATION_TIMEOUT_MARGIN_MS)
-/* Five identical levels form the 110 s vibration phase watchdog. */
-#define DUAL_IMU_VIBRATION_PHASE_TIMEOUT_MS \
-    (DUAL_IMU_VIBRATION_LEVEL_BUDGET_MS * \
-     (uint32_t)IMU_VIBRATION_PROFILE_COUNT)
 
-/* Fixed legacy 0x0202 progress ranges. These are presentation counters only;
- * quality gates continue to use each source's actual ODR and sample count. */
-#define IMU_COMPAT_STATIC_SAMPLE_TOTAL       UINT32_C(1000)
-#define IMU_COMPAT_VIBRATION_SAMPLE_TOTAL    UINT32_C(3000)
-#define IMU_STAGE_READY                      SC_CAL_STAGE_COMPLETE
+/* These are the frozen legacy 0x0202 presentation counters. They are not
+ * used as calibration quality gates. */
+#define IMU_COMPAT_STATIC_SAMPLE_TOTAL UINT32_C(1000)
+#define IMU_STAGE_READY SCBP_IMU_CAL_STAGE_COMPLETE
 
 typedef struct
 {
     dual_imu_manager_t dual;
     imu_boot_state_t state;
-
     uint8_t lsm_phase_complete;
     uint8_t bmi_phase_complete;
     uint8_t self_test_lsm_seen;
     uint8_t self_test_bmi_seen;
-
     uint8_t static_zero_ready;
     uint8_t static_window_started;
     uint8_t static_result_ready;
     uint32_t static_window_start_ms;
-
-    uint8_t vibration_pwm_ready;
-    uint8_t vibration_window_started;
-    uint8_t vibration_result_ready;
-    uint8_t vibration_index;
-    uint32_t vibration_window_start_ms;
-    uint32_t vibration_level_deadline_ms;
-    uint32_t vibration_step_deadline_ms;
-
-    uint8_t pending_radar_ready;
-    uint8_t pending_radar_pwm;
-    uint8_t radar_pwm;
     uint32_t settle_until_ms;
-
-    uint8_t event_waiting;
-    uint8_t pending_event_id;
-    uint8_t event_retry_count;
-    uint32_t event_deadline_ms;
-    uint8_t verify_acknowledged;
-
     uint32_t phase_deadline_ms;
     uint32_t next_boot_ready_ms;
     uint32_t last_status_tx_ms;
     uint8_t status_tx_initialized;
-
-    float rms;
     imu_boot_transport_callback_t transport;
 } dual_imu_boot_state_t;
 
@@ -123,6 +82,51 @@ static void ensure_boot_mutex(void)
         s_mutex = xSemaphoreCreateMutex();
     }
 #endif
+}
+
+static uint8_t time_reached(uint32_t now_ms, uint32_t deadline_ms)
+{
+    return (int32_t)(now_ms - deadline_ms) >= 0 ? 1U : 0U;
+}
+
+static uint8_t elapsed_percent(uint32_t now_ms, uint32_t start_ms,
+                               uint32_t duration_ms)
+{
+    const uint32_t elapsed_ms = now_ms - start_ms;
+    uint32_t percent;
+
+    if (duration_ms == 0U || elapsed_ms >= duration_ms) {
+        return 100U;
+    }
+    percent = ((uint64_t)elapsed_ms * UINT32_C(100)) / duration_ms;
+    return (uint8_t)(percent > 100U ? 100U : percent);
+}
+
+static uint32_t virtual_sample_count(uint32_t now_ms, uint32_t start_ms,
+                                     uint32_t duration_ms, uint32_t total)
+{
+    const uint32_t elapsed_ms = now_ms - start_ms;
+    const uint64_t count = duration_ms == 0U || elapsed_ms >= duration_ms
+                               ? total
+                               : ((uint64_t)elapsed_ms * total) / duration_ms;
+
+    return count > total ? total : (uint32_t)count;
+}
+
+static const char *imu_error_name(imu_error_t error)
+{
+    switch (error) {
+    case IMU_ERROR_LSM_INIT: return "LSM_INIT";
+    case IMU_ERROR_BMI_INIT: return "BMI_INIT";
+    case IMU_ERROR_INIT_TIMEOUT: return "INIT_TIMEOUT";
+    case IMU_ERROR_LSM_SELF_TEST: return "LSM_SELF_TEST";
+    case IMU_ERROR_BMI_SELF_TEST: return "BMI_SELF_TEST";
+    case IMU_ERROR_RADAR_SYNC_TIMEOUT: return "RADAR_SYNC_TIMEOUT";
+    case IMU_ERROR_STATIC_WINDOW: return "STATIC_WINDOW";
+    case IMU_ERROR_TASK_CREATE: return "TASK_CREATE";
+    case IMU_ERROR_NONE:
+    default: return "NONE";
+    }
 }
 
 static void boot_log(const char *text)
@@ -169,41 +173,21 @@ static void boot_log_leveling(void)
                    (int)lsm.valid, (double)lsm.g_local_mps2,
                    (double)lsm.tilt_deg, (int)lsm.fallback_reason);
     boot_log(line);
-    (void)snprintf(line, sizeof(line),
-                   "IMU_LEVEL_Q Lstd=%.3f Lgyro=%.3f Bstd=%.3f Bgyro=%.3f",
-                   (double)lsm.accel_std_mps2,
-                   (double)lsm.gyro_rms_radps,
-                   (double)bmi.accel_std_mps2,
-                   (double)bmi.gyro_rms_radps);
-    boot_log(line);
 }
 
 static uint8_t leveling_states_are_ready(void)
 {
-    char line[SMARTCAR_LOG_MAX_PAYLOAD + 1U];
     imu_leveling_state_t bmi = {0};
     imu_leveling_state_t lsm = {0};
-    uint8_t bmi_ready;
-    uint8_t lsm_ready;
 
     imu_manager_get_leveling_states(&bmi, &lsm);
-    bmi_ready = (bmi.valid != 0U &&
-                 bmi.fallback_reason == IMU_LEVELING_FALLBACK_NONE &&
-                 bmi.g_local_mps2 >= DUAL_IMU_PRIMARY_GRAVITY_MIN_MPS2 &&
-                 bmi.g_local_mps2 <= DUAL_IMU_PRIMARY_GRAVITY_MAX_MPS2)
-                    ? 1U
-                    : 0U;
-    lsm_ready = (lsm.valid != 0U &&
-                 lsm.fallback_reason == IMU_LEVELING_FALLBACK_NONE &&
-                 lsm.g_local_mps2 >= IMU_LEVELING_G_MIN &&
-                 lsm.g_local_mps2 <= IMU_LEVELING_G_MAX)
-                    ? 1U
-                    : 0U;
-
-    if (bmi_ready == 0U) {
+    if (bmi.valid == 0U || bmi.fallback_reason != IMU_LEVELING_FALLBACK_NONE ||
+        bmi.g_local_mps2 < DUAL_IMU_PRIMARY_GRAVITY_MIN_MPS2 ||
+        bmi.g_local_mps2 > DUAL_IMU_PRIMARY_GRAVITY_MAX_MPS2) {
         return 0U;
     }
-    if (lsm_ready == 0U) {
+    if (lsm.valid == 0U || lsm.fallback_reason != IMU_LEVELING_FALLBACK_NONE) {
+        char line[SMARTCAR_LOG_MAX_PAYLOAD + 1U];
         (void)snprintf(line, sizeof(line),
                        "DUAL_IMU_BOOT LSM leveling degraded valid=%u g=%.2f reason=%u",
                        (unsigned)lsm.valid, (double)lsm.g_local_mps2,
@@ -213,275 +197,85 @@ static uint8_t leveling_states_are_ready(void)
     return 1U;
 }
 
-static void boot_log_vibration_quality(const imu_vibration_dataset_t *lsm,
-                                       const imu_vibration_dataset_t *bmi)
-{
-    char line[SMARTCAR_LOG_MAX_PAYLOAD + 1U];
-
-    if (lsm == NULL || bmi == NULL) {
-        return;
-    }
-    (void)snprintf(line, sizeof(line),
-                   "IMU_VIB cfg=%u/%u cap=%lu/%lu inv=%lu/%lu rate=%u/%u q=%u/%u",
-                   (unsigned)lsm->configured_rate_hz,
-                   (unsigned)bmi->configured_rate_hz,
-                   (unsigned long)lsm->captured_count,
-                   (unsigned long)bmi->captured_count,
-                   (unsigned long)lsm->invalid_count,
-                   (unsigned long)bmi->invalid_count,
-                   (unsigned)lsm->actual_rate_hz,
-                   (unsigned)bmi->actual_rate_hz,
-                   (unsigned)lsm->quality_ok,
-                   (unsigned)bmi->quality_ok);
-    boot_log(line);
-}
-
-static void boot_log_verify_enter(void)
-{
-    char line[SMARTCAR_LOG_MAX_PAYLOAD + 1U];
-    uint8_t static_lsm;
-    uint8_t static_bmi;
-    const uint8_t vibration_lsm = imu_vibration_is_lsm_complete();
-    const uint8_t vibration_bmi = imu_vibration_is_bmi_complete();
-
-    /* The boot manager owns the accepted phase result. The calibration
-     * getters describe the mutable accumulator and are not the VERIFY gate. */
-    lock_boot();
-    static_lsm = s_boot.lsm_phase_complete;
-    static_bmi = s_boot.bmi_phase_complete;
-    unlock_boot();
-
-    (void)snprintf(line, sizeof(line),
-                   "IMU_VERIFY_ENTER static_lsm=%u static_bmi=%u "
-                   "vibration_lsm=%u vibration_bmi=%u",
-                   (unsigned)static_lsm,
-                   (unsigned)static_bmi,
-                   (unsigned)vibration_lsm,
-                   (unsigned)vibration_bmi);
-    boot_log(line);
-}
-
-static void boot_log_verify_timeout(uint8_t verify_lsm_done,
-                                    uint8_t verify_bmi_done,
-                                    uint8_t pending_event_id,
-                                    uint8_t event_waiting)
-{
-    char line[SMARTCAR_LOG_MAX_PAYLOAD + 1U];
-
-    (void)snprintf(line, sizeof(line),
-                   "IMU_VERIFY_TIMEOUT verify_lsm_done=%u "
-                   "verify_bmi_done=%u pending_event_id=%02X event_waiting=%02X",
-                   (unsigned)verify_lsm_done,
-                   (unsigned)verify_bmi_done,
-                   (unsigned)pending_event_id,
-                   (unsigned)event_waiting);
-    boot_log(line);
-}
-
-static uint8_t time_reached(uint32_t now_ms, uint32_t deadline_ms)
-{
-    return (int32_t)(now_ms - deadline_ms) >= 0 ? 1U : 0U;
-}
-
-static const char *imu_error_name(imu_error_t error)
-{
-    switch (error) {
-    case IMU_ERROR_LSM_INIT: return "LSM_INIT";
-    case IMU_ERROR_BMI_INIT: return "BMI_INIT";
-    case IMU_ERROR_INIT_TIMEOUT: return "INIT_TIMEOUT";
-    case IMU_ERROR_LSM_SELF_TEST: return "LSM_SELF_TEST";
-    case IMU_ERROR_BMI_SELF_TEST: return "BMI_SELF_TEST";
-    case IMU_ERROR_RADAR_SYNC_TIMEOUT: return "RADAR_SYNC_TIMEOUT";
-    case IMU_ERROR_STATIC_WINDOW: return "STATIC_WINDOW";
-    case IMU_ERROR_VIBRATION_WINDOW: return "VIBRATION_WINDOW";
-    case IMU_ERROR_CAL_EVENT_TIMEOUT: return "CAL_EVENT_TIMEOUT";
-    case IMU_ERROR_CAL_EVENT_REJECTED: return "CAL_EVENT_REJECTED";
-    case IMU_ERROR_VERIFY_TIMEOUT: return "VERIFY_TIMEOUT";
-    case IMU_ERROR_TASK_CREATE: return "TASK_CREATE";
-    case IMU_ERROR_NONE:
-    default: return "NONE";
-    }
-}
-
-static uint8_t elapsed_percent(uint32_t now_ms, uint32_t start_ms,
-                               uint32_t duration_ms)
-{
-    const uint32_t elapsed_ms = now_ms - start_ms;
-    uint32_t percent;
-
-    if (duration_ms == 0U || elapsed_ms >= duration_ms) {
-        return 100U;
-    }
-    percent = ((uint64_t)elapsed_ms * UINT32_C(100)) / duration_ms;
-    return (uint8_t)(percent > UINT32_C(100) ? UINT32_C(100) : percent);
-}
-
-static uint32_t virtual_sample_count(uint32_t now_ms, uint32_t start_ms,
-                                     uint32_t duration_ms, uint32_t total)
-{
-    const uint32_t elapsed_ms = now_ms - start_ms;
-    const uint64_t count = duration_ms == 0U || elapsed_ms >= duration_ms
-                               ? total
-                               : ((uint64_t)elapsed_ms * total) / duration_ms;
-
-    return count > total ? total : (uint32_t)count;
-}
-
 static void update_compat_state_locked(void)
 {
     switch (s_boot.dual.phase) {
-    case IMU_PHASE_IDLE:
-    case IMU_PHASE_INIT:
-    case IMU_PHASE_SELF_TEST:
-        s_boot.state = IMU_BOOT_INIT;
-        break;
     case IMU_PHASE_STATIC_CALIBRATION:
         if (s_boot.static_result_ready != 0U) {
             s_boot.state = STATIC_CAL_DONE;
         } else if (s_boot.static_window_started != 0U) {
             s_boot.state = STATIC_CAL_SAMPLE;
-        } else if (s_boot.static_zero_ready != 0U) {
-            s_boot.state = STATIC_CAL_WAIT;
         } else {
-            s_boot.state = WAIT_SYNC;
+            s_boot.state = s_boot.static_zero_ready != 0U
+                               ? STATIC_CAL_WAIT
+                               : WAIT_SYNC;
         }
-        break;
-    case IMU_PHASE_VIBRATION_CAPTURE:
-        if (s_boot.vibration_result_ready != 0U) {
-            s_boot.state = VIBRATION_LEVEL_DONE;
-        } else if (s_boot.vibration_window_started != 0U ||
-                   s_boot.vibration_pwm_ready != 0U) {
-            s_boot.state = VIBRATION_SAMPLE;
-        } else {
-            s_boot.state = WAIT_RADAR_LEVEL;
-        }
-        break;
-    case IMU_PHASE_VERIFY:
-        s_boot.state = FILTER_READY;
         break;
     case IMU_PHASE_READY:
         s_boot.state = IMU_READY;
         break;
     case IMU_PHASE_FAILED:
-    default:
         s_boot.state = IMU_ERROR;
+        break;
+    case IMU_PHASE_IDLE:
+    case IMU_PHASE_INIT:
+    case IMU_PHASE_SELF_TEST:
+    default:
+        s_boot.state = IMU_BOOT_INIT;
         break;
     }
 }
 
 static void update_progress_locked(uint32_t now_ms)
 {
-    uint8_t lsm_progress = 0U;
-    uint8_t bmi_progress = 0U;
     uint8_t phase_progress = 0U;
-    uint8_t overall_progress = s_boot.dual.overall_progress;
 
     switch (s_boot.dual.phase) {
-    case IMU_PHASE_IDLE:
-        overall_progress = 0U;
-        break;
     case IMU_PHASE_INIT:
-        lsm_progress = s_boot.lsm_phase_complete != 0U
-                           ? 100U
-                           : elapsed_percent(now_ms, s_boot.dual.phase_start_time,
-                                             DUAL_IMU_INIT_TIMEOUT_MS);
-        bmi_progress = s_boot.bmi_phase_complete != 0U
-                           ? 100U
-                           : elapsed_percent(now_ms, s_boot.dual.phase_start_time,
-                                             DUAL_IMU_INIT_TIMEOUT_MS);
-        phase_progress = lsm_progress < bmi_progress ? lsm_progress : bmi_progress;
-        overall_progress = (uint8_t)(((uint32_t)phase_progress * 2U) / 100U);
+        phase_progress = s_boot.lsm_phase_complete != 0U &&
+                                 s_boot.bmi_phase_complete != 0U
+                             ? 100U
+                             : elapsed_percent(now_ms,
+                                               s_boot.dual.phase_start_time,
+                                               DUAL_IMU_INIT_TIMEOUT_MS);
+        s_boot.dual.overall_progress = (uint8_t)((phase_progress * 2U) / 100U);
         break;
     case IMU_PHASE_SELF_TEST:
         phase_progress = elapsed_percent(now_ms, s_boot.dual.phase_start_time,
                                          DUAL_IMU_SELF_TEST_WINDOW_MS);
-        lsm_progress = phase_progress;
-        bmi_progress = phase_progress;
-        overall_progress = (uint8_t)(2U + ((uint32_t)phase_progress * 3U) / 100U);
+        s_boot.dual.overall_progress =
+            (uint8_t)(2U + ((uint32_t)phase_progress * 3U) / 100U);
         break;
     case IMU_PHASE_STATIC_CALIBRATION:
         if (s_boot.static_result_ready != 0U) {
             phase_progress = 100U;
-            overall_progress = 40U;
+            s_boot.dual.overall_progress = 100U;
         } else if (s_boot.static_window_started != 0U) {
             phase_progress = elapsed_percent(now_ms, s_boot.static_window_start_ms,
                                              IMU_CAL_STATIC_WINDOW_MS);
-            overall_progress = (uint8_t)(5U +
-                ((uint32_t)phase_progress * 35U) / 100U);
-        } else if (s_boot.static_zero_ready != 0U) {
-            phase_progress = elapsed_percent(now_ms,
-                                             s_boot.settle_until_ms -
-                                                 DUAL_IMU_STATIC_SETTLE_MS,
-                                             DUAL_IMU_STATIC_SETTLE_MS);
-            overall_progress = 5U;
+            s_boot.dual.overall_progress =
+                (uint8_t)(5U + ((uint32_t)phase_progress * 90U) / 100U);
         } else {
-            overall_progress = 5U;
+            s_boot.dual.overall_progress = 5U;
         }
-        lsm_progress = s_boot.lsm_phase_complete != 0U ? 100U : phase_progress;
-        bmi_progress = s_boot.bmi_phase_complete != 0U ? 100U : phase_progress;
-        break;
-    case IMU_PHASE_VIBRATION_CAPTURE:
-        if (s_boot.vibration_result_ready != 0U) {
-            phase_progress = (uint8_t)((((uint32_t)s_boot.vibration_index + 1U) *
-                                        100U) /
-                                       IMU_VIBRATION_PROFILE_COUNT);
-            overall_progress = (uint8_t)(40U +
-                (((uint32_t)s_boot.vibration_index + 1U) * 10U));
-        } else if (s_boot.vibration_window_started != 0U) {
-            const uint8_t level_progress = elapsed_percent(
-                now_ms, s_boot.vibration_window_start_ms,
-                IMU_VIBRATION_STEP_WINDOW_MS);
-            phase_progress = (uint8_t)((((uint32_t)s_boot.vibration_index * 100U) +
-                                        level_progress) /
-                                       IMU_VIBRATION_PROFILE_COUNT);
-            overall_progress = (uint8_t)(40U +
-                ((uint32_t)s_boot.vibration_index * 10U) +
-                ((uint32_t)level_progress * 10U) / 100U);
-        } else {
-            phase_progress = (uint8_t)(((uint32_t)s_boot.vibration_index * 100U) /
-                                       IMU_VIBRATION_PROFILE_COUNT);
-            overall_progress = (uint8_t)(40U +
-                ((uint32_t)s_boot.vibration_index * 10U));
-        }
-        lsm_progress = s_boot.lsm_phase_complete != 0U ? 100U : phase_progress;
-        bmi_progress = s_boot.bmi_phase_complete != 0U ? 100U : phase_progress;
-        break;
-    case IMU_PHASE_VERIFY:
-        lsm_progress = s_boot.lsm_phase_complete != 0U
-                           ? 100U
-                           : elapsed_percent(now_ms, s_boot.dual.phase_start_time,
-                                             DUAL_IMU_VERIFY_WINDOW_MS);
-        bmi_progress = s_boot.bmi_phase_complete != 0U
-                           ? 100U
-                           : elapsed_percent(now_ms, s_boot.dual.phase_start_time,
-                                             DUAL_IMU_VERIFY_WINDOW_MS);
-        phase_progress = lsm_progress < bmi_progress ? lsm_progress : bmi_progress;
-        if (s_boot.lsm_phase_complete != 0U &&
-            s_boot.bmi_phase_complete != 0U &&
-            s_boot.verify_acknowledged == 0U) {
-            /* Both local result checks passed; the final transport ACK is
-             * still pending, so do not report this phase as terminal. */
-            phase_progress = 90U;
-        } else if (s_boot.verify_acknowledged != 0U) {
-            phase_progress = 100U;
-        }
-        overall_progress = (uint8_t)(90U + ((uint32_t)phase_progress * 9U) / 100U);
         break;
     case IMU_PHASE_READY:
-        lsm_progress = 100U;
-        bmi_progress = 100U;
-        overall_progress = 100U;
+        phase_progress = 100U;
+        s_boot.dual.overall_progress = 100U;
         break;
     case IMU_PHASE_FAILED:
+    case IMU_PHASE_IDLE:
     default:
         break;
     }
 
-    s_boot.dual.lsm_progress = lsm_progress;
-    s_boot.dual.bmi_progress = bmi_progress;
-    s_boot.dual.overall_progress = overall_progress;
-    s_boot.dual.radar_pwm = s_boot.radar_pwm;
-    s_boot.dual.vibration_index = s_boot.vibration_index;
+    s_boot.dual.lsm_progress = s_boot.lsm_phase_complete != 0U
+                                   ? 100U
+                                   : phase_progress;
+    s_boot.dual.bmi_progress = s_boot.bmi_phase_complete != 0U
+                                   ? 100U
+                                   : phase_progress;
+    /* Keep the dual lifecycle flags available for local diagnostics. */
     s_boot.dual.flags = 0U;
     if (s_boot.lsm_phase_complete != 0U) {
         s_boot.dual.flags |= DUAL_IMU_STATUS_FLAG_LSM_PHASE_COMPLETE;
@@ -492,9 +286,6 @@ static void update_progress_locked(uint32_t now_ms)
     if (s_boot.dual.phase != IMU_PHASE_READY &&
         s_boot.dual.phase != IMU_PHASE_FAILED) {
         s_boot.dual.flags |= DUAL_IMU_STATUS_FLAG_PHASE_ACTIVE;
-    }
-    if (s_boot.event_waiting != 0U) {
-        s_boot.dual.flags |= DUAL_IMU_STATUS_FLAG_EVENT_WAITING;
     }
 }
 
@@ -528,15 +319,12 @@ static void fail_locked(imu_error_t error, uint32_t now_ms)
         return;
     }
     s_boot.dual.error = error;
-    s_boot.event_waiting = 0U;
     enter_phase_locked(IMU_PHASE_FAILED, now_ms);
-    s_boot.dual.overall_progress = progress;
-    update_compat_state_locked();
-    update_progress_locked(now_ms);
     s_boot.dual.overall_progress = progress;
 }
 
-static uint8_t send_frame(uint8_t type, const uint8_t *payload, uint16_t length)
+static uint8_t send_message(uint16_t message_id, uint8_t flags,
+                            const uint8_t *payload, uint8_t length)
 {
     imu_boot_transport_callback_t transport;
 
@@ -546,7 +334,7 @@ static uint8_t send_frame(uint8_t type, const uint8_t *payload, uint16_t length)
     if (transport == NULL) {
         return 0U;
     }
-    transport(type, payload, length);
+    transport(message_id, flags, payload, length);
     return 1U;
 }
 
@@ -558,39 +346,25 @@ static void put_u32_le(uint8_t *destination, uint32_t value)
     destination[3] = (uint8_t)(value >> 24U);
 }
 
-static void put_float_le(uint8_t *destination, float value)
-{
-    uint32_t bits = 0U;
-
-    (void)memcpy(&bits, &value, sizeof(bits));
-    put_u32_le(destination, bits);
-}
-
 static uint8_t legacy_cal_stage_locked(void)
 {
     switch (s_boot.dual.phase) {
     case IMU_PHASE_STATIC_CALIBRATION:
         if (s_boot.static_window_started != 0U) {
-            return SC_CAL_STAGE_STATIC_SAMPLE;
+            return SCBP_IMU_CAL_STAGE_STATIC_SAMPLE;
         }
         return s_boot.static_zero_ready != 0U
-                   ? SC_CAL_STAGE_STATIC_STABLE_WAIT
-                   : SC_CAL_STAGE_WAIT_RADAR_READY;
-    case IMU_PHASE_VIBRATION_CAPTURE:
-        return s_boot.vibration_window_started != 0U
-                   ? SC_CAL_STAGE_VIBRATION_SAMPLE
-                   : SC_CAL_STAGE_VIBRATION_STABLE_WAIT;
-    case IMU_PHASE_VERIFY:
-        return SC_CAL_STAGE_COMPLETE;
+                   ? SCBP_IMU_CAL_STAGE_STATIC_STABLE_WAIT
+                   : SCBP_IMU_CAL_STAGE_WAIT_RADAR_READY;
     case IMU_PHASE_READY:
         return IMU_STAGE_READY;
     case IMU_PHASE_FAILED:
-        return SC_CAL_STAGE_ERROR;
+        return SCBP_IMU_CAL_STAGE_ERROR;
     case IMU_PHASE_IDLE:
     case IMU_PHASE_INIT:
     case IMU_PHASE_SELF_TEST:
     default:
-        return SC_CAL_STAGE_WAIT_RADAR_READY;
+        return SCBP_IMU_CAL_STAGE_WAIT_RADAR_READY;
     }
 }
 
@@ -605,170 +379,26 @@ static void send_cal_status(void)
     stage = legacy_cal_stage_locked();
     unlock_boot();
     payload[0] = stage;
-    payload[1] = status.radar_pwm;
+    payload[1] = 0U;
     put_u32_le(&payload[2], status.sample_count);
     put_u32_le(&payload[6], status.sample_total);
     payload[10] = status.error;
-    (void)send_frame(SC_TYPE_STM_IMU_CAL_STATUS, payload,
-                     (uint16_t)sizeof(payload));
+    (void)send_message(SCBP_MSG_ID_IMU_CAL_STATUS, SCBP_CAN_FLAG_STREAM_DATA,
+                       payload, (uint8_t)sizeof(payload));
 }
 
-static void send_dual_status(void)
-{
-    dual_imu_manager_t status = {0};
-    uint8_t payload[SC_DUAL_IMU_STATUS_PAYLOAD_LENGTH] = {0};
-
-    imu_boot_manager_get_dual_status(&status);
-    payload[0] = (uint8_t)status.phase;
-    payload[1] = status.lsm_progress;
-    payload[2] = status.bmi_progress;
-    payload[3] = status.overall_progress;
-    payload[4] = (uint8_t)status.error;
-    payload[5] = status.flags;
-    payload[6] = status.vibration_index;
-    payload[7] = status.radar_pwm;
-    put_u32_le(&payload[8], status.phase_start_time);
-    put_u32_le(&payload[12], status.phase_end_time);
-    (void)send_frame(SC_TYPE_DUAL_IMU_STATUS, payload,
-                     (uint16_t)sizeof(payload));
-}
-
-static void send_cal_bias(void)
-{
-    const imu_calibration_bias_t bias = imu_calibration_get_bias();
-    uint8_t payload[12];
-
-    put_float_le(&payload[0], bias.ax);
-    put_float_le(&payload[4], bias.ay);
-    put_float_le(&payload[8], bias.az);
-    (void)send_frame(SC_TYPE_IMU_CAL_BIAS, payload, (uint16_t)sizeof(payload));
-}
-
-static void send_dual_calibration_result(void)
-{
-    const imu_calibration_result_t result = imu_calibration_get_result();
-    uint8_t lsm_payload[14];
-    uint8_t bmi_payload[26];
-
-    lsm_payload[0] = IMU_SENSOR_LSM303;
-    lsm_payload[1] = SC_IMU_CAL_FLAG_ACCEL;
-    put_float_le(&lsm_payload[2], result.lsm_accel_bias.x);
-    put_float_le(&lsm_payload[6], result.lsm_accel_bias.y);
-    put_float_le(&lsm_payload[10], result.lsm_accel_bias.z);
-    (void)send_frame(SC_TYPE_IMU_CAL_RESULT, lsm_payload,
-                     (uint16_t)sizeof(lsm_payload));
-
-    bmi_payload[0] = IMU_SENSOR_BMI323;
-    bmi_payload[1] = SC_IMU_CAL_FLAG_ACCEL | SC_IMU_CAL_FLAG_GYRO;
-    put_float_le(&bmi_payload[2], result.bmi_accel_bias.x);
-    put_float_le(&bmi_payload[6], result.bmi_accel_bias.y);
-    put_float_le(&bmi_payload[10], result.bmi_accel_bias.z);
-    put_float_le(&bmi_payload[14], result.bmi_gyro_bias.x);
-    put_float_le(&bmi_payload[18], result.bmi_gyro_bias.y);
-    put_float_le(&bmi_payload[22], result.bmi_gyro_bias.z);
-    (void)send_frame(SC_TYPE_IMU_CAL_RESULT, bmi_payload,
-                     (uint16_t)sizeof(bmi_payload));
-}
-
-static void send_vibration_status(const lsm_vibration_profile_t *profile)
-{
-    uint8_t payload[17];
-
-    if (profile == NULL) {
-        return;
-    }
-    payload[0] = profile->radar_pwm;
-    put_float_le(&payload[1], profile->rms_x);
-    put_float_le(&payload[5], profile->rms_y);
-    put_float_le(&payload[9], profile->rms_z);
-    put_float_le(&payload[13], profile->total_rms);
-    (void)send_frame(SC_TYPE_STM_RADAR_VIBRATION_STATUS, payload,
-                     (uint16_t)sizeof(payload));
-}
-
-static void send_dual_vibration_profile(const lsm_vibration_profile_t *lsm,
-                                        const bmi_vibration_profile_t *bmi)
-{
-    uint8_t lsm_payload[26];
-    uint8_t bmi_payload[42];
-
-    if (lsm == NULL || bmi == NULL) {
-        return;
-    }
-    lsm_payload[0] = IMU_SENSOR_LSM303;
-    lsm_payload[1] = lsm->radar_pwm;
-    put_u32_le(&lsm_payload[2], lsm->sample_count);
-    put_u32_le(&lsm_payload[6], lsm->timestamp);
-    put_float_le(&lsm_payload[10], lsm->rms_x);
-    put_float_le(&lsm_payload[14], lsm->rms_y);
-    put_float_le(&lsm_payload[18], lsm->rms_z);
-    put_float_le(&lsm_payload[22], lsm->total_rms);
-    (void)send_frame(SC_TYPE_IMU_VIBRATION_PROFILE, lsm_payload,
-                     (uint16_t)sizeof(lsm_payload));
-
-    bmi_payload[0] = IMU_SENSOR_BMI323;
-    bmi_payload[1] = bmi->radar_pwm;
-    put_u32_le(&bmi_payload[2], bmi->sample_count);
-    put_u32_le(&bmi_payload[6], bmi->timestamp);
-    put_float_le(&bmi_payload[10], bmi->accel_rms_x);
-    put_float_le(&bmi_payload[14], bmi->accel_rms_y);
-    put_float_le(&bmi_payload[18], bmi->accel_rms_z);
-    put_float_le(&bmi_payload[22], bmi->accel_total_rms);
-    put_float_le(&bmi_payload[26], bmi->gyro_rms_x);
-    put_float_le(&bmi_payload[30], bmi->gyro_rms_y);
-    put_float_le(&bmi_payload[34], bmi->gyro_rms_z);
-    put_float_le(&bmi_payload[38], bmi->gyro_total_rms);
-    (void)send_frame(SC_TYPE_IMU_VIBRATION_PROFILE, bmi_payload,
-                     (uint16_t)sizeof(bmi_payload));
-}
-
-static uint8_t send_cal_event(uint8_t event_id)
+static void send_cal_event(uint8_t event_id)
 {
     const uint8_t payload[1] = {event_id};
-    return send_frame(SC_TYPE_CAL_EVENT, payload, (uint16_t)sizeof(payload));
+    (void)send_message(SCBP_MSG_ID_CAL_EVENT, SCBP_CAN_FLAG_ACK_REQUIRED,
+                       payload, (uint8_t)sizeof(payload));
 }
 
 static void send_stm_boot_ready(void)
 {
-    /* The BOOT_READY payload remains frozen for the existing S3 calibration
-     * manager. DUAL_IMU_STATUS carries the new lifecycle representation. */
     const uint8_t payload[2] = {(uint8_t)WAIT_SYNC, 0U};
-    (void)send_frame(SC_TYPE_STM_BOOT_READY, payload, (uint16_t)sizeof(payload));
-}
-
-static void begin_event_wait_locked(uint8_t event_id, uint32_t now_ms)
-{
-    s_boot.event_waiting = 1U;
-    s_boot.pending_event_id = event_id;
-    s_boot.event_retry_count = 0U;
-    s_boot.event_deadline_ms = now_ms + DUAL_IMU_EVENT_ACK_TIMEOUT_MS;
-    update_compat_state_locked();
-    update_progress_locked(now_ms);
-}
-
-static uint8_t expected_vibration_pwm_locked(uint8_t index)
-{
-    return imu_vibration_get_pwm_level(index);
-}
-
-static void arm_vibration_level_locked(uint32_t now_ms)
-{
-    const uint8_t expected = expected_vibration_pwm_locked(s_boot.vibration_index);
-
-    s_boot.vibration_pwm_ready = 0U;
-    s_boot.vibration_window_started = 0U;
-    s_boot.vibration_result_ready = 0U;
-    s_boot.vibration_level_deadline_ms = now_ms + DUAL_IMU_VIBRATION_PWM_WAIT_MS;
-    s_boot.vibration_step_deadline_ms = now_ms + DUAL_IMU_VIBRATION_LEVEL_BUDGET_MS;
-    if (s_boot.pending_radar_ready != 0U &&
-        s_boot.pending_radar_pwm == expected) {
-        s_boot.pending_radar_ready = 0U;
-        s_boot.radar_pwm = expected;
-        s_boot.vibration_pwm_ready = 1U;
-        s_boot.settle_until_ms = now_ms + DUAL_IMU_STATIC_SETTLE_MS;
-    }
-    update_compat_state_locked();
-    update_progress_locked(now_ms);
+    (void)send_message(SCBP_MSG_ID_BOOT_READY, SCBP_CAN_FLAG_ACK_REQUIRED,
+                       payload, (uint8_t)sizeof(payload));
 }
 
 static void enter_static_phase_locked(uint32_t now_ms)
@@ -777,37 +407,10 @@ static void enter_static_phase_locked(uint32_t now_ms)
     s_boot.static_zero_ready = 0U;
     s_boot.static_window_started = 0U;
     s_boot.static_result_ready = 0U;
-    s_boot.radar_pwm = 0U;
     s_boot.phase_deadline_ms = now_ms + DUAL_IMU_STATIC_PHASE_TIMEOUT_MS;
     s_boot.next_boot_ready_ms = now_ms + DUAL_IMU_BOOT_READY_PERIOD_MS;
     update_compat_state_locked();
     update_progress_locked(now_ms);
-}
-
-static void enter_vibration_phase_locked(uint32_t now_ms)
-{
-    enter_phase_locked(IMU_PHASE_VIBRATION_CAPTURE, now_ms);
-    s_boot.vibration_index = 0U;
-    s_boot.phase_deadline_ms = now_ms + DUAL_IMU_VIBRATION_PHASE_TIMEOUT_MS;
-    arm_vibration_level_locked(now_ms);
-}
-
-static void enter_verify_phase_locked(uint32_t now_ms)
-{
-    const uint8_t lsm_complete =
-        (s_boot.lsm_phase_complete != 0U &&
-         imu_vibration_is_lsm_complete() != 0U) ? 1U : 0U;
-    const uint8_t bmi_complete =
-        (s_boot.bmi_phase_complete != 0U &&
-         imu_vibration_is_bmi_complete() != 0U) ? 1U : 0U;
-
-    enter_phase_locked(IMU_PHASE_VERIFY, now_ms);
-    /* VERIFY is a terminal result barrier. Retain the accepted final-window
-     * results instead of allowing a transient getter read to clear them. */
-    s_boot.lsm_phase_complete = lsm_complete;
-    s_boot.bmi_phase_complete = bmi_complete;
-    s_boot.verify_acknowledged = 0U;
-    s_boot.phase_deadline_ms = now_ms + DUAL_IMU_VERIFY_WINDOW_MS;
 }
 
 void imu_boot_manager_reset(void)
@@ -829,7 +432,6 @@ void imu_boot_manager_reset(void)
     unlock_boot();
 
     imu_calibration_start();
-    imu_vibration_init();
 }
 
 void imu_boot_manager_init(void)
@@ -848,35 +450,16 @@ void imu_boot_manager_set_transport(imu_boot_transport_callback_t callback)
 
 void imu_boot_manager_step(void)
 {
-    const uint64_t now_timestamp_us = imu_time_now_us();
-    const uint32_t now_ms =
-        (uint32_t)(now_timestamp_us / UINT64_C(1000));
+    const uint64_t now_us = imu_time_now_us();
+    const uint32_t now_ms = (uint32_t)(now_us / UINT64_C(1000));
+    imu_dual_init_status_t init_status = {0};
     uint8_t start_init = 0U;
     uint8_t finalize_init = 0U;
     uint8_t start_static = 0U;
     uint8_t finish_static = 0U;
-    uint8_t start_vibration = 0U;
-    uint8_t finish_vibration = 0U;
-    uint8_t retry_event = 0U;
-    uint8_t retry_event_id = 0U;
-    uint8_t send_boot_ready = 0U;
+    uint8_t send_boot_ready_now = 0U;
     uint8_t send_static_result = 0U;
-    uint8_t send_vibration_result = 0U;
-    uint8_t send_verify_event = 0U;
-    uint8_t apply_filter = 0U;
     uint8_t send_status = 0U;
-    uint8_t verify_result_check = 0U;
-    uint8_t verify_lsm_done = 0U;
-    uint8_t verify_bmi_done = 0U;
-    uint8_t log_verify_timeout = 0U;
-    uint8_t timeout_verify_lsm_done = 0U;
-    uint8_t timeout_verify_bmi_done = 0U;
-    uint8_t timeout_pending_event_id = 0U;
-    uint8_t timeout_event_waiting = 0U;
-    uint8_t verify_ack_timeout_ready = 0U;
-    lsm_vibration_profile_t lsm_vibration = {0};
-    bmi_vibration_profile_t bmi_vibration = {0};
-    imu_dual_init_status_t init_status = {0};
 
     lock_boot();
     if (s_boot.dual.phase == IMU_PHASE_IDLE) {
@@ -896,9 +479,7 @@ void imu_boot_manager_step(void)
     if (start_init != 0U) {
         if (imu_manager_start_dual_initialization() != BSP_STATUS_OK) {
             lock_boot();
-            if (s_boot.dual.phase == IMU_PHASE_INIT) {
-                fail_locked(IMU_ERROR_TASK_CREATE, now_ms);
-            }
+            fail_locked(IMU_ERROR_TASK_CREATE, now_ms);
             unlock_boot();
         } else {
             boot_log("DUAL_IMU_BOOT INIT workers released");
@@ -909,20 +490,14 @@ void imu_boot_manager_step(void)
     lock_boot();
     if (s_boot.dual.phase == IMU_PHASE_INIT) {
         s_boot.lsm_phase_complete =
-            (init_status.lsm_complete != 0U && init_status.lsm_success != 0U)
-                ? 1U
-                : 0U;
+            init_status.lsm_complete != 0U && init_status.lsm_success != 0U;
         s_boot.bmi_phase_complete =
-            (init_status.bmi_complete != 0U && init_status.bmi_success != 0U)
-                ? 1U
-                : 0U;
-        if ((init_status.lsm_complete != 0U && init_status.lsm_success == 0U) ||
-            (init_status.bmi_complete != 0U && init_status.bmi_success == 0U)) {
-            fail_locked(init_status.lsm_complete != 0U &&
-                                init_status.lsm_success == 0U
-                            ? IMU_ERROR_LSM_INIT
-                            : IMU_ERROR_BMI_INIT,
-                        now_ms);
+            init_status.bmi_complete != 0U && init_status.bmi_success != 0U;
+        if (init_status.lsm_complete != 0U && init_status.lsm_success == 0U) {
+            fail_locked(IMU_ERROR_LSM_INIT, now_ms);
+        } else if (init_status.bmi_complete != 0U &&
+                   init_status.bmi_success == 0U) {
+            fail_locked(IMU_ERROR_BMI_INIT, now_ms);
         } else if (s_boot.lsm_phase_complete != 0U &&
                    s_boot.bmi_phase_complete != 0U) {
             finalize_init = 1U;
@@ -936,9 +511,7 @@ void imu_boot_manager_step(void)
     if (finalize_init != 0U) {
         if (imu_manager_finalize_dual_initialization() == 0U) {
             lock_boot();
-            if (s_boot.dual.phase == IMU_PHASE_INIT) {
-                fail_locked(IMU_ERROR_TASK_CREATE, now_ms);
-            }
+            fail_locked(IMU_ERROR_TASK_CREATE, now_ms);
             unlock_boot();
         } else {
             lock_boot();
@@ -953,17 +526,6 @@ void imu_boot_manager_step(void)
         }
     }
 
-    /* VERIFY is also a dual-sensor barrier. Re-check only the final vibration
-     * window outside the boot lock; accepted static results remain owned by
-     * the boot state machine and are not re-derived from mutable getters. */
-    lock_boot();
-    verify_result_check = s_boot.dual.phase == IMU_PHASE_VERIFY ? 1U : 0U;
-    unlock_boot();
-    if (verify_result_check != 0U) {
-        verify_lsm_done = imu_vibration_is_lsm_complete();
-        verify_bmi_done = imu_vibration_is_bmi_complete();
-    }
-
     lock_boot();
     if (s_boot.dual.phase == IMU_PHASE_SELF_TEST &&
         time_reached(now_ms, s_boot.phase_deadline_ms) != 0U) {
@@ -972,7 +534,7 @@ void imu_boot_manager_step(void)
         if (s_boot.lsm_phase_complete != 0U &&
             s_boot.bmi_phase_complete != 0U) {
             enter_static_phase_locked(now_ms);
-            send_boot_ready = 1U;
+            send_boot_ready_now = 1U;
         } else {
             fail_locked(s_boot.self_test_lsm_seen == 0U
                             ? IMU_ERROR_LSM_SELF_TEST
@@ -981,11 +543,14 @@ void imu_boot_manager_step(void)
         }
     }
     if (s_boot.dual.phase == IMU_PHASE_STATIC_CALIBRATION) {
-        if (time_reached(now_ms, s_boot.phase_deadline_ms) != 0U &&
-            s_boot.static_result_ready == 0U) {
-            fail_locked(IMU_ERROR_STATIC_WINDOW, now_ms);
+        if (s_boot.static_result_ready == 0U &&
+            time_reached(now_ms, s_boot.phase_deadline_ms) != 0U) {
+            fail_locked(s_boot.static_zero_ready == 0U
+                            ? IMU_ERROR_RADAR_SYNC_TIMEOUT
+                            : IMU_ERROR_STATIC_WINDOW,
+                        now_ms);
         } else if (s_boot.static_window_started != 0U &&
-                   imu_calibration_window_expired(now_timestamp_us) != 0U) {
+                   imu_calibration_window_expired(now_us) != 0U) {
             finish_static = 1U;
         } else if (s_boot.static_zero_ready != 0U &&
                    s_boot.static_window_started == 0U &&
@@ -997,119 +562,25 @@ void imu_boot_manager_step(void)
         } else if (s_boot.static_zero_ready == 0U &&
                    time_reached(now_ms, s_boot.next_boot_ready_ms) != 0U) {
             s_boot.next_boot_ready_ms = now_ms + DUAL_IMU_BOOT_READY_PERIOD_MS;
-            send_boot_ready = 1U;
-        }
-    }
-    if (s_boot.dual.phase == IMU_PHASE_VIBRATION_CAPTURE) {
-        if (time_reached(now_ms, s_boot.phase_deadline_ms) != 0U &&
-            s_boot.vibration_result_ready == 0U) {
-            fail_locked(IMU_ERROR_VIBRATION_WINDOW, now_ms);
-        } else if (s_boot.vibration_result_ready == 0U &&
-                   time_reached(now_ms, s_boot.vibration_step_deadline_ms) != 0U) {
-            fail_locked(IMU_ERROR_VIBRATION_WINDOW, now_ms);
-        } else if (s_boot.vibration_result_ready == 0U &&
-                   s_boot.vibration_window_started == 0U &&
-                   s_boot.vibration_pwm_ready == 0U &&
-                   time_reached(now_ms, s_boot.vibration_level_deadline_ms) != 0U) {
-            fail_locked(IMU_ERROR_RADAR_SYNC_TIMEOUT, now_ms);
-        } else if (s_boot.vibration_pwm_ready != 0U &&
-                   s_boot.vibration_window_started == 0U &&
-                   time_reached(now_ms, s_boot.settle_until_ms) != 0U) {
-            start_vibration = 1U;
-        } else if (s_boot.vibration_window_started != 0U) {
-            finish_vibration = 1U;
-        }
-    }
-    if (s_boot.dual.phase == IMU_PHASE_VERIFY) {
-        if (verify_result_check != 0U) {
-            /* Completion is monotonic once a result passed the VERIFY entry
-             * gate; concurrent sampling/reset activity cannot undo it. */
-            if (verify_lsm_done != 0U) {
-                s_boot.lsm_phase_complete = 1U;
-            }
-            if (verify_bmi_done != 0U) {
-                s_boot.bmi_phase_complete = 1U;
-            }
-            verify_lsm_done = s_boot.lsm_phase_complete;
-            verify_bmi_done = s_boot.bmi_phase_complete;
-        }
-        if (s_boot.verify_acknowledged != 0U &&
-            s_boot.lsm_phase_complete != 0U &&
-            s_boot.bmi_phase_complete != 0U) {
-            apply_filter = 1U;
-        } else if (time_reached(now_ms, s_boot.phase_deadline_ms) != 0U) {
-            if (s_boot.lsm_phase_complete != 0U &&
-                s_boot.bmi_phase_complete != 0U) {
-                /* Local calibration and vibration results are authoritative;
-                 * a lost final notification ACK must not strand the IMU in
-                 * VERIFY forever. The event remains best-effort telemetry. */
-                s_boot.event_waiting = 0U;
-                s_boot.verify_acknowledged = 1U;
-                verify_ack_timeout_ready = 1U;
-                apply_filter = 1U;
-            } else {
-                timeout_verify_lsm_done = verify_lsm_done;
-                timeout_verify_bmi_done = verify_bmi_done;
-                timeout_pending_event_id = s_boot.pending_event_id;
-                timeout_event_waiting = s_boot.event_waiting;
-                log_verify_timeout = 1U;
-                fail_locked(IMU_ERROR_VERIFY_TIMEOUT, now_ms);
-            }
-        } else if (s_boot.lsm_phase_complete != 0U &&
-                   s_boot.bmi_phase_complete != 0U &&
-                   s_boot.event_waiting == 0U) {
-            begin_event_wait_locked(SC_CAL_EVENT_COMPLETE, now_ms);
-            send_verify_event = 1U;
-        }
-    }
-    if (s_boot.event_waiting != 0U &&
-        time_reached(now_ms, s_boot.event_deadline_ms) != 0U) {
-        if (s_boot.dual.phase == IMU_PHASE_VERIFY &&
-            s_boot.lsm_phase_complete != 0U &&
-            s_boot.bmi_phase_complete != 0U &&
-            s_boot.event_retry_count >= DUAL_IMU_EVENT_MAX_RETRY) {
-            /* COMPLETE is a notification after both local result barriers;
-             * do not fail the boot FSM solely because its final ACK was lost. */
-            s_boot.event_waiting = 0U;
-            s_boot.verify_acknowledged = 1U;
-            verify_ack_timeout_ready = 1U;
-            apply_filter = 1U;
-        } else if (s_boot.event_retry_count < DUAL_IMU_EVENT_MAX_RETRY) {
-            ++s_boot.event_retry_count;
-            s_boot.event_deadline_ms = now_ms + DUAL_IMU_EVENT_ACK_TIMEOUT_MS;
-            retry_event = 1U;
-            retry_event_id = s_boot.pending_event_id;
-        } else {
-            fail_locked(IMU_ERROR_CAL_EVENT_TIMEOUT, now_ms);
+            send_boot_ready_now = 1U;
         }
     }
     update_compat_state_locked();
     update_progress_locked(now_ms);
     unlock_boot();
 
-    if (log_verify_timeout != 0U) {
-        boot_log_verify_timeout(timeout_verify_lsm_done,
-                                timeout_verify_bmi_done,
-                                timeout_pending_event_id,
-                                timeout_event_waiting);
-    }
-    if (verify_ack_timeout_ready != 0U) {
-        boot_log("DUAL_IMU_BOOT VERIFY ACK timeout; local results accepted");
-    }
-
-    if (send_boot_ready != 0U) {
+    if (send_boot_ready_now != 0U) {
         send_stm_boot_ready();
     }
     if (start_static != 0U) {
         imu_calibration_start();
         imu_calibration_begin_window(
-            now_timestamp_us,
-            (uint16_t)imu_manager_get_bmi323_sample_rate());
+            now_us, (uint16_t)imu_manager_get_bmi323_sample_rate());
         boot_log("DUAL_IMU_BOOT STATIC_CALIBRATION window opened");
     }
     if (finish_static != 0U) {
         uint8_t lsm_done =
-            imu_calibration_finish_window(now_timestamp_us) != 0U &&
+            imu_calibration_finish_window(now_us) != 0U &&
             imu_calibration_is_lsm_complete() != 0U;
         uint8_t bmi_done = imu_calibration_is_bmi_complete();
 
@@ -1118,7 +589,7 @@ void imu_boot_manager_step(void)
             if (leveling_states_are_ready() == 0U) {
                 lsm_done = 0U;
                 bmi_done = 0U;
-                boot_log("DUAL_IMU_BOOT leveling rejected: non-physical gravity or fallback");
+                boot_log("DUAL_IMU_BOOT leveling rejected");
             }
         }
         boot_log_static_quality();
@@ -1132,121 +603,25 @@ void imu_boot_manager_step(void)
             s_boot.static_window_started = 0U;
             if (lsm_done != 0U && bmi_done != 0U) {
                 s_boot.static_result_ready = 1U;
-                begin_event_wait_locked(SC_CAL_EVENT_STATIC_CAL_DONE, now_ms);
+                enter_phase_locked(IMU_PHASE_READY, now_ms);
+                s_boot.lsm_phase_complete = 1U;
+                s_boot.bmi_phase_complete = 1U;
+                update_progress_locked(now_ms);
                 send_static_result = 1U;
             } else {
                 fail_locked(IMU_ERROR_STATIC_WINDOW, now_ms);
             }
-            update_progress_locked(now_ms);
         }
         unlock_boot();
-    }
-    if (start_vibration != 0U) {
-        uint8_t profile_index;
-        uint8_t radar_pwm;
-        const uint64_t start_us = now_timestamp_us;
-        uint8_t started;
-
-        lock_boot();
-        profile_index = s_boot.vibration_index;
-        radar_pwm = s_boot.radar_pwm;
-        unlock_boot();
-        imu_vibration_select_profile(profile_index);
-        started = imu_vibration_start_window(radar_pwm, start_us,
-                                              IMU_VIBRATION_WINDOW_DURATION_US,
-                                              (uint16_t)imu_manager_get_bmi323_sample_rate());
-        lock_boot();
-        if (s_boot.dual.phase == IMU_PHASE_VIBRATION_CAPTURE &&
-            s_boot.vibration_window_started == 0U &&
-            s_boot.vibration_pwm_ready != 0U) {
-            if (started != 0U) {
-                s_boot.vibration_window_started = 1U;
-                s_boot.vibration_window_start_ms = (uint32_t)(start_us / UINT64_C(1000));
-                s_boot.vibration_pwm_ready = 0U;
-            } else {
-                fail_locked(IMU_ERROR_VIBRATION_WINDOW, now_ms);
-            }
-            update_compat_state_locked();
-            update_progress_locked(now_ms);
+        if (send_static_result != 0U) {
+            send_cal_status();
+            send_cal_event(SCBP_CAL_EVENT_STATIC_DONE);
+            boot_log("DUAL_IMU_BOOT READY");
+            boot_log_leveling();
         }
-        unlock_boot();
-    }
-    if (finish_vibration != 0U) {
-        imu_vibration_window_t window;
-        imu_vibration_dataset_t lsm_dataset;
-        imu_vibration_dataset_t bmi_dataset;
-
-        imu_vibration_poll(now_timestamp_us);
-        window = imu_vibration_get_window();
-        if (window.complete != 0U) {
-            const uint8_t lsm_done = imu_vibration_is_lsm_complete();
-            const uint8_t bmi_done = imu_vibration_is_bmi_complete();
-
-            lsm_vibration = imu_vibration_get_lsm_result();
-            bmi_vibration = imu_vibration_get_bmi_result();
-            lsm_dataset = imu_vibration_get_lsm_dataset();
-            bmi_dataset = imu_vibration_get_bmi_dataset();
-            boot_log_vibration_quality(&lsm_dataset, &bmi_dataset);
-            lock_boot();
-            if (s_boot.dual.phase == IMU_PHASE_VIBRATION_CAPTURE &&
-                s_boot.vibration_window_started != 0U) {
-                s_boot.lsm_phase_complete = lsm_done;
-                s_boot.bmi_phase_complete = bmi_done;
-                s_boot.vibration_window_started = 0U;
-                if (lsm_done != 0U && bmi_done != 0U) {
-                    s_boot.vibration_result_ready = 1U;
-                    s_boot.rms = lsm_vibration.total_rms;
-                    begin_event_wait_locked(SC_CAL_EVENT_VIBRATION_STEP_DONE,
-                                            now_ms);
-                    send_vibration_result = 1U;
-                } else {
-                    fail_locked(IMU_ERROR_VIBRATION_WINDOW, now_ms);
-                }
-                update_progress_locked(now_ms);
-            }
-            unlock_boot();
-        }
-    }
-    if (retry_event != 0U) {
-        (void)send_cal_event(retry_event_id);
-    }
-    if (send_static_result != 0U) {
-        send_cal_status();
-        send_cal_bias();
-        send_dual_calibration_result();
-        (void)send_cal_event(SC_CAL_EVENT_STATIC_CAL_DONE);
-    }
-    if (send_vibration_result != 0U) {
-        send_vibration_status(&lsm_vibration);
-        send_dual_vibration_profile(&lsm_vibration, &bmi_vibration);
-        (void)send_cal_event(SC_CAL_EVENT_VIBRATION_STEP_DONE);
-    }
-    if (send_verify_event != 0U) {
-        (void)send_cal_event(SC_CAL_EVENT_COMPLETE);
-    }
-    if (apply_filter != 0U) {
-        lsm_vibration_profile_t profiles[IMU_VIBRATION_PROFILE_COUNT];
-
-        for (uint8_t index = 0U; index < IMU_VIBRATION_PROFILE_COUNT; ++index) {
-            (void)imu_vibration_get_lsm_profile(index, &profiles[index]);
-        }
-        filter_set_vibration_profile(profiles, IMU_VIBRATION_PROFILE_COUNT);
-        lock_boot();
-        if (s_boot.dual.phase == IMU_PHASE_VERIFY &&
-            s_boot.verify_acknowledged != 0U) {
-            enter_phase_locked(IMU_PHASE_READY, now_ms);
-            s_boot.lsm_phase_complete = 1U;
-            s_boot.bmi_phase_complete = 1U;
-            update_compat_state_locked();
-            update_progress_locked(now_ms);
-        }
-        unlock_boot();
-        boot_log("DUAL_IMU_BOOT READY");
-        boot_log_leveling();
     }
     if (send_status != 0U) {
         send_cal_status();
-        send_dual_status();
     }
 }
 
@@ -1276,105 +651,24 @@ void imu_boot_manager_update(const imu_raw_data_t *raw_data)
     unlock_boot();
 }
 
-void imu_boot_manager_on_radar_pwm_ready(uint8_t speed)
+uint8_t imu_boot_manager_on_radar_pwm_ready(uint8_t speed)
 {
-    uint8_t ack[2] = {speed, 0U};
     uint8_t accepted = 0U;
     const uint32_t now_ms = imu_time_now_ms();
 
     lock_boot();
-    if (s_boot.dual.phase == IMU_PHASE_STATIC_CALIBRATION) {
-        if (speed == 0U && s_boot.static_result_ready == 0U) {
-            if (s_boot.static_zero_ready == 0U) {
-                s_boot.static_zero_ready = 1U;
-                s_boot.radar_pwm = 0U;
-                s_boot.settle_until_ms = now_ms + DUAL_IMU_STATIC_SETTLE_MS;
-            }
-            accepted = 1U;
-        } else if (s_boot.event_waiting != 0U &&
-                   s_boot.pending_event_id == SC_CAL_EVENT_STATIC_CAL_DONE &&
-                   speed == expected_vibration_pwm_locked(0U)) {
-            s_boot.pending_radar_ready = 1U;
-            s_boot.pending_radar_pwm = speed;
-            accepted = 1U;
+    if (s_boot.dual.phase == IMU_PHASE_STATIC_CALIBRATION && speed == 0U &&
+        s_boot.static_result_ready == 0U) {
+        if (s_boot.static_zero_ready == 0U) {
+            s_boot.static_zero_ready = 1U;
+            s_boot.settle_until_ms = now_ms + DUAL_IMU_STATIC_SETTLE_MS;
         }
-    } else if (s_boot.dual.phase == IMU_PHASE_VIBRATION_CAPTURE) {
-        uint8_t expected = expected_vibration_pwm_locked(s_boot.vibration_index);
-
-        if (s_boot.event_waiting != 0U &&
-            s_boot.pending_event_id == SC_CAL_EVENT_VIBRATION_STEP_DONE &&
-            s_boot.vibration_index + 1U < IMU_VIBRATION_PROFILE_COUNT) {
-            expected = expected_vibration_pwm_locked(
-                (uint8_t)(s_boot.vibration_index + 1U));
-            if (speed == expected) {
-                s_boot.pending_radar_ready = 1U;
-                s_boot.pending_radar_pwm = speed;
-                accepted = 1U;
-            }
-        } else if (speed == expected) {
-            if (s_boot.vibration_window_started != 0U) {
-                accepted = 1U; /* Idempotent PWM_READY retransmission. */
-            } else if (s_boot.vibration_pwm_ready == 0U) {
-                s_boot.radar_pwm = speed;
-                s_boot.vibration_pwm_ready = 1U;
-                s_boot.settle_until_ms = now_ms + DUAL_IMU_STATIC_SETTLE_MS;
-                accepted = 1U;
-            }
-        }
-    }
-    if (accepted == 0U) {
-        ack[1] = 1U;
+        accepted = 1U;
     }
     update_compat_state_locked();
     update_progress_locked(now_ms);
     unlock_boot();
-
-    (void)send_frame(SC_TYPE_RADAR_PWM_ACK, ack, (uint16_t)sizeof(ack));
-}
-
-void imu_boot_manager_on_cal_event_ack(uint8_t event_id, uint8_t result)
-{
-    const uint32_t now_ms = imu_time_now_ms();
-    uint8_t verify_entered = 0U;
-
-    lock_boot();
-    if (s_boot.event_waiting == 0U || event_id != s_boot.pending_event_id) {
-        unlock_boot();
-        return;
-    }
-    if (result != CAL_ACK_OK) {
-        fail_locked(IMU_ERROR_CAL_EVENT_REJECTED, now_ms);
-        unlock_boot();
-        return;
-    }
-
-    s_boot.event_waiting = 0U;
-    s_boot.event_retry_count = 0U;
-    if (event_id == SC_CAL_EVENT_STATIC_CAL_DONE &&
-        s_boot.dual.phase == IMU_PHASE_STATIC_CALIBRATION) {
-        enter_vibration_phase_locked(now_ms);
-    } else if (event_id == SC_CAL_EVENT_VIBRATION_STEP_DONE &&
-               s_boot.dual.phase == IMU_PHASE_VIBRATION_CAPTURE) {
-        if (s_boot.vibration_index + 1U >= IMU_VIBRATION_PROFILE_COUNT) {
-            enter_verify_phase_locked(now_ms);
-            verify_entered = 1U;
-        } else {
-            ++s_boot.vibration_index;
-            arm_vibration_level_locked(now_ms);
-        }
-    } else if (event_id == SC_CAL_EVENT_COMPLETE &&
-               s_boot.dual.phase == IMU_PHASE_VERIFY) {
-        s_boot.verify_acknowledged = 1U;
-    } else {
-        fail_locked(IMU_ERROR_CAL_EVENT_REJECTED, now_ms);
-    }
-    update_compat_state_locked();
-    update_progress_locked(now_ms);
-    unlock_boot();
-
-    if (verify_entered != 0U) {
-        boot_log_verify_enter();
-    }
+    return accepted;
 }
 
 imu_boot_state_t imu_boot_manager_get_state(void)
@@ -1398,8 +692,6 @@ void imu_boot_manager_get_status(imu_boot_status_t *status)
     status->progress = s_boot.dual.overall_progress;
     status->lsm_progress = s_boot.dual.lsm_progress;
     status->bmi_progress = s_boot.dual.bmi_progress;
-    status->radar_pwm = s_boot.radar_pwm;
-    status->rms = s_boot.rms;
     status->error = (uint8_t)s_boot.dual.error;
     status->error_reason = imu_error_name(s_boot.dual.error);
     if (s_boot.dual.phase == IMU_PHASE_STATIC_CALIBRATION) {
@@ -1413,20 +705,9 @@ void imu_boot_manager_get_status(imu_boot_status_t *status)
                                                 IMU_CAL_STATIC_WINDOW_MS,
                                                 IMU_COMPAT_STATIC_SAMPLE_TOTAL)
                                           : 0U);
-    } else if (s_boot.dual.phase == IMU_PHASE_VIBRATION_CAPTURE) {
-        status->sample_total = IMU_COMPAT_VIBRATION_SAMPLE_TOTAL;
-        status->sample_count = s_boot.vibration_result_ready != 0U
-                                   ? IMU_COMPAT_VIBRATION_SAMPLE_TOTAL
-                                   : (s_boot.vibration_window_started != 0U
-                                          ? virtual_sample_count(
-                                                imu_time_now_ms(),
-                                                s_boot.vibration_window_start_ms,
-                                                IMU_VIBRATION_STEP_WINDOW_MS,
-                                                IMU_COMPAT_VIBRATION_SAMPLE_TOTAL)
-                                          : 0U);
     } else if (s_boot.dual.phase == IMU_PHASE_READY) {
-        status->sample_count = IMU_COMPAT_VIBRATION_SAMPLE_TOTAL;
-        status->sample_total = IMU_COMPAT_VIBRATION_SAMPLE_TOTAL;
+        status->sample_count = IMU_COMPAT_STATIC_SAMPLE_TOTAL;
+        status->sample_total = IMU_COMPAT_STATIC_SAMPLE_TOTAL;
         status->error = (uint8_t)IMU_ERROR_NONE;
         status->error_reason = imu_error_name(IMU_ERROR_NONE);
     } else {
@@ -1460,16 +741,20 @@ uint8_t imu_boot_manager_get_phase_timing(imu_phase_t phase,
 
 uint8_t imu_boot_manager_is_ready(void)
 {
+    uint8_t ready;
+
     lock_boot();
-    const uint8_t ready = s_boot.dual.phase == IMU_PHASE_READY ? 1U : 0U;
+    ready = s_boot.dual.phase == IMU_PHASE_READY ? 1U : 0U;
     unlock_boot();
     return ready;
 }
 
 uint8_t imu_boot_manager_is_error(void)
 {
+    uint8_t failed;
+
     lock_boot();
-    const uint8_t failed = s_boot.dual.phase == IMU_PHASE_FAILED ? 1U : 0U;
+    failed = s_boot.dual.phase == IMU_PHASE_FAILED ? 1U : 0U;
     unlock_boot();
     return failed;
 }
@@ -1482,16 +767,6 @@ uint8_t imu_boot_manager_get_progress(void)
     progress = s_boot.dual.overall_progress;
     unlock_boot();
     return progress;
-}
-
-uint8_t imu_boot_manager_get_radar_pwm(void)
-{
-    uint8_t radar_pwm;
-
-    lock_boot();
-    radar_pwm = s_boot.radar_pwm;
-    unlock_boot();
-    return radar_pwm;
 }
 
 uint32_t imu_boot_manager_get_sample_count(void)
@@ -1508,14 +783,4 @@ uint32_t imu_boot_manager_get_sample_total(void)
 
     imu_boot_manager_get_status(&status);
     return status.sample_total;
-}
-
-float imu_boot_manager_get_rms(void)
-{
-    float rms;
-
-    lock_boot();
-    rms = s_boot.rms;
-    unlock_boot();
-    return rms;
 }

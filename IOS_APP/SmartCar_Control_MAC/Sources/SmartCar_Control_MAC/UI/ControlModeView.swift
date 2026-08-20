@@ -15,8 +15,7 @@ struct ControlModeView: View {
                 AttitudeCard(store: telemetryStore.attitude, angleUnit: angleUnit)
                 CalibrationCard(
                     viewModel: viewModel.calibrationViewModel,
-                    staticCalibration: telemetryStore.staticCalibration,
-                    vibration: telemetryStore.vibration
+                    staticCalibration: telemetryStore.staticCalibration
                 )
             }
             .frame(maxWidth: 365)
@@ -51,7 +50,6 @@ struct ControlModeView: View {
 struct CalibrationCard: View {
     @ObservedObject var viewModel: CalibrationViewModel
     @ObservedObject var staticCalibration: StaticCalibrationState
-    @ObservedObject var vibration: RadarVibrationState
     @Environment(\.locale) private var locale
 
     var body: some View {
@@ -89,7 +87,6 @@ struct CalibrationCard: View {
             }
             .tint(statusColor)
 
-            KeyValueRow(label: "Current PWM", value: "\(viewModel.status.currentPWM)%")
             if viewModel.status.state == .sample {
                 KeyValueRow(label: "Sample",
                             value: "\(viewModel.status.sampleProgress)")
@@ -119,28 +116,6 @@ struct CalibrationCard: View {
             CalibrationVectorRow(title: "BMI323 Accel Bias", vector: staticResult.bmiAccelBias)
             CalibrationVectorRow(title: "BMI323 Gyro Bias", vector: staticResult.bmiGyroBias)
 
-            let pwmValues = Set(vibration.snapshot.lsmProfiles.map(\.pwm))
-                .union(vibration.snapshot.bmiProfiles.map(\.pwm))
-                .sorted()
-            if !pwmValues.isEmpty {
-                Divider()
-                Text("Vibration RMS")
-                    .font(.caption.weight(.bold))
-                    .foregroundStyle(.secondary)
-                ForEach(pwmValues, id: \.self) { pwm in
-                    let lsm = vibration.snapshot.lsmProfiles.first { $0.pwm == pwm }
-                    let bmi = vibration.snapshot.bmiProfiles.first { $0.pwm == pwm }
-                    HStack(spacing: 8) {
-                        Text("\(pwm)%")
-                            .frame(width: 42, alignment: .leading)
-                        VibrationRMSValue(label: "LSM", value: lsm?.totalRMS)
-                        VibrationRMSValue(label: "BMI A", value: bmi?.accelTotalRMS)
-                        VibrationRMSValue(label: "BMI G", value: bmi?.gyroTotalRMS)
-                    }
-                }
-                .font(.caption.monospaced())
-            }
-
             if viewModel.status.state == .complete {
                 Label(AppStrings.text("calibration.completed", locale: locale),
                       systemImage: "checkmark.circle.fill")
@@ -160,9 +135,7 @@ struct CalibrationCard: View {
         case .setPWM: return AppStrings.text("calibration.set_pwm", locale: locale)
         case .waitStable: return AppStrings.text("calibration.stabilize", locale: locale)
         case .sample:
-            return viewModel.status.sampleMode == .static
-                ? AppStrings.text("calibration.static_sampling", locale: locale)
-                : AppStrings.text("calibration.vibration_sampling", locale: locale)
+            return AppStrings.text("calibration.static_sampling", locale: locale)
         case .complete: return AppStrings.text("calibration.done", locale: locale)
         case .error: return AppStrings.text("calibration.failed", locale: locale)
         }
@@ -193,21 +166,6 @@ private struct CalibrationVectorRow: View {
                 CalibrationBiasValue(label: "Z", value: vector?.z)
             }
         }
-    }
-}
-
-private struct VibrationRMSValue: View {
-    let label: String
-    let value: Float?
-
-    var body: some View {
-        VStack(alignment: .trailing, spacing: 2) {
-            Text(label)
-                .font(.caption2.weight(.bold))
-                .foregroundStyle(.secondary)
-            Text(value?.displayValue ?? "--")
-        }
-        .frame(maxWidth: .infinity, alignment: .trailing)
     }
 }
 

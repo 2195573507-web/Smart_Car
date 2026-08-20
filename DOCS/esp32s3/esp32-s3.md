@@ -25,7 +25,7 @@ STM UART frames, BLE notifications/logs, radar state/logs, service statistics.
 ## Public Interfaces
 
 `stm_uart_*`, `s3_ble_*`, `smartcar_service_init`, radar init/parser/control
-interfaces, and `sc_frame_*`.
+interfaces, and shared `scbp_*` protocol interfaces.
 
 ## Dependencies
 
@@ -34,14 +34,15 @@ radar components.
 
 ## Current Status
 
-Source-established gateway/radar scaffold. BLE transport and STM/radar raw
-transport are present. App command callback registration and IMU telemetry
-relay are incomplete in current source.
+Source-established gateway/radar scaffold. BLE transport, App command callback
+registration, SCBP-CAN parsing, and selected IMU telemetry relay are present.
+Physical UART, BLE, radar, and sensor behavior remain unverified.
 
 ## Known Issues
 
-`imu_bridge_handle()` is empty. `s3_ble_set_rx_callback()` has no visible
-registration caller. Do not describe the gateway as an end-to-end relay.
+The gateway must keep SCBP-CAN UART frames separate from the App BLE envelope;
+it is not an end-to-end raw-frame relay. `radar_uart.c` remains the independent
+radar UART1/GPIO44 path.
 
 ## Modification Notes
 

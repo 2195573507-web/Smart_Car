@@ -1,5 +1,6 @@
 #include "uart_link.h"
 
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -9,52 +10,39 @@
 
 #include "log_service.h"
 
-#define UART_LINK_RX_CHUNK_SIZE UINT16_C(128)
-#define UART_LINK_RX_TIMEOUT_MS UINT32_C(5)
 #define UART_LINK_TASK_STACK_WORDS UINT16_C(384)
 #define UART_LINK_TASK_PRIORITY (tskIDLE_PRIORITY + 1U)
 #define UART_LINK_STACK_MONITOR_PERIOD_MS UINT32_C(5000)
-
-#ifndef SMARTCAR_BMI323_DEBUG_ONLY
-#define SMARTCAR_BMI323_DEBUG_ONLY 0
-#endif
+#define UART_LINK_IRQ_PRIORITY UINT32_C(5)
+#define UART_LINK_DCACHE_LINE_SIZE UINT32_C(32)
 
 static UART_HandleTypeDef s_handle;
+static DMA_HandleTypeDef s_rx_dma;
 static SemaphoreHandle_t s_tx_mutex;
-static uint8_t s_ready;
+static volatile uint8_t s_ready;
+static volatile uint8_t s_dma_active;
+static volatile uint8_t s_restart_requested;
+static volatile uint8_t s_recovering;
 static uint8_t s_ring[UART_LINK_RX_RING_SIZE];
+static uint8_t s_dma_rx[UART_LINK_RX_DMA_SIZE]
+    __attribute__((section(".dma_buffer"), aligned(32)));
 static volatile uint16_t s_head;
 static volatile uint16_t s_tail;
 static volatile uint16_t s_count;
-static uint32_t s_rx_bytes;
-static uint32_t s_rx_frames;
-static uint32_t s_last_rx_time;
+static volatile uint32_t s_rx_bytes;
+static volatile uint32_t s_rx_frames;
+static volatile uint32_t s_last_rx_time;
+static volatile uint32_t s_rx_overflow_count;
+static volatile uint32_t s_rx_drop_bytes;
+static volatile uint32_t s_tx_count;
+static volatile uint32_t s_tx_timeout_count;
+static volatile uint32_t s_hal_error_count;
 static TaskHandle_t s_uart_link_task_handle;
 
-static void uart_link_log_stack(void)
-{
-    char line[80];
-    const UBaseType_t free_stack = s_uart_link_task_handle == NULL
-                                       ? 0U
-                                       : uxTaskGetStackHighWaterMark(
-                                             s_uart_link_task_handle);
-
-    (void)snprintf(line, sizeof(line),
-                   "[TASK_STACK]\r\ntask=uart_link_task\r\nfree_stack=%lu\r\n",
-                   (unsigned long)free_stack);
-    LOG_INFO(line);
-}
-static uint32_t s_rx_overflow_count;
-static uint32_t s_rx_drop_bytes;
-static uint32_t s_tx_count;
-static uint32_t s_tx_timeout_count;
-static uint32_t s_hal_error_count;
-
-static uint16_t ring_push(const uint8_t *data, uint16_t length)
+static uint16_t ring_push_locked(const uint8_t *data, uint16_t length)
 {
     uint16_t dropped = 0U;
 
-    taskENTER_CRITICAL();
     for (uint16_t index = 0U; index < length; ++index) {
         if (s_count == UART_LINK_RX_RING_SIZE) {
             if (dropped == 0U) {
@@ -69,13 +57,72 @@ static uint16_t ring_push(const uint8_t *data, uint16_t length)
         s_head = (uint16_t)((s_head + 1U) % UART_LINK_RX_RING_SIZE);
         ++s_count;
     }
-    taskEXIT_CRITICAL();
     return dropped;
 }
 
-void uart_link_init(void)
+static uint16_t ring_push_from_isr(const uint8_t *data, uint16_t length)
 {
-    memset(&s_handle, 0, sizeof(s_handle));
+    UBaseType_t mask;
+    uint16_t dropped;
+
+    if (data == NULL || length == 0U) {
+        return 0U;
+    }
+    mask = taskENTER_CRITICAL_FROM_ISR();
+    dropped = ring_push_locked(data, length);
+    s_rx_bytes += length;
+    ++s_rx_frames;
+    s_last_rx_time = HAL_GetTick();
+    taskEXIT_CRITICAL_FROM_ISR(mask);
+    return dropped;
+}
+
+static void dcache_invalidate(const uint8_t *data, uint16_t length)
+{
+    uintptr_t start;
+    uintptr_t end;
+    uintptr_t aligned_start;
+    uintptr_t aligned_end;
+
+    if (data == NULL || length == 0U) {
+        return;
+    }
+    start = (uintptr_t)data;
+    end = start + length;
+    aligned_start = start & ~(uintptr_t)(UART_LINK_DCACHE_LINE_SIZE - 1U);
+    aligned_end = (end + UART_LINK_DCACHE_LINE_SIZE - 1U) &
+                  ~(uintptr_t)(UART_LINK_DCACHE_LINE_SIZE - 1U);
+    SCB_InvalidateDCache_by_Addr((uint32_t *)aligned_start,
+                                 (int32_t)(aligned_end - aligned_start));
+}
+
+static uint8_t uart_link_configure_dma(void)
+{
+    __HAL_RCC_DMA1_CLK_ENABLE();
+    (void)memset(&s_rx_dma, 0, sizeof(s_rx_dma));
+    s_rx_dma.Instance = DMA1_Stream0;
+    s_rx_dma.Init.Request = DMA_REQUEST_USART2_RX;
+    s_rx_dma.Init.Direction = DMA_PERIPH_TO_MEMORY;
+    s_rx_dma.Init.PeriphInc = DMA_PINC_DISABLE;
+    s_rx_dma.Init.MemInc = DMA_MINC_ENABLE;
+    s_rx_dma.Init.PeriphDataAlignment = DMA_PDATAALIGN_BYTE;
+    s_rx_dma.Init.MemDataAlignment = DMA_MDATAALIGN_BYTE;
+    s_rx_dma.Init.Mode = DMA_NORMAL;
+    s_rx_dma.Init.Priority = DMA_PRIORITY_HIGH;
+    s_rx_dma.Init.FIFOMode = DMA_FIFOMODE_DISABLE;
+    if (HAL_DMA_Init(&s_rx_dma) != HAL_OK) {
+        return 0U;
+    }
+    __HAL_LINKDMA(&s_handle, hdmarx, s_rx_dma);
+    HAL_NVIC_SetPriority(DMA1_Stream0_IRQn, UART_LINK_IRQ_PRIORITY, 0U);
+    HAL_NVIC_EnableIRQ(DMA1_Stream0_IRQn);
+    HAL_NVIC_SetPriority(USART2_IRQn, UART_LINK_IRQ_PRIORITY, 0U);
+    HAL_NVIC_EnableIRQ(USART2_IRQn);
+    return 1U;
+}
+
+static uint8_t uart_link_configure_uart(void)
+{
     s_handle.Instance = UART_LINK_USART;
     s_handle.Init.BaudRate = UART_LINK_BAUD_RATE;
     s_handle.Init.WordLength = UART_WORDLENGTH_8B;
@@ -87,7 +134,43 @@ void uart_link_init(void)
     s_handle.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
     s_handle.Init.ClockPrescaler = UART_PRESCALER_DIV1;
     s_handle.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
+    if (HAL_UART_Init(&s_handle) != HAL_OK) {
+        return 0U;
+    }
+    (void)HAL_UARTEx_SetTxFifoThreshold(&s_handle, UART_TXFIFO_THRESHOLD_1_8);
+    (void)HAL_UARTEx_SetRxFifoThreshold(&s_handle, UART_RXFIFO_THRESHOLD_1_8);
+    (void)HAL_UARTEx_EnableFifoMode(&s_handle);
+    return 1U;
+}
 
+static uint8_t uart_link_start_dma_receive(void)
+{
+    HAL_StatusTypeDef status;
+
+    s_dma_active = 0U;
+    dcache_invalidate(s_dma_rx, UART_LINK_RX_DMA_SIZE);
+    __HAL_UART_CLEAR_FLAG(&s_handle,
+                          UART_CLEAR_OREF | UART_CLEAR_NEF | UART_CLEAR_PEF |
+                              UART_CLEAR_FEF);
+    status = HAL_UARTEx_ReceiveToIdle_DMA(&s_handle, s_dma_rx,
+                                           UART_LINK_RX_DMA_SIZE);
+    if (status != HAL_OK) {
+        ++s_hal_error_count;
+        __HAL_UART_CLEAR_FLAG(&s_handle,
+                              UART_CLEAR_OREF | UART_CLEAR_NEF | UART_CLEAR_PEF |
+                                  UART_CLEAR_FEF);
+        return 0U;
+    }
+    /* ReceiveToIdle reports half-transfer events by default; only IDLE/full events
+       terminate and rearm this normal-mode transaction. */
+    __HAL_DMA_DISABLE_IT(&s_rx_dma, DMA_IT_HT);
+    s_dma_active = 1U;
+    return 1U;
+}
+
+void uart_link_init(void)
+{
+    (void)memset(&s_handle, 0, sizeof(s_handle));
     s_head = 0U;
     s_tail = 0U;
     s_count = 0U;
@@ -99,16 +182,17 @@ void uart_link_init(void)
     s_tx_count = 0U;
     s_tx_timeout_count = 0U;
     s_hal_error_count = 0U;
-    s_ready = HAL_UART_Init(&s_handle) == HAL_OK ? 1U : 0U;
-    if (s_ready != 0U) {
-        (void)HAL_UARTEx_SetTxFifoThreshold(&s_handle, UART_TXFIFO_THRESHOLD_1_8);
-        (void)HAL_UARTEx_SetRxFifoThreshold(&s_handle, UART_RXFIFO_THRESHOLD_1_8);
-        (void)HAL_UARTEx_EnableFifoMode(&s_handle);
-        s_tx_mutex = xSemaphoreCreateMutex();
-        if (s_tx_mutex == NULL) {
-            s_ready = 0U;
-        }
+    s_dma_active = 0U;
+    s_restart_requested = 0U;
+    s_recovering = 0U;
+    s_tx_mutex = xSemaphoreCreateMutex();
+    if (s_tx_mutex == NULL || uart_link_configure_uart() == 0U ||
+        uart_link_configure_dma() == 0U || uart_link_start_dma_receive() == 0U) {
+        s_ready = 0U;
+        ++s_hal_error_count;
+        return;
     }
+    s_ready = 1U;
 }
 
 uint8_t uart_link_is_ready(void)
@@ -130,31 +214,25 @@ HAL_StatusTypeDef uart_link_send(const uint8_t *data, uint16_t length)
 {
     HAL_StatusTypeDef status;
     const uint32_t start_ms = HAL_GetTick();
+    uint32_t elapsed_ms;
 
     if (s_ready == 0U || data == NULL || length == 0U || s_tx_mutex == NULL) {
-        taskENTER_CRITICAL();
         ++s_hal_error_count;
-        taskEXIT_CRITICAL();
         return UART_TX_FAIL;
     }
     if (xSemaphoreTake(s_tx_mutex, pdMS_TO_TICKS(UART_LINK_TX_TIMEOUT_MS)) != pdTRUE) {
-        taskENTER_CRITICAL();
         ++s_tx_timeout_count;
-        taskEXIT_CRITICAL();
         return HAL_TIMEOUT;
     }
-    const uint32_t elapsed_ms = (uint32_t)(HAL_GetTick() - start_ms);
+    elapsed_ms = HAL_GetTick() - start_ms;
     if (elapsed_ms >= UART_LINK_TX_TIMEOUT_MS) {
         (void)xSemaphoreGive(s_tx_mutex);
-        taskENTER_CRITICAL();
         ++s_tx_timeout_count;
-        taskEXIT_CRITICAL();
         return HAL_TIMEOUT;
     }
     status = HAL_UART_Transmit(&s_handle, (uint8_t *)data, length,
                                UART_LINK_TX_TIMEOUT_MS - elapsed_ms);
     (void)xSemaphoreGive(s_tx_mutex);
-    taskENTER_CRITICAL();
     if (status == HAL_OK) {
         ++s_tx_count;
     } else if (status == HAL_TIMEOUT) {
@@ -162,17 +240,18 @@ HAL_StatusTypeDef uart_link_send(const uint8_t *data, uint16_t length)
     } else {
         ++s_hal_error_count;
     }
-    taskEXIT_CRITICAL();
     return status;
 }
 
 size_t uart_link_read(uint8_t *data, size_t capacity)
 {
+    size_t length;
+
     if (data == NULL || capacity == 0U) {
         return 0U;
     }
     taskENTER_CRITICAL();
-    size_t length = s_count < capacity ? s_count : capacity;
+    length = s_count < capacity ? s_count : capacity;
     for (size_t index = 0U; index < length; ++index) {
         data[index] = s_ring[s_tail];
         s_tail = (uint16_t)((s_tail + 1U) % UART_LINK_RX_RING_SIZE);
@@ -187,7 +266,6 @@ void uart_link_get_stats(uart_link_stats_t *stats)
     if (stats == NULL) {
         return;
     }
-
     taskENTER_CRITICAL();
     stats->uart_tx_count = s_tx_count;
     stats->uart_tx_timeout = s_tx_timeout_count;
@@ -200,74 +278,111 @@ void uart_link_get_stats(uart_link_stats_t *stats)
     taskEXIT_CRITICAL();
 }
 
+void uart_link_recover(void)
+{
+    if (s_tx_mutex == NULL || s_recovering != 0U) {
+        return;
+    }
+    if (xSemaphoreTake(s_tx_mutex, pdMS_TO_TICKS(UART_LINK_TX_TIMEOUT_MS)) != pdTRUE) {
+        s_restart_requested = 1U;
+        return;
+    }
+    s_recovering = 1U;
+    s_ready = 0U;
+    s_dma_active = 0U;
+    (void)HAL_UART_Abort(&s_handle);
+    (void)HAL_DMA_Abort(&s_rx_dma);
+    (void)HAL_DMA_DeInit(&s_rx_dma);
+    (void)HAL_UART_DeInit(&s_handle);
+    if (uart_link_configure_uart() != 0U && uart_link_configure_dma() != 0U &&
+        uart_link_start_dma_receive() != 0U) {
+        s_ready = 1U;
+        s_restart_requested = 0U;
+    } else {
+        ++s_hal_error_count;
+    }
+    s_recovering = 0U;
+    (void)xSemaphoreGive(s_tx_mutex);
+}
+
+void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t size)
+{
+    if (huart != &s_handle || s_dma_active == 0U || size == 0U ||
+        size > UART_LINK_RX_DMA_SIZE) {
+        return;
+    }
+    s_dma_active = 0U;
+    dcache_invalidate(s_dma_rx, size);
+    (void)ring_push_from_isr(s_dma_rx, size);
+    if (uart_link_start_dma_receive() == 0U) {
+        s_restart_requested = 1U;
+    }
+}
+
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
+{
+    if (huart == &s_handle) {
+        ++s_hal_error_count;
+        __HAL_UART_CLEAR_FLAG(&s_handle,
+                              UART_CLEAR_OREF | UART_CLEAR_NEF | UART_CLEAR_PEF |
+                                  UART_CLEAR_FEF);
+        s_dma_active = 0U;
+        s_restart_requested = 1U;
+    }
+}
+
+void uart_link_handle_dma_rx_irq(void)
+{
+    HAL_DMA_IRQHandler(&s_rx_dma);
+}
+
+void uart_link_handle_usart_irq(void)
+{
+    HAL_UART_IRQHandler(&s_handle);
+}
+
+static void uart_link_log_stack(void)
+{
+    const UBaseType_t free_stack = s_uart_link_task_handle == NULL
+                                       ? 0U
+                                       : uxTaskGetStackHighWaterMark(
+                                             s_uart_link_task_handle);
+    char line[96U];
+
+    (void)snprintf(line, sizeof(line),
+                   "[UART2_DMA_STACK] free_words=%lu rx=%lu frame_events=%lu hal_errors=%lu\r\n",
+                   (unsigned long)free_stack, (unsigned long)s_rx_bytes,
+                   (unsigned long)s_rx_frames, (unsigned long)s_hal_error_count);
+    LOG_INFO(line);
+}
+
 void uart_link_task(void *argument)
 {
-#if !SMARTCAR_BMI323_DEBUG_ONLY
     uint32_t last_stack_monitor_ms;
-#endif
 
     (void)argument;
-#if !SMARTCAR_BMI323_DEBUG_ONLY
     last_stack_monitor_ms = HAL_GetTick();
-#endif
-    uint8_t chunk[UART_LINK_RX_CHUNK_SIZE];
     for (;;) {
-        uint16_t received = 0U;
-        const HAL_StatusTypeDef status = HAL_UARTEx_ReceiveToIdle(
-            &s_handle, chunk, sizeof(chunk), &received, UART_LINK_RX_TIMEOUT_MS);
-        if (received != 0U) {
-            const uint16_t dropped = ring_push(chunk, received);
-            taskENTER_CRITICAL();
-            s_rx_bytes += received;
-            taskEXIT_CRITICAL();
-            ++s_rx_frames;
-            taskENTER_CRITICAL();
-            s_last_rx_time = HAL_GetTick();
-            taskEXIT_CRITICAL();
-            if (dropped != 0U) {
-                uart_link_stats_t stats;
-                uart_link_get_stats(&stats);
-                char line[96];
-                (void)snprintf(line, sizeof(line),
-                               "UART_RX_OVERFLOW dropped=%u uart_rx_overflow=%lu uart_rx_drop=%lu\r\n",
-                               (unsigned)dropped,
-                               (unsigned long)stats.uart_rx_overflow,
-                               (unsigned long)stats.uart_rx_drop);
-                LOG_WARN(line);
-            }
+        if (s_restart_requested != 0U) {
+            uart_link_recover();
         }
-        if (status != HAL_OK && status != HAL_TIMEOUT) {
-            taskENTER_CRITICAL();
-            ++s_hal_error_count;
-            taskEXIT_CRITICAL();
-            (void)HAL_UART_AbortReceive(&s_handle);
-        }
-#if !SMARTCAR_BMI323_DEBUG_ONLY
         if ((uint32_t)(HAL_GetTick() - last_stack_monitor_ms) >=
             UART_LINK_STACK_MONITOR_PERIOD_MS) {
             last_stack_monitor_ms = HAL_GetTick();
             uart_link_log_stack();
         }
-#endif
-        taskYIELD();
+        vTaskDelay(pdMS_TO_TICKS(1U));
     }
 }
 
 void uart_link_task_start(void)
 {
-    if (s_ready == 0U) {
-        LOG_ERROR("uart_link_task start result=NOT_READY");
+    if (s_ready == 0U || s_uart_link_task_handle != NULL) {
         return;
     }
-    const BaseType_t result =
-        xTaskCreate(uart_link_task, "uart_link", UART_LINK_TASK_STACK_WORDS,
-                    NULL, UART_LINK_TASK_PRIORITY, &s_uart_link_task_handle);
-    char line[64];
-    (void)snprintf(line, sizeof(line), "uart_link_task start result=%ld\r\n",
-                   (long)result);
-    if (result == pdPASS) {
-        LOG_INFO(line);
-    } else {
-        LOG_ERROR(line);
+    if (xTaskCreate(uart_link_task, "uart_link", UART_LINK_TASK_STACK_WORDS,
+                    NULL, UART_LINK_TASK_PRIORITY, &s_uart_link_task_handle) != pdPASS) {
+        s_uart_link_task_handle = NULL;
+        LOG_ERROR("UART2 DMA worker creation failed\r\n");
     }
 }

@@ -4,14 +4,15 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "driver/gpio.h"
 #include "driver/uart.h"
 #include "esp_err.h"
 
 /* UART2 connection to STM32H757: S3 TX GPIO17 -> STM RX, S3 RX GPIO18 <- STM TX. */
 #define STM_UART_PORT UART_NUM_2
-#define STM_UART_TX_GPIO 17
-#define STM_UART_RX_GPIO 18
-#define STM_UART_BAUD_RATE 115200
+#define STM_UART_TX_GPIO GPIO_NUM_17
+#define STM_UART_RX_GPIO GPIO_NUM_18
+#define STM_UART_BAUD_RATE 921600
 #define STM_UART_TX_TIMEOUT_MS 100U
 
 typedef struct {
@@ -27,6 +28,7 @@ esp_err_t stm_uart_init(void);
 
 int stm_uart_send(const uint8_t *data, size_t len);
 void stm_uart_get_stats(stm_uart_stats_t *stats);
+void stm_uart_recover(void);
 
 /* Returns immediately when the receive storage is being updated. */
 int stm_uart_receive_nonblock(uint8_t *buffer, size_t max_len);

@@ -1,4 +1,7 @@
 idf_component_register(
-    SRCS "frame.c" "parser.c" "app_parser.c"
-    INCLUDE_DIRS "include"
+    SRCS "app_parser.c"
+         "../../../Common/SCBP_CAN/scbp_crc.c"
+         "../../../Common/SCBP_CAN/scbp_parser.c"
+         "../../../Common/SCBP_CAN/scbp_link.c"
+    INCLUDE_DIRS "include" "../../../Common/SCBP_CAN/include"
 )

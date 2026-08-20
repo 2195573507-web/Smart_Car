@@ -19,7 +19,7 @@
 #include "mag_filter.h"
 #include "log_service.h"
 #include "s3_service.h"
-#include "sc_frame.h"
+#include "scbp_protocol_defs.h"
 
 #define IMU_RUNTIME_LOG_TIMEOUT_MS UINT32_C(100)
 #define IMU_DATA_PERIOD_MS         UINT32_C(100)
@@ -68,43 +68,23 @@ static void put_u32_le(uint8_t *destination, uint32_t value)
 static void imu_send_telemetry(uint32_t now_ms, uint32_t *last_imu_ms,
                                uint32_t *last_attitude_ms)
 {
-    lsm_accel_data_t accel = {0};
-    lsm_mag_data_t mag = {0};
-    attitude_state_t attitude = {0};
-
     if (last_imu_ms != NULL &&
         (uint32_t)(now_ms - *last_imu_ms) >= IMU_TELEMETRY_IMU_PERIOD_MS) {
-        uint8_t payload[38] = {0};
         uint8_t lsm_payload[30] = {0};
         uint8_t bmi_payload[30] = {0};
         imu_raw_data_t snapshot = {0};
         *last_imu_ms = now_ms;
-        (void)imu_manager_get_lsm_accel(&accel);
-        (void)imu_manager_get_lsm_mag(&mag);
-        payload[0] = 0x02U; /* LSM303 */
-        payload[1] = imu_manager_get_lsm303_online() != 0U ? 1U : 0U;
-        put_float_le(&payload[2], accel.ax);
-        put_float_le(&payload[6], accel.ay);
-        put_float_le(&payload[10], accel.az);
-        /* LSM303 is the active path; gyro fields remain explicit zeroes. */
-        put_float_le(&payload[26], mag.mx);
-        put_float_le(&payload[30], mag.my);
-        put_float_le(&payload[34], mag.mz);
-        s3_service_send_telemetry_frame(SC_TYPE_IMU_STATUS, payload,
-                                        (uint16_t)sizeof(payload));
 
         if (imu_manager_get_snapshot(&snapshot) == BSP_STATUS_OK) {
-            /* New dual-IMU telemetry keeps the source and validity bits
-             * explicit. The legacy LSM status above remains untouched. */
-            lsm_payload[0] = IMU_SENSOR_LSM303;
+            lsm_payload[0] = SCBP_IMU_SENSOR_LSM303;
             lsm_payload[1] = (uint8_t)(
                 (snapshot.lsm_accel_valid != 0U
-                     ? SC_IMU_TELEMETRY_FLAG_ACCEL_VALID
+                     ? SCBP_IMU_TELEMETRY_FLAG_ACCEL_VALID
                      : 0U) |
                 (snapshot.lsm_mag_valid != 0U
-                     ? SC_IMU_TELEMETRY_FLAG_GYRO_OR_MAG_VALID
+                     ? SCBP_IMU_TELEMETRY_FLAG_GYRO_OR_MAG_VALID
                      : 0U) |
-                (snapshot.online != 0U ? SC_IMU_TELEMETRY_FLAG_ONLINE : 0U));
+                (snapshot.online != 0U ? SCBP_IMU_TELEMETRY_FLAG_ONLINE : 0U));
             put_u32_le(&lsm_payload[2], snapshot.lsm_timestamp);
             put_float_le(&lsm_payload[6], snapshot.lsm_ax);
             put_float_le(&lsm_payload[10], snapshot.lsm_ay);
@@ -112,19 +92,17 @@ static void imu_send_telemetry(uint32_t now_ms, uint32_t *last_imu_ms,
             put_float_le(&lsm_payload[18], snapshot.lsm_mx);
             put_float_le(&lsm_payload[22], snapshot.lsm_my);
             put_float_le(&lsm_payload[26], snapshot.lsm_mz);
-            s3_service_send_telemetry_frame(SC_TYPE_IMU_TELEMETRY,
-                                            lsm_payload,
-                                            (uint16_t)sizeof(lsm_payload));
+            s3_service_send_imu_telemetry(lsm_payload, (uint8_t)sizeof(lsm_payload));
 
-            bmi_payload[0] = IMU_SENSOR_BMI323;
+            bmi_payload[0] = SCBP_IMU_SENSOR_BMI323;
             bmi_payload[1] = (uint8_t)(
                 (snapshot.bmi_accel_valid != 0U
-                     ? SC_IMU_TELEMETRY_FLAG_ACCEL_VALID
+                     ? SCBP_IMU_TELEMETRY_FLAG_ACCEL_VALID
                      : 0U) |
                 (snapshot.bmi_gyro_valid != 0U
-                     ? SC_IMU_TELEMETRY_FLAG_GYRO_OR_MAG_VALID
+                     ? SCBP_IMU_TELEMETRY_FLAG_GYRO_OR_MAG_VALID
                      : 0U) |
-                (bmi323_is_online() != 0U ? SC_IMU_TELEMETRY_FLAG_ONLINE : 0U));
+                (bmi323_is_online() != 0U ? SCBP_IMU_TELEMETRY_FLAG_ONLINE : 0U));
             put_u32_le(&bmi_payload[2], snapshot.bmi_timestamp);
             put_float_le(&bmi_payload[6], snapshot.bmi_ax);
             put_float_le(&bmi_payload[10], snapshot.bmi_ay);
@@ -132,36 +110,19 @@ static void imu_send_telemetry(uint32_t now_ms, uint32_t *last_imu_ms,
             put_float_le(&bmi_payload[18], snapshot.bmi_gx);
             put_float_le(&bmi_payload[22], snapshot.bmi_gy);
             put_float_le(&bmi_payload[26], snapshot.bmi_gz);
-            s3_service_send_telemetry_frame(SC_TYPE_IMU_TELEMETRY,
-                                            bmi_payload,
-                                            (uint16_t)sizeof(bmi_payload));
+            s3_service_send_imu_telemetry(bmi_payload, (uint8_t)sizeof(bmi_payload));
         }
     }
 
     if (last_attitude_ms != NULL &&
         (uint32_t)(now_ms - *last_attitude_ms) >=
             IMU_TELEMETRY_ATTITUDE_PERIOD_MS) {
-        uint8_t payload[SC_ATTITUDE_PAYLOAD_LENGTH] = {0};
         *last_attitude_ms = now_ms;
-        attitude = attitude_get_state();
-        /* AHRS state remains radians; only this wire serialization derives
-         * the display-oriented degree triplet. */
-        put_float_le(&payload[0], attitude.roll);
-        put_float_le(&payload[4], attitude.pitch);
-        put_float_le(&payload[8], attitude.yaw);
-        put_float_le(&payload[12], attitude.roll * RAD_TO_DEG);
-        put_float_le(&payload[16], attitude.pitch * RAD_TO_DEG);
-        put_float_le(&payload[20], attitude.yaw * RAD_TO_DEG);
-        put_u32_le(&payload[24], now_ms);
-        payload[28] = 0x01U; /* LSM303-derived AHRS */
-        payload[29] = attitude_get_status() == AHRS_READY ? 1U : 0U;
-        s3_service_send_telemetry_frame(SC_TYPE_ATTITUDE, payload,
-                                        (uint16_t)sizeof(payload));
         if (dual_ahrs_pack_payload(s_dual_attitude_payload,
                                    sizeof(s_dual_attitude_payload)) ==
             (int)DUAL_AHRS_PAYLOAD_LENGTH) {
             s3_service_send_dual_attitude(
-                s_dual_attitude_payload, DUAL_AHRS_PAYLOAD_LENGTH);
+                s_dual_attitude_payload, (uint8_t)DUAL_AHRS_PAYLOAD_LENGTH);
         }
     }
 }
@@ -315,18 +276,6 @@ static size_t imu_append_milli(char *buffer, size_t capacity, size_t offset,
 }
 #endif
 
-static void imu_format_rms(char *buffer, size_t capacity, float value)
-{
-    const uint32_t scaled = (uint32_t)((value * 10000.0f) + 0.5f);
-
-    if (buffer == NULL || capacity == 0U) {
-        return;
-    }
-    (void)snprintf(buffer, capacity, "%lu.%04lu",
-                   (unsigned long)(scaled / 10000U),
-                   (unsigned long)(scaled % 10000U));
-}
-
 static size_t imu_append_degree(char *buffer, size_t capacity, size_t offset,
                                 const char *label, float radians)
 {
@@ -356,11 +305,6 @@ static const char *imu_cal_state_name(imu_boot_state_t state)
     case STATIC_CAL_WAIT: return "STATIC_CAL_WAIT";
     case STATIC_CAL_SAMPLE: return "STATIC_CAL_SAMPLE";
     case STATIC_CAL_DONE: return "STATIC_CAL_DONE";
-    case WAIT_RADAR_LEVEL: return "WAIT_RADAR_LEVEL";
-    case VIBRATION_SAMPLE: return "VIBRATION_SAMPLE";
-    case VIBRATION_LEVEL_DONE: return "VIBRATION_LEVEL_DONE";
-    case VIBRATION_ALL_DONE: return "VIBRATION_ALL_DONE";
-    case FILTER_READY: return "FILTER_READY";
     case IMU_READY: return "IMU_READY";
     case IMU_ERROR: return "IMU_ERROR";
     default:
@@ -475,7 +419,6 @@ static void imu_status_print(void)
     uint32_t sample_total;
     uint8_t filter_ready;
     uint8_t ahrs_ready;
-    char rms_text[24];
     size_t offset = 0U;
 
     (void)imu_get_lsm303_stats(&stats);
@@ -504,13 +447,10 @@ static void imu_status_print(void)
         imu_runtime_log_event(SMARTCAR_LOG_LEVEL_ERROR,
                               "IMU CALIBRATION ERROR", log_line);
     } else {
-        imu_format_rms(rms_text, sizeof(rms_text), boot_status.rms);
         (void)snprintf(log_line, sizeof(log_line),
-                       "state=%s progress=%u radar_pwm=%u rms=%s sample=%lu/%lu",
+                       "state=%s progress=%u sample=%lu/%lu",
                        imu_cal_state_name(cal_state),
                        (unsigned)boot_status.progress,
-                       (unsigned)boot_status.radar_pwm,
-                       rms_text,
                        (unsigned long)sample_count,
                        (unsigned long)sample_total);
         imu_runtime_log_event(SMARTCAR_LOG_LEVEL_INFO,
@@ -528,16 +468,7 @@ static void imu_status_print(void)
                              imu_cal_state_name(cal_state));
     offset = imu_append_uint32(block, sizeof(block), offset, " progress",
                                boot_status.progress);
-    offset = imu_append_uint32(block, sizeof(block), offset, " radar_pwm",
-                               boot_status.radar_pwm);
-    {
-        char status_rms[32];
-        imu_format_rms(status_rms, sizeof(status_rms), boot_status.rms);
-        offset = imu_append_text(block, sizeof(block), offset, " rms=");
-        offset = imu_append_text(block, sizeof(block), offset, status_rms);
-    }
-    if (cal_state == STATIC_CAL_WAIT || cal_state == STATIC_CAL_SAMPLE ||
-        cal_state == VIBRATION_SAMPLE) {
+    if (cal_state == STATIC_CAL_WAIT || cal_state == STATIC_CAL_SAMPLE) {
         offset = imu_append_text(block, sizeof(block), offset, " sample=");
         offset = imu_append_uint32(block, sizeof(block), offset, "",
                                    sample_count);
@@ -561,7 +492,7 @@ static void imu_status_print(void)
                                      : " filter_state=WAIT_CAL\r\n");
     }
     if (cal_state == STATIC_CAL_WAIT || cal_state == STATIC_CAL_SAMPLE ||
-        cal_state == VIBRATION_SAMPLE || cal_state == IMU_READY) {
+        cal_state == IMU_READY) {
         offset = imu_append_text(block, sizeof(block), offset, "\r\n");
     }
     offset = imu_append_text(block, sizeof(block), offset, "AHRS_LSM=");

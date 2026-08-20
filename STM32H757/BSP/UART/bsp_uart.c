@@ -6,7 +6,7 @@
 #include "FreeRTOS.h"
 #include "semphr.h"
 #include "main.h"
-#include "sc_frame.h"
+#include "s3_service.h"
 #include "uart_link.h"
 
 extern UART_HandleTypeDef huart1;
@@ -185,9 +185,7 @@ static bsp_status_t uart_log_write_usart1(const char *text, uint32_t timeout_ms)
 
 static void uart_log_write_usart2(uint8_t level, const char *text)
 {
-    uint8_t payload[SC_FRAME_MAX_PAYLOAD];
-    uint8_t frame[SC_FRAME_MAX_SIZE];
-    uint16_t frame_length = 0U;
+    uint8_t payload[8U + BSP_UART_LOG_TEXT_MAX];
     size_t text_length;
     const uint32_t timestamp = HAL_GetTick();
 
@@ -212,10 +210,7 @@ static void uart_log_write_usart2(uint8_t level, const char *text)
         memcpy(&payload[8], text, text_length);
     }
 
-    if (sc_frame_encode(SC_TYPE_LOG, payload, (uint16_t)(8U + text_length),
-                        frame, sizeof(frame), &frame_length) == 0) {
-        (void)uart_link_send(frame, frame_length);
-    }
+    (void)s3_service_send_log(payload, (uint8_t)(8U + text_length));
 }
 
 bsp_status_t bsp_uart_log_write_level(uint8_t level, const char *text,

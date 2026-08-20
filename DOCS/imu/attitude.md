@@ -2,50 +2,37 @@
 
 ## Function
 
-Compute and expose roll, pitch, yaw, and quaternion state after calibration and
-filter readiness.
+The calibrated LSM303 path computes the primary attitude state after its
+readiness gate. DualAHRS output retains an explicit primary/redundant layout;
+it does not introduce BMI323 as a replacement primary attitude source.
+LSM303 samples reach this layer in the vehicle Body Frame; DualAHRS rebuilds
+the redundant quaternion whenever final Euler values are reference-adjusted.
 
-## Source Location
+## UART Output
 
-`STM32H757/Middleware/Attitude/attitude.c/.h`.
+UART2 publishes only `ATTITUDE(0x201)` with the 80-byte SCBP-CAN schema-2
+payload. Its fields are little-endian:
 
-## Entry Functions
+| Offset | Field |
+| ---: | --- |
+| 0 | `schema=2` |
+| 1 | validity flags |
+| 2 | reserved `u16=0` |
+| 4 | timestamp milliseconds |
+| 8 | sample sequence |
+| 12 | primary Euler roll/pitch/yaw, radians |
+| 24 | primary quaternion W/X/Y/Z |
+| 40 | redundant Euler roll/pitch/yaw, radians |
+| 52 | redundant quaternion W/X/Y/Z |
+| 68 | delta Euler roll/pitch/yaw, radians |
 
-`attitude_init`, `attitude_zero_init`, `attitude_zero_is_ready`,
-`attitude_update`, `attitude_get_state`, `attitude_get_status`.
+S3 validates the exact length/schema pair and places the same 80 payload bytes
+inside App BLE type `0x11`. It does not convert units, quaternion ordering, or
+payload structure. The previous 30-byte attitude format is not emitted or
+accepted on the STM32-S3 transport.
 
-## Inputs
+## Constraints
 
-Filtered calibrated IMU data and readiness state.
-
-## Outputs
-
-`attitude_state_t`, `AHRS_WAIT_CAL/AHRS_READY`, logs, and telemetry source data.
-
-The `attitude_state_t.roll`, `.pitch`, and `.yaw` fields remain radians. The
-communication layer serializes the same radian values plus derived degree
-values, `timestamp_ms`, `source`, and `valid` in the 30-byte `ATTITUDE`
-payload; this unit conversion is outside the AHRS algorithm.
-
-## Public Interfaces
-
-`attitude_init`, `attitude_zero_init`, `attitude_update`, state getter, and
-status getter.
-
-## Dependencies
-
-IMU filter, calibration, timer/math, communication service.
-
-## Current Status
-
-Source layer exists and is called only after filter readiness in `imu_manager`.
-No live attitude stream acceptance is asserted.
-
-## Known Issues
-
-Zeroing and quaternion conventions must remain stable across App decoding.
-
-## Modification Notes
-
-Do not publish “ready” before calibration/filter gates. Preserve units,
-quaternion order, and update cadence.
+Do not report ready before the calibration/filter gates complete. Preserve the
+current radian convention, quaternion ordering, source timestamps, and update
+cadence. Build evidence does not establish live attitude-stream acceptance.

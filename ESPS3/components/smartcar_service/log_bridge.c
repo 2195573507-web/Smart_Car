@@ -12,13 +12,13 @@ static const char *TAG = "UART_LOG_BRIDGE";
 /* SCBP LOG currently enters only from the serialized service parser. */
 static uint8_t s_legacy_frame[SMARTCAR_LOG_MAX_FRAME_SIZE];
 
-void log_bridge_handle(const sc_frame_view_t *frame)
+void log_bridge_handle(const scbp_can_frame_t *frame)
 {
     size_t legacy_length = 0U;
     const uint8_t *payload;
     uint16_t text_length;
 
-    if (frame == NULL || frame->msg_id != SCBP_MSG_ID_LOG ||
+    if (frame == NULL || SCBP_CAN_ID_MESSAGE(frame->can_id) != SCBP_MSG_ID_LOG ||
         frame->length < LOG_BRIDGE_PAYLOAD_HEADER_SIZE) {
         return;
     }

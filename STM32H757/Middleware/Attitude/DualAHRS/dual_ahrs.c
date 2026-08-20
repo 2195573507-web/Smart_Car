@@ -10,10 +10,9 @@
 #define DUAL_AHRS_MAG_ALPHA 0.20f
 #define DUAL_AHRS_PRIMARY_KP 1.8f
 #define DUAL_AHRS_PRIMARY_KI 0.035f
-#define DUAL_AHRS_BIQUAD_NOTCH_HZ 60.0f
-#define DUAL_AHRS_BIQUAD_NOTCH_Q 2.0f
-#define DUAL_AHRS_BIQUAD_LPF_HZ 90.0f
-#define DUAL_AHRS_SAMPLE_HZ 400.0f
+#define DUAL_AHRS_ACCEL_LPF_HZ 20.0f
+#define DUAL_AHRS_GYRO_LPF_HZ 80.0f
+#define DUAL_AHRS_SAMPLE_HZ 200.0f
 
 typedef struct
 {
@@ -30,13 +29,13 @@ typedef struct
 
 typedef struct
 {
-    dual_ahrs_biquad_t notch[6];
-    dual_ahrs_biquad_t lpf[6];
-    uint8_t decimation_phase;
+    dual_ahrs_biquad_t accel_lpf[3];
+    dual_ahrs_biquad_t gyro_lpf[3];
     uint64_t last_bmi_timestamp_us;
+    dual_ahrs_vector3_t primary_gyro_prev;
+    uint8_t primary_gyro_prev_valid;
     uint64_t last_lsm_timestamp_us;
     uint64_t last_lsm_input_timestamp_us;
-    uint64_t last_primary_mag_timestamp_us;
     uint64_t last_mag_reference_timestamp_us;
     dual_ahrs_quaternion_t primary_q;
     dual_ahrs_vector3_t primary_integral;
@@ -71,21 +70,21 @@ static void reset_runtime_state(void)
 {
     uint8_t index;
 
-    for (index = 0U; index < 6U; ++index) {
-        s_dual.notch[index].x1 = 0.0f;
-        s_dual.notch[index].x2 = 0.0f;
-        s_dual.notch[index].y1 = 0.0f;
-        s_dual.notch[index].y2 = 0.0f;
-        s_dual.lpf[index].x1 = 0.0f;
-        s_dual.lpf[index].x2 = 0.0f;
-        s_dual.lpf[index].y1 = 0.0f;
-        s_dual.lpf[index].y2 = 0.0f;
+    for (index = 0U; index < 3U; ++index) {
+        s_dual.accel_lpf[index].x1 = 0.0f;
+        s_dual.accel_lpf[index].x2 = 0.0f;
+        s_dual.accel_lpf[index].y1 = 0.0f;
+        s_dual.accel_lpf[index].y2 = 0.0f;
+        s_dual.gyro_lpf[index].x1 = 0.0f;
+        s_dual.gyro_lpf[index].x2 = 0.0f;
+        s_dual.gyro_lpf[index].y1 = 0.0f;
+        s_dual.gyro_lpf[index].y2 = 0.0f;
     }
-    s_dual.decimation_phase = 0U;
     s_dual.last_bmi_timestamp_us = 0U;
+    s_dual.primary_gyro_prev = (dual_ahrs_vector3_t){0.0f, 0.0f, 0.0f};
+    s_dual.primary_gyro_prev_valid = 0U;
     s_dual.last_lsm_timestamp_us = 0U;
     s_dual.last_lsm_input_timestamp_us = 0U;
-    s_dual.last_primary_mag_timestamp_us = 0U;
     s_dual.last_mag_reference_timestamp_us = 0U;
     s_dual.primary_q = (dual_ahrs_quaternion_t){1.0f, 0.0f, 0.0f, 0.0f};
     s_dual.primary_integral = (dual_ahrs_vector3_t){0.0f, 0.0f, 0.0f};
@@ -180,7 +179,7 @@ float dual_ahrs_wrap_pi(float angle)
     while (angle > DUAL_AHRS_PI) {
         angle -= DUAL_AHRS_TWO_PI;
     }
-    while (angle <= -DUAL_AHRS_PI) {
+    while (angle < -DUAL_AHRS_PI) {
         angle += DUAL_AHRS_TWO_PI;
     }
     return angle;
@@ -201,12 +200,10 @@ float delta_yaw(float primary, float redundant)
     return dual_ahrs_wrap_pi(primary - redundant);
 }
 
-float gravity_confidence(const dual_ahrs_vector3_t *accel,
-                         float radar_pwm_percent)
+float gravity_confidence(const dual_ahrs_vector3_t *accel)
 {
     float local_gravity = s_dual.local_gravity_mps2;
     float norm_error;
-    float pwm_penalty;
 
     if (accel == NULL) {
         return 0.0f;
@@ -216,8 +213,7 @@ float gravity_confidence(const dual_ahrs_vector3_t *accel,
         local_gravity = IMU_LEVELING_G_DEFAULT_MPS2;
     }
     norm_error = fabsf(vector_norm(*accel) - local_gravity) / local_gravity;
-    pwm_penalty = fmaxf(0.0f, fminf(radar_pwm_percent, 100.0f)) * 0.0035f;
-    return clamp01(1.0f - (4.0f * norm_error) - pwm_penalty);
+    return clamp01(1.0f - (4.0f * norm_error));
 }
 
 float mag_confidence(const dual_ahrs_vector3_t *mag)
@@ -234,22 +230,6 @@ float mag_confidence(const dual_ahrs_vector3_t *mag)
     deviation = fabsf(norm - s_dual.mag_reference_norm) /
                 s_dual.mag_reference_norm;
     return clamp01(1.0f - (3.0f * deviation));
-}
-
-static dual_ahrs_biquad_t make_notch(float frequency, float q)
-{
-    const float omega = 2.0f * DUAL_AHRS_PI * frequency / DUAL_AHRS_SAMPLE_HZ;
-    const float alpha = sinf(omega) / (2.0f * q);
-    const float cos_omega = cosf(omega);
-    const float a0 = 1.0f + alpha;
-    dual_ahrs_biquad_t filter = {
-        .b0 = 1.0f / a0,
-        .b1 = -2.0f * cos_omega / a0,
-        .b2 = 1.0f / a0,
-        .a1 = -2.0f * cos_omega / a0,
-        .a2 = (1.0f - alpha) / a0,
-    };
-    return filter;
 }
 
 static dual_ahrs_biquad_t make_lpf(float frequency)
@@ -287,13 +267,12 @@ static float biquad_apply(dual_ahrs_biquad_t *filter, float input)
 }
 
 static dual_ahrs_vector3_t filter_vector(dual_ahrs_vector3_t value,
-                                          dual_ahrs_biquad_t *notch,
                                           dual_ahrs_biquad_t *lpf)
 {
     dual_ahrs_vector3_t result;
-    result.x = biquad_apply(&lpf[0], biquad_apply(&notch[0], value.x));
-    result.y = biquad_apply(&lpf[1], biquad_apply(&notch[1], value.y));
-    result.z = biquad_apply(&lpf[2], biquad_apply(&notch[2], value.z));
+    result.x = biquad_apply(&lpf[0], value.x);
+    result.y = biquad_apply(&lpf[1], value.y);
+    result.z = biquad_apply(&lpf[2], value.z);
     return result;
 }
 
@@ -342,6 +321,16 @@ static dual_ahrs_quaternion_t euler_to_quaternion(float roll, float pitch,
     return quaternion_normalize(q);
 }
 
+static void sync_attitude_quaternion(dual_ahrs_attitude_t *attitude)
+{
+    if (attitude == NULL || attitude->valid == 0U) {
+        return;
+    }
+    attitude->quaternion = euler_to_quaternion(attitude->roll,
+                                                attitude->pitch,
+                                                attitude->yaw);
+}
+
 static uint8_t attitude_from_accel_mag(dual_ahrs_vector3_t accel,
                                        dual_ahrs_vector3_t mag,
                                        dual_ahrs_attitude_t *attitude)
@@ -376,14 +365,39 @@ static uint8_t attitude_from_accel_mag(dual_ahrs_vector3_t accel,
         return 0U;
     }
 
-    /* The input magnetic Y axis has already been mirrored into the vehicle
-     * convention, so this is the same tilt-compensated heading as the
-     * redundant estimator and the Mahony magnetic reference. */
-    attitude->yaw = dual_ahrs_wrap_pi(atan2f(-horizontal_y, horizontal_x));
-    attitude->quaternion = euler_to_quaternion(attitude->roll,
-                                                attitude->pitch,
-                                                attitude->yaw);
+    /* The input magnetic vector is already in the vehicle Body Frame, so this
+     * is the same tilt-compensated heading used by both estimators. */
+    /* Body X points forward and Body Y points right, so heading increases
+     * with the positive horizontal Body Y component. */
+    attitude->yaw = dual_ahrs_wrap_pi(atan2f(horizontal_y, horizontal_x));
     attitude->valid = 1U;
+    sync_attitude_quaternion(attitude);
+    return 1U;
+}
+
+static uint8_t attitude_from_accel(dual_ahrs_vector3_t accel,
+                                   dual_ahrs_attitude_t *attitude)
+{
+    dual_ahrs_vector3_t accel_unit;
+    uint8_t accel_valid;
+
+    if (attitude == NULL) {
+        return 0U;
+    }
+    accel_unit = vector_normalize(accel, &accel_valid);
+    if (accel_valid == 0U) {
+        return 0U;
+    }
+
+    attitude->roll = atan2f(accel_unit.y, accel_unit.z);
+    attitude->pitch = atan2f(-accel_unit.x,
+                             sqrtf(accel_unit.y * accel_unit.y +
+                                   accel_unit.z * accel_unit.z));
+    /* A 6-axis estimator has no absolute heading. Start yaw at zero and let
+     * the calibrated gyro integrate relative heading from this reference. */
+    attitude->yaw = 0.0f;
+    attitude->valid = 1U;
+    sync_attitude_quaternion(attitude);
     return 1U;
 }
 
@@ -401,12 +415,13 @@ static void seed_biquad_constant(dual_ahrs_biquad_t *filter, float value)
 static void seed_primary_filters(dual_ahrs_vector3_t accel,
                                  dual_ahrs_vector3_t gyro)
 {
-    const float value[6] = {accel.x, accel.y, accel.z, gyro.x, gyro.y, gyro.z};
+    const float accel_value[3] = {accel.x, accel.y, accel.z};
+    const float gyro_value[3] = {gyro.x, gyro.y, gyro.z};
     uint8_t index;
 
-    for (index = 0U; index < 6U; ++index) {
-        seed_biquad_constant(&s_dual.notch[index], value[index]);
-        seed_biquad_constant(&s_dual.lpf[index], value[index]);
+    for (index = 0U; index < 3U; ++index) {
+        seed_biquad_constant(&s_dual.accel_lpf[index], accel_value[index]);
+        seed_biquad_constant(&s_dual.gyro_lpf[index], gyro_value[index]);
     }
 }
 
@@ -415,23 +430,23 @@ static void initialize_static_attitudes(const dual_ahrs_input_t *input)
     dual_ahrs_attitude_t attitude;
     uint8_t index;
 
-    if (input == NULL || input->lsm_mag_valid == 0U ||
-        input->lsm_timestamp_us == 0U) {
+    if (input == NULL) {
         return;
     }
 
     if (s_dual.primary_yaw_offset_valid == 0U &&
         input->bmi_accel_valid != 0U && input->bmi_gyro_valid != 0U &&
         input->bmi_timestamp_us != 0U &&
-        attitude_from_accel_mag(input->bmi_accel, input->mag, &attitude) != 0U) {
+        attitude_from_accel(input->bmi_accel, &attitude) != 0U) {
         s_dual.primary_q = attitude.quaternion;
         s_dual.primary = attitude;
         s_dual.primary_integral = (dual_ahrs_vector3_t){0.0f, 0.0f, 0.0f};
-        s_dual.last_bmi_timestamp_us = input->bmi_timestamp_us;
-        s_dual.last_primary_mag_timestamp_us = input->lsm_timestamp_us;
         seed_primary_filters(input->bmi_accel, input->gyro);
     }
 
+    if (input->lsm_mag_valid == 0U || input->lsm_timestamp_us == 0U) {
+        return;
+    }
     if (s_dual.redundant_yaw_offset_valid == 0U &&
         input->lsm_accel_valid != 0U &&
         attitude_from_accel_mag(input->lsm_accel, input->mag, &attitude) != 0U) {
@@ -548,12 +563,11 @@ static void update_redundant(const dual_ahrs_input_t *input)
                    s_dual.redundant_mag.y * cosf(s_dual.redundant.roll) -
                    s_dual.redundant_mag.z * sinf(s_dual.redundant.roll) *
                        cosf(s_dual.redundant.pitch);
-    /* LSM303 magnetic Y is opposite to the vehicle yaw convention. */
-    s_dual.redundant.yaw = dual_ahrs_wrap_pi(atan2f(-horizontal_y,
+    /* The LSM303 magnetic vector has already been mapped to Body Frame. */
+    s_dual.redundant.yaw = dual_ahrs_wrap_pi(atan2f(horizontal_y,
                                                     horizontal_x));
-    s_dual.redundant.quaternion = euler_to_quaternion(
-        s_dual.redundant.roll, s_dual.redundant.pitch, s_dual.redundant.yaw);
     s_dual.redundant.valid = 1U;
+    sync_attitude_quaternion(&s_dual.redundant);
     s_dual.last_lsm_timestamp_us = input->lsm_timestamp_us;
 }
 
@@ -561,43 +575,48 @@ static void update_primary(const dual_ahrs_input_t *input,
                            dual_ahrs_vector3_t accel,
                            dual_ahrs_vector3_t gyro)
 {
-    dual_ahrs_vector3_t mag;
     dual_ahrs_vector3_t accel_unit;
-    dual_ahrs_vector3_t mag_unit;
     dual_ahrs_vector3_t gravity;
-    dual_ahrs_vector3_t magnetic;
     dual_ahrs_vector3_t error;
     uint8_t accel_valid;
-    uint8_t mag_valid;
     float dt;
     float half_dt;
     dual_ahrs_quaternion_t q;
     dual_ahrs_quaternion_t previous_q;
+    dual_ahrs_vector3_t gyro_integral;
 
     if (input == NULL || input->bmi_accel_valid == 0U ||
         input->bmi_gyro_valid == 0U || input->bmi_timestamp_us == 0U) {
         return;
     }
-    if (s_dual.last_bmi_timestamp_us == 0U) {
+    if (s_dual.last_bmi_timestamp_us == 0U ||
+        s_dual.primary_gyro_prev_valid == 0U) {
         s_dual.last_bmi_timestamp_us = input->bmi_timestamp_us;
+        s_dual.primary_gyro_prev = gyro;
+        s_dual.primary_gyro_prev_valid = 1U;
         return;
     }
     if (input->bmi_timestamp_us <= s_dual.last_bmi_timestamp_us) {
+        /* A repeated or regressed timestamp cannot define an integration
+         * interval. Re-anchor the trapezoid at this sample. */
+        s_dual.last_bmi_timestamp_us = input->bmi_timestamp_us;
+        s_dual.primary_gyro_prev = gyro;
+        s_dual.primary_gyro_prev_valid = 1U;
         return;
     }
     dt = (float)(input->bmi_timestamp_us - s_dual.last_bmi_timestamp_us) /
          1000000.0f;
     s_dual.last_bmi_timestamp_us = input->bmi_timestamp_us;
+    gyro_integral.x = 0.5f * (s_dual.primary_gyro_prev.x + gyro.x);
+    gyro_integral.y = 0.5f * (s_dual.primary_gyro_prev.y + gyro.y);
+    gyro_integral.z = 0.5f * (s_dual.primary_gyro_prev.z + gyro.z);
+    s_dual.primary_gyro_prev = gyro;
     if (dt < DUAL_AHRS_MIN_DT || dt > DUAL_AHRS_MAX_DT) {
-        dt = 1.0f / DUAL_AHRS_SAMPLE_HZ;
+        /* Never substitute a nominal step or bridge a missing sample. The
+         * current sample becomes the next trapezoid's baseline. */
+        return;
     }
-    mag = input->mag;
     accel_unit = vector_normalize(accel, &accel_valid);
-    mag_unit = vector_normalize(mag, &mag_valid);
-    mag_valid = (uint8_t)(mag_valid != 0U && input->lsm_mag_valid != 0U &&
-                          input->lsm_timestamp_us != 0U &&
-                          input->lsm_timestamp_us >
-                              s_dual.last_primary_mag_timestamp_us);
     if (accel_valid == 0U) {
         return;
     }
@@ -609,22 +628,7 @@ static void update_primary(const dual_ahrs_input_t *input,
         2.0f * (q.w * q.x + q.y * q.z),
         q.w * q.w - q.x * q.x - q.y * q.y + q.z * q.z};
     error = vector_scale(vector_cross(accel_unit, gravity),
-                         gravity_confidence(&accel,
-                                             (float)input->radar_pwm_percent));
-    if (mag_valid != 0U) {
-        const float hx = 1.0f - 2.0f * (q.y * q.y + q.z * q.z);
-        const float hy = 2.0f * (q.x * q.y - q.w * q.z);
-        const float hz = 2.0f * (q.x * q.z + q.w * q.y);
-        const float magnetic_weight = mag_confidence(&mag);
-        magnetic = vector_normalize((dual_ahrs_vector3_t){hx, hy, hz}, NULL);
-        const dual_ahrs_vector3_t magnetic_error = vector_cross(
-            mag_unit, magnetic);
-        /* R_level and gravity own roll/pitch. Feeding the magnetic vertical
-         * component back into X/Y would reintroduce static tilt after
-         * leveling, so the magnetometer corrects heading only. */
-        error.z += magnetic_error.z * magnetic_weight;
-        s_dual.last_primary_mag_timestamp_us = input->lsm_timestamp_us;
-    }
+                         gravity_confidence(&accel));
     s_dual.primary_integral.x += DUAL_AHRS_PRIMARY_KI * error.x * dt;
     s_dual.primary_integral.y += DUAL_AHRS_PRIMARY_KI * error.y * dt;
     s_dual.primary_integral.z += DUAL_AHRS_PRIMARY_KI * error.z * dt;
@@ -635,12 +639,11 @@ static void update_primary(const dual_ahrs_input_t *input,
     s_dual.primary_integral.z = fmaxf(-0.25f, fminf(0.25f,
                                                     s_dual.primary_integral.z));
     {
-        const float gx = gyro.x + DUAL_AHRS_PRIMARY_KP * error.x +
+        const float gx = gyro_integral.x + DUAL_AHRS_PRIMARY_KP * error.x +
                          s_dual.primary_integral.x;
-        const float gy = gyro.y + DUAL_AHRS_PRIMARY_KP * error.y +
+        const float gy = gyro_integral.y + DUAL_AHRS_PRIMARY_KP * error.y +
                          s_dual.primary_integral.y;
-        const float gz = gyro.z + DUAL_AHRS_PRIMARY_KP * error.z +
-                         s_dual.primary_integral.z;
+        const float gz = gyro_integral.z + s_dual.primary_integral.z;
         half_dt = 0.5f * dt;
         q.w += (-q.x * gx - q.y * gy - q.z * gz) * half_dt;
         q.x += (previous_q.w * gx + previous_q.y * gz - previous_q.z * gy) *
@@ -673,6 +676,8 @@ static dual_ahrs_attitude_t zero_reference_attitude(
         output.roll = 0.0f;
         output.pitch = 0.0f;
         output.yaw = 0.0f;
+        output.quaternion =
+            (dual_ahrs_quaternion_t){1.0f, 0.0f, 0.0f, 0.0f};
         return output;
     }
 
@@ -685,34 +690,36 @@ static dual_ahrs_attitude_t zero_reference_attitude(
         output.yaw = 0.0f;
         *zero_pending = 0U;
     }
+    /* The output Euler values are the final zero-referenced values. Keep the
+     * serialized quaternion in the same frame after every sign/reference
+     * adjustment. */
+    sync_attitude_quaternion(&output);
     return output;
 }
 
 static void capture_ready_yaw_offsets(void)
 {
-    if (s_dual.primary.valid == 0U || s_dual.redundant.valid == 0U ||
-        (s_dual.primary_yaw_offset_valid != 0U &&
-         s_dual.redundant_yaw_offset_valid != 0U)) {
-        return;
+    if (s_dual.primary.valid != 0U &&
+        s_dual.primary_yaw_offset_valid == 0U) {
+        s_dual.primary_yaw_offset = s_dual.primary.yaw;
+        s_dual.primary_yaw_offset_valid = 1U;
+        s_dual.primary_zero_pending = 1U;
     }
-
-    /* The estimator is intentionally frozen before IMU_READY, so the first
-     * simultaneous valid post-READY pair is the earliest physical heading
-     * available for both independent references. */
-    s_dual.primary_yaw_offset = s_dual.primary.yaw;
-    s_dual.redundant_yaw_offset = s_dual.redundant.yaw;
-    s_dual.primary_yaw_offset_valid = 1U;
-    s_dual.redundant_yaw_offset_valid = 1U;
+    if (s_dual.redundant.valid != 0U &&
+        s_dual.redundant_yaw_offset_valid == 0U) {
+        s_dual.redundant_yaw_offset = s_dual.redundant.yaw;
+        s_dual.redundant_yaw_offset_valid = 1U;
+        s_dual.redundant_zero_pending = 1U;
+    }
 }
 
 void dual_ahrs_init(void)
 {
     uint8_t index;
     (void)memset(&s_dual, 0, sizeof(s_dual));
-    for (index = 0U; index < 6U; ++index) {
-        s_dual.notch[index] = make_notch(DUAL_AHRS_BIQUAD_NOTCH_HZ,
-                                         DUAL_AHRS_BIQUAD_NOTCH_Q);
-        s_dual.lpf[index] = make_lpf(DUAL_AHRS_BIQUAD_LPF_HZ);
+    for (index = 0U; index < 3U; ++index) {
+        s_dual.accel_lpf[index] = make_lpf(DUAL_AHRS_ACCEL_LPF_HZ);
+        s_dual.gyro_lpf[index] = make_lpf(DUAL_AHRS_GYRO_LPF_HZ);
     }
     imu_leveling_init(&s_dual.leveling_bmi);
     imu_leveling_init(&s_dual.leveling_lsm);
@@ -793,8 +800,9 @@ void dual_ahrs_update(const dual_ahrs_input_t *input)
     calibrated_input.gyro.x -= s_dual.bias.bmi_gyro.x;
     calibrated_input.gyro.y -= s_dual.bias.bmi_gyro.y;
     calibrated_input.gyro.z -= s_dual.bias.bmi_gyro.z;
-    /* Normalize the BMI323 Z gyro into the vehicle yaw convention after bias
-     * removal, so the calibrated bias remains in the sensor frame. */
+    /* BMI323 Z rotation is physically opposite to the vehicle Body Frame.
+     * Apply the polarity correction after bias removal and before leveling so
+     * the calibrated sensor-frame rate is transformed as one vector. */
     calibrated_input.gyro.z = -calibrated_input.gyro.z;
     calibrated_input.lsm_accel.x -= s_dual.bias.lsm_accel.x;
     calibrated_input.lsm_accel.y -= s_dual.bias.lsm_accel.y;
@@ -836,17 +844,10 @@ void dual_ahrs_update(const dual_ahrs_input_t *input)
     }
     if (input->bmi_accel_valid != 0U && input->bmi_gyro_valid != 0U &&
         input->bmi_timestamp_us != 0U) {
-        /* Filter every acquired sample before dropping every second sample.
-         * Running the biquads only on the decimated stream would move their
-         * effective cutoff and would not provide the required anti-aliasing. */
-        filtered_accel = filter_vector(input->bmi_accel, s_dual.notch,
-                                       s_dual.lpf);
-        filtered_gyro = filter_vector(input->gyro, &s_dual.notch[3],
-                                      &s_dual.lpf[3]);
-        if (s_dual.decimation_phase == 0U) {
-            update_primary(input, filtered_accel, filtered_gyro);
-        }
-        s_dual.decimation_phase ^= 1U;
+        /* The BMI323 stream is 200 Hz: filter and integrate every sample. */
+        filtered_accel = filter_vector(input->bmi_accel, s_dual.accel_lpf);
+        filtered_gyro = filter_vector(input->gyro, s_dual.gyro_lpf);
+        update_primary(input, filtered_accel, filtered_gyro);
     }
     capture_ready_yaw_offsets();
     s_dual.output.primary = zero_reference_attitude(
@@ -857,14 +858,17 @@ void dual_ahrs_update(const dual_ahrs_input_t *input)
         &s_dual.redundant_yaw_offset_valid, &s_dual.redundant_zero_pending);
     primary_valid = s_dual.output.primary.valid;
     redundant_valid = s_dual.output.redundant.valid;
-    s_dual.output.gravity_confidence = gravity_confidence(
-        &input->bmi_accel, (float)input->radar_pwm_percent);
+    s_dual.output.gravity_confidence = gravity_confidence(&input->bmi_accel);
     s_dual.output.magnetic_confidence = mag_confidence(&input->mag);
     if (primary_valid != 0U && redundant_valid != 0U) {
-        delta.x = delta_roll(s_dual.output.primary.roll, s_dual.redundant.roll);
+        /* Compare the final, zero-referenced Euler values so sign corrections
+         * and quaternion synchronization cannot be bypassed by the delta. */
+        delta.x = delta_roll(s_dual.output.primary.roll,
+                             s_dual.output.redundant.roll);
         delta.y = delta_pitch(s_dual.output.primary.pitch,
-                              s_dual.redundant.pitch);
-        delta.z = delta_yaw(s_dual.output.primary.yaw, s_dual.redundant.yaw);
+                              s_dual.output.redundant.pitch);
+        delta.z = delta_yaw(s_dual.output.primary.yaw,
+                            s_dual.output.redundant.yaw);
         s_dual.output.delta_rad = delta;
     } else {
         s_dual.output.delta_rad = (dual_ahrs_vector3_t){0.0f, 0.0f, 0.0f};

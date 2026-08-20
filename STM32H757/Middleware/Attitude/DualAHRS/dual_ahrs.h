@@ -58,7 +58,6 @@ typedef struct
     uint8_t bmi_gyro_valid;
     uint8_t lsm_accel_valid;
     uint8_t lsm_mag_valid;
-    uint8_t radar_pwm_percent;
 } dual_ahrs_input_t;
 
 typedef enum
@@ -88,8 +87,7 @@ typedef struct
 } dual_ahrs_output_t;
 
 /* Keep these helpers public for deterministic host/replay tests. */
-float gravity_confidence(const dual_ahrs_vector3_t *accel,
-                         float radar_pwm_percent);
+float gravity_confidence(const dual_ahrs_vector3_t *accel);
 float mag_confidence(const dual_ahrs_vector3_t *mag);
 float dual_ahrs_wrap_pi(float angle);
 float delta_roll(float primary, float redundant);
@@ -105,7 +103,7 @@ void dual_ahrs_set_local_gravity(float gravity_mps2);
 void dual_ahrs_update(const dual_ahrs_input_t *input);
 void dual_ahrs_get_output(dual_ahrs_output_t *output);
 
-/* Serializes the schema=2 payload described by the SCBP-V3 contract. */
+/* Serializes the schema=2 SCBP-CAN DualAHRS payload. */
 int dual_ahrs_pack_payload(uint8_t *payload, size_t capacity);
 
 #ifdef __cplusplus

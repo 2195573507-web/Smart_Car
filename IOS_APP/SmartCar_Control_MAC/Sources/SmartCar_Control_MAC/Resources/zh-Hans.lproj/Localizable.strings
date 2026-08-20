@@ -31,14 +31,8 @@
 "label.elapsed" = "耗时";
 "label.imu_calibration_analysis" = "IMU 校准分析";
 "label.static_calibration" = "静态校准 (PWM 0%)";
-"label.radar_vibration_analysis" = "雷达振动分析";
 "label.samples" = "样本数";
 "label.acc_offset" = "加速度偏置";
-"label.noise_rms" = "静态噪声 RMS";
-"label.rms_x" = "RMS X";
-"label.rms_y" = "RMS Y";
-"label.rms_z" = "RMS Z";
-"label.rms_total" = "总 RMS";
 "label.roll" = "横滚";
 "label.pitch" = "俯仰";
 "label.yaw" = "航向";
@@ -91,10 +85,8 @@
 "protocol.imu_cal_status" = "IMU 校准状态";
 "protocol.imu_cal_bias" = "IMU 校准偏置";
 "protocol.imu_cal_result" = "IMU 校准结果";
-"protocol.imu_vibration_profile" = "IMU 振动曲线";
 "protocol.imu_telemetry" = "IMU 遥测";
 "protocol.radar_status" = "雷达状态";
-"protocol.radar_vibration_status" = "雷达振动状态";
 "calibration.title" = "LSM303 加速度计校准";
 "calibration.keep_still" = "请保持设备静止";
 "calibration.status" = "状态";
@@ -106,7 +98,6 @@
 "calibration.stabilize" = "PWM 稳定中";
 "calibration.collecting" = "采样中";
 "calibration.static_sampling" = "静态采样";
-"calibration.vibration_sampling" = "振动采样";
 "calibration.done" = "LSM303 校准就绪";
 "calibration.failed" = "校准失败";
 "calibration.completed" = "LSM303 校准就绪";

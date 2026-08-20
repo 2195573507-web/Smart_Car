@@ -34,7 +34,6 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../BSP/TIMER/imu_time.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../Middleware/Sensor/imu_manager.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../Middleware/Calibration/imu_calibration.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/../Middleware/Calibration/imu_vibration.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../Middleware/Calibration/imu_boot_manager.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../Middleware/Filter/imu_filter.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../Middleware/Sensor/Magnetometer/mag_filter.c
@@ -44,7 +43,9 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../Middleware/Boot/boot_log.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../Application/RTOS/imu_runtime.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../Middleware/Communication/UART_Link/uart_link.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/../Middleware/Communication/SmartCar_Frame/sc_frame.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../Common/SCBP_CAN/scbp_crc.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../Common/SCBP_CAN/scbp_parser.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../Common/SCBP_CAN/scbp_link.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../Middleware/Communication/Services/s3_service.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../Middleware/Communication/Services/log_service.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../System/Task/rtos_health.c
@@ -56,7 +57,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
 )
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../Middleware/Communication/UART_Link
-    ${CMAKE_CURRENT_SOURCE_DIR}/../Middleware/Communication/SmartCar_Frame
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../Common/SCBP_CAN/include
     ${CMAKE_CURRENT_SOURCE_DIR}/../Middleware/Communication/Services
     ${CMAKE_CURRENT_SOURCE_DIR}/../Drivers/IMU/BMI323
     ${CMAKE_CURRENT_SOURCE_DIR}/../Drivers/IMU/LSM303

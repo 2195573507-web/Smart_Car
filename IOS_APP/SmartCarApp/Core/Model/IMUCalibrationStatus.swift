@@ -22,7 +22,6 @@ public enum IMUCalibrationState: UInt8, Equatable, Sendable {
 
 public enum IMUCalibrationSampleMode: UInt8, Equatable, Sendable {
     case `static` = 0
-    case vibration = 1
 }
 
 public struct IMUCalibrationStatus: Equatable, Sendable {
@@ -53,9 +52,6 @@ public struct IMUCalibrationStatus: Equatable, Sendable {
     public var isComplete: Bool { state == .complete }
 
     public var displayName: String {
-        if state == .sample {
-            return sampleMode == .static ? "Static Sampling" : "Vibration Sampling"
-        }
         return state.displayName
     }
 

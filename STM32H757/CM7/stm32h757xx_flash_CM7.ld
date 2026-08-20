@@ -39,6 +39,7 @@ MEMORY
 {
 FLASH (rx)      : ORIGIN = 0x08000000, LENGTH = 1024K
 RAM (xrw)      : ORIGIN = 0x20000000, LENGTH = 128K
+RAM_D2 (xrw)   : ORIGIN = 0x30000000, LENGTH = 288K
 ITCMRAM (xrw)      : ORIGIN = 0x00000000, LENGTH = 64K
 }
 /* Highest address of the user mode stack */
@@ -209,6 +210,15 @@ SECTIONS
 
   PROVIDE( __bss_start = __tbss_start );
   PROVIDE( __bss_size = __bss_end - __bss_start );
+
+  /* DMA1 cannot access CM7 DTCM at 0x20000000. UART RX buffers live in D2 SRAM. */
+  .dma_buffer (NOLOAD) : ALIGN(32)
+  {
+    __dma_buffer_start__ = .;
+    KEEP(*(.dma_buffer .dma_buffer.*))
+    . = ALIGN(32);
+    __dma_buffer_end__ = .;
+  } >RAM_D2
 
   /* Retained diagnostics survive a reset because startup clears only .bss. */
   .noinit (NOLOAD) :

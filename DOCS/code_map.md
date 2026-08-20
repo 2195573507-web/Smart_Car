@@ -8,8 +8,8 @@ and public interfaces. Paths are source paths, not claims of runtime success.
 | STM32 boot | `STM32H757/CM7/Core/Src/main.c` | `main` | `HAL_Init`, peripheral init, `vTaskStartScheduler` | Startup and task graph |
 | STM32 UART log | `STM32H757/BSP/UART`, `Middleware/Boot` | `bsp_uart_init`, `boot_log` | `bsp_uart_transmit`, `log_service_start` | USART1 text/structured logs |
 | STM-S3 UART | `STM32H757/Middleware/Communication/UART_Link` | `uart_link_task_start` | `uart_link_send/read/get_stats` | Raw STM-S3 bytes |
-| STM frame | `STM32H757/Middleware/Communication/SmartCar_Frame` | parser callback | `sc_frame_encode/decode/parser_feed` | C source frame views |
-| STM S3 service | `STM32H757/Middleware/Communication/Services/s3_service.c` | `s3_service_start` | `s3_service_step`, `s3_service_send_boot_frame` | PONG/calibration service events |
+| Shared SCBP-CAN | `Common/SCBP_CAN` | parser/link callbacks | `scbp_can_encode/decode`, `scbp_parser_feed`, `scbp_link_send/receive/tick` | Shared validated UART frame views and link health |
+| STM S3 service | `STM32H757/Middleware/Communication/Services/s3_service.c` | `s3_service_start` | `s3_service_step`, `s3_service_send_boot_message` | SCBP-CAN calibration/telemetry service events |
 | IMU runtime | `STM32H757/Application/RTOS/imu_runtime.c` | `imu_runtime_start` | `imu_task`, `imu_debug_task` | Sample cadence and logs |
 | IMU manager | `STM32H757/Middleware/Sensor/imu_manager.c` | `imu_init`, `imu_update` | `imu_get_data`, `imu_lsm_is_online` | Complete raw snapshot |
 | LSM303 | `STM32H757/Drivers/IMU/LSM303` | `lsm303_init` | `lsm303_read_acc/mag` | Accel/mag vectors |
@@ -21,7 +21,7 @@ and public interfaces. Paths are source paths, not claims of runtime success.
 | Encoder | `STM32H757/Drivers/Encoder`, generated TIM1/TIM2 | placeholder `encoder.c` | timer allocation only | Future counts/odometry |
 | S3 main | `ESPS3/main/main.c` | `app_main` | NVS, STM UART, BLE, radar, service init | Gateway startup |
 | S3 STM UART | `ESPS3/components/stm_uart` | `stm_uart_init` | `stm_uart_send/receive_nonblock` | Raw gateway bytes |
-| S3 frame | `ESPS3/components/smartcar_protocol` | `sc_frame_parser_feed` | `sc_frame_encode/decode` | Source frame views |
+| S3 protocol | `ESPS3/components/smartcar_protocol` | shared parser callbacks | `scbp_parser_feed`, `scbp_link_send/receive` | SCBP-CAN source frame views |
 | S3 service | `ESPS3/components/smartcar_service` | `smartcar_service_init` | command/radar/log bridges | Gateway state/events |
 | S3 BLE | `ESPS3/components/s3_ble` | `s3_ble_init` | GATT callbacks, notify, RX callback API | BLE transport |
 | Radar | `ESPS3/main/radar`, `components/radar_control` | `radar_uart_init` | `radar_parser_feed`, `radar_control_set_calibration_pwm` | Radar bytes/state/PWM |

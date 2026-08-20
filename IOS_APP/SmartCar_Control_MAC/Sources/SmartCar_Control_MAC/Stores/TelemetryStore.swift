@@ -31,9 +31,6 @@ struct RadarStateSnapshot: Equatable {
     var online = false
     var speedPercent: UInt8 = 0
     var lastUpdatedAt: Date?
-    var calibrationPWM: UInt8 = 0
-    var calibrationActive = false
-    var lastCalibrationUpdatedAt: Date?
 
     var availability: RadarAvailability {
         guard connection == .connected else { return .offline }
@@ -293,9 +290,6 @@ final class RadarState: ObservableObject {
             next.online = false
             next.speedPercent = 0
             next.lastUpdatedAt = nil
-            next.calibrationPWM = 0
-            next.calibrationActive = false
-            next.lastCalibrationUpdatedAt = nil
         }
         snapshot = next
     }
@@ -304,83 +298,12 @@ final class RadarState: ObservableObject {
         var next = snapshot
         next.online = status.online
         next.speedPercent = status.speedPercent
-        // 0x15 carries the radar's current PWM/speed. Keep the separate
-        // calibration field populated even when legacy 0x18 status is absent.
-        next.calibrationPWM = status.speedPercent
         next.lastUpdatedAt = date
         if next != snapshot {
             snapshot = next
         }
     }
 
-    func ingest(_ status: RadarCalibrationStatus, at date: Date) {
-        var next = snapshot
-        next.calibrationPWM = status.currentPWM
-        next.calibrationActive = status.active
-        next.lastCalibrationUpdatedAt = date
-        if next != snapshot {
-            snapshot = next
-        }
-    }
-}
-
-@MainActor
-final class RadarVibrationState: ObservableObject {
-    @Published private(set) var snapshot = RadarVibrationStateSnapshot()
-
-    func ingest(_ status: RadarVibrationStatus, at date: Date) {
-        var next = snapshot
-        if let index = next.results.firstIndex(where: { $0.speedPercent == status.speedPercent }) {
-            next.results[index] = status
-        } else {
-            next.results.append(status)
-            next.results.sort { $0.speedPercent < $1.speedPercent }
-        }
-        next.lastUpdatedAt = date
-        if next != snapshot {
-            snapshot = next
-        }
-    }
-
-    func ingest(_ profile: IMUVibrationProfile, at date: Date) {
-        var next = snapshot
-        switch profile {
-        case .lsm303(let value):
-            if let index = next.lsmProfiles.firstIndex(where: { $0.pwm == value.pwm }) {
-                next.lsmProfiles[index] = value
-            } else {
-                next.lsmProfiles.append(value)
-                next.lsmProfiles.sort { $0.pwm < $1.pwm }
-            }
-        case .bmi323(let value):
-            if let index = next.bmiProfiles.firstIndex(where: { $0.pwm == value.pwm }) {
-                next.bmiProfiles[index] = value
-            } else {
-                next.bmiProfiles.append(value)
-                next.bmiProfiles.sort { $0.pwm < $1.pwm }
-            }
-        }
-        next.lastUpdatedAt = date
-        if next != snapshot { snapshot = next }
-    }
-
-    func setConnection(_ connection: BLEConnectionStatus) {
-        guard connection == .connected else {
-            snapshot = RadarVibrationStateSnapshot()
-            return
-        }
-    }
-}
-
-struct RadarVibrationStateSnapshot: Equatable {
-    var results: [RadarVibrationStatus] = []
-    var lsmProfiles: [LSM303VibrationProfile] = []
-    var bmiProfiles: [BMI323VibrationProfile] = []
-    var lastUpdatedAt: Date?
-
-    func result(for speedPercent: UInt8) -> RadarVibrationStatus? {
-        results.first { $0.speedPercent == speedPercent }
-    }
 }
 
 struct StaticCalibrationStateSnapshot: Equatable {
@@ -420,17 +343,13 @@ final class StaticCalibrationState: ObservableObject {
         var result = next.result
         let staticStatus = status.sampleMode == .static
         let staticComplete = staticStatus &&
-            status.stageCode == IMUCalibrationStage.waitRadarReady.rawValue &&
+            status.stageCode == IMUCalibrationStage.complete.rawValue &&
             status.currentPWM == 0 &&
             status.totalSample > 0 &&
             status.sampleCount >= status.totalSample
 
-        // Once the PWM=0 result is complete, later vibration counters must not
-        // overwrite its sample count.
-        if result.phase != .completed || staticStatus {
-            result.sampleCount = status.sampleCount
-            result.sampleTotal = status.totalSample
-        }
+        result.sampleCount = status.sampleCount
+        result.sampleTotal = status.totalSample
         result.errorCode = status.state == .error ? status.errorCode : nil
 
         if status.state == .error && result.phase != .completed {
@@ -478,10 +397,10 @@ final class StaticCalibrationState: ObservableObject {
     private func logCompletedResultIfNeeded() {
         let result = snapshot.result
         guard result.phase == .completed else { return }
-        let signature = "\(result.sampleCount)/\(result.sampleTotal)|\(scalar(result.accelOffsetX))|\(scalar(result.accelOffsetY))|\(scalar(result.accelOffsetZ))|\(scalar(result.noiseRms))"
+        let signature = "\(result.sampleCount)/\(result.sampleTotal)|\(scalar(result.accelOffsetX))|\(scalar(result.accelOffsetY))|\(scalar(result.accelOffsetZ))"
         guard loggedSignature != signature else { return }
         loggedSignature = signature
-        print("[APP_CAL] STATIC RESULT RX samples=\(result.sampleCount)/\(result.sampleTotal) offset=(\(scalar(result.accelOffsetX)),\(scalar(result.accelOffsetY)),\(scalar(result.accelOffsetZ))) noise=\(scalar(result.noiseRms))")
+        print("[APP_CAL] STATIC RESULT RX samples=\(result.sampleCount)/\(result.sampleTotal) offset=(\(scalar(result.accelOffsetX)),\(scalar(result.accelOffsetY)),\(scalar(result.accelOffsetZ)))")
     }
 
     private func scalar(_ value: Float?) -> String {
@@ -512,8 +431,6 @@ final class CalibrationState: ObservableObject {
             next.status = updated
             next.timestamp = date
             next.availability = .current
-        case .calibrationEvent(.complete):
-            markComplete(in: &next, at: date)
         case .dualIMUStatus(let lifecycle) where lifecycle.phase == .ready:
             markComplete(in: &next, at: date)
         case .imuCalibrationBias(let bias):
@@ -654,7 +571,6 @@ final class TelemetryStore {
     let dualAttitude = DualAttitudeState()
     let imu = IMUState()
     let radar = RadarState()
-    let vibration = RadarVibrationState()
     let staticCalibration = StaticCalibrationState()
     let calibration = CalibrationState()
     let dualIMU = DualIMUState()
@@ -672,8 +588,6 @@ final class TelemetryStore {
             self.imu.ingest(telemetry)
         case .dualIMUStatus(let lifecycle):
             dualIMU.ingest(lifecycle, at: date)
-        case .imuVibrationProfile(let profile):
-            vibration.ingest(profile, at: date)
         case .attitude(let attitude):
             self.attitude.ingest(attitude, at: date)
         case .dualAttitude(let dual):
@@ -681,10 +595,6 @@ final class TelemetryStore {
             self.attitude.ingest(dual.primary.attitudeData, at: date)
         case .radarStatus(let status):
             radar.ingest(status, at: date)
-        case .radarCalibrationStatus(let status):
-            radar.ingest(status, at: date)
-        case .radarVibrationStatus(let status):
-            vibration.ingest(status, at: date)
         default:
             break
         }
@@ -696,7 +606,6 @@ final class TelemetryStore {
         imu.setConnection(connection)
         status.setConnection(connection)
         radar.setConnection(connection)
-        vibration.setConnection(connection)
         staticCalibration.setConnection(connection)
         calibration.setConnection(connection)
         dualIMU.setConnection(connection)

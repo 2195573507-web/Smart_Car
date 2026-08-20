@@ -26,7 +26,7 @@
 
 static volatile bool bmi323_ready;
 static volatile bmi323_sample_rate_t bmi323_sample_rate =
-    BMI323_SAMPLE_RATE_100HZ;
+    BMI323_SAMPLE_RATE_200HZ;
 static bmi323_error_t bmi323_last_error;
 static bmi323_diagnostics_t bmi323_diagnostics;
 static uint8_t whoami_trace_done = 0U;

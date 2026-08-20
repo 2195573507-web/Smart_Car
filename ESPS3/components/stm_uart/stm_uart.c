@@ -224,6 +224,21 @@ void stm_uart_get_stats(stm_uart_stats_t *stats)
     (void)xSemaphoreGive(s_storage_mutex);
 }
 
+void stm_uart_recover(void)
+{
+    if (!s_initialized) {
+        return;
+    }
+    (void)uart_flush_input(STM_UART_PORT);
+    if (s_storage_mutex != NULL &&
+        xSemaphoreTake(s_storage_mutex, pdMS_TO_TICKS(10U)) == pdTRUE) {
+        s_storage_head = 0U;
+        s_storage_tail = 0U;
+        s_storage_count = 0U;
+        (void)xSemaphoreGive(s_storage_mutex);
+    }
+}
+
 static int stm_uart_receive_with_timeout(uint8_t *buffer,
                                          size_t max_len,
                                          TickType_t timeout_ticks)

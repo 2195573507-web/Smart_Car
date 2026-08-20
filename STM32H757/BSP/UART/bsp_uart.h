@@ -21,7 +21,7 @@ typedef struct {
     uint32_t tx_busy;
 } bsp_uart_log_stats_t;
 
-/* Keep these values aligned with the established SC_TYPE_LOG payload. */
+/* Log payload: source, level, timestamp, text length, and UTF-8 text. */
 #define BSP_UART_LOG_LEVEL_DEBUG UINT8_C(0)
 #define BSP_UART_LOG_LEVEL_INFO  UINT8_C(1)
 #define BSP_UART_LOG_LEVEL_WARN  UINT8_C(2)
@@ -38,7 +38,7 @@ bsp_status_t bsp_uart_receive_dma(bsp_uart_port_t port, uint8_t *data, size_t si
 bsp_status_t bsp_uart_log_write(const char *text, uint32_t timeout_ms);
 bsp_status_t bsp_uart_log_write_level(uint8_t level, const char *text,
                                       uint32_t timeout_ms);
-/* Sends an SC_TYPE_LOG frame through USART2 only. */
+/* Sends an SCBP-CAN LOG frame through USART2 only. */
 bsp_status_t bsp_uart_log_write_link_level(uint8_t level, const char *text);
 bsp_status_t bsp_uart_get_log_stats(bsp_uart_log_stats_t *stats);
 

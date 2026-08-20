@@ -2,7 +2,7 @@
 
 #include <string.h>
 
-#include "frame.h"
+#include "scbp_crc.h"
 
 static void app_parser_reset(sc_app_parser_t *parser)
 {
@@ -87,7 +87,7 @@ size_t sc_app_parser_feed(sc_app_parser_t *parser, const uint8_t *data,
                 (uint16_t)parser->bytes[5U + payload_length] |
                 ((uint16_t)parser->bytes[6U + payload_length] << 8U);
             const uint16_t calculated_crc =
-                sc_frame_crc16(&parser->bytes[1], 4U + payload_length);
+                scbp_crc16_modbus(&parser->bytes[1], 4U + payload_length);
 
             if (parser->bytes[1] != SC_APP_FRAME_VERSION) {
                 app_parser_report_error(parser, -3);
@@ -134,7 +134,7 @@ int sc_app_frame_encode(uint8_t type, const uint8_t *payload, uint16_t length,
     if (length != 0U) {
         memcpy(&out[5], payload, length);
     }
-    const uint16_t crc = sc_frame_crc16(&out[1], 4U + length);
+    const uint16_t crc = scbp_crc16_modbus(&out[1], 4U + length);
     out[5U + length] = (uint8_t)(crc & 0xFFU);
     out[6U + length] = (uint8_t)(crc >> 8U);
     out[7U + length] = SC_APP_FRAME_TAIL;

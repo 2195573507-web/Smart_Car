@@ -182,24 +182,6 @@ struct RadarStatus: Equatable {
     let speedPercent: UInt8
 }
 
-struct RadarCalibrationStatus: Equatable {
-    let currentPWM: UInt8
-    let active: Bool
-}
-
-/// One completed radar vibration profile. The payload is 0x18, followed by
-/// four IEEE-754 little-endian float32 values.
-struct RadarVibrationStatus: Equatable, Identifiable {
-    let speedPercent: UInt8
-    let rmsX: Float
-    let rmsY: Float
-    let rmsZ: Float
-    let rmsTotal: Float
-
-    var id: UInt8 { speedPercent }
-    var totalRMS: Float { rmsTotal }
-}
-
 enum StaticCalibrationPhase: Equatable {
     case waiting
     case sampling
@@ -207,9 +189,7 @@ enum StaticCalibrationPhase: Equatable {
     case error
 }
 
-/// App-owned view data for the PWM=0 static calibration result. The current
-/// wire contract supplies sample progress and bias separately; noiseRms stays
-/// optional until a firmware result field is available.
+/// App-owned view data for the static calibration result.
 struct StaticCalibrationResult: Equatable {
     var phase: StaticCalibrationPhase = .waiting
     var sampleCount: UInt32 = 0
@@ -217,7 +197,6 @@ struct StaticCalibrationResult: Equatable {
     var accelOffsetX: Float?
     var accelOffsetY: Float?
     var accelOffsetZ: Float?
-    var noiseRms: Float?
     var errorCode: UInt8?
     var lsmAccelBias: Vector3?
     var bmiAccelBias: Vector3?
@@ -251,25 +230,20 @@ enum IMUCalibrationState: UInt8, Equatable {
 
 enum IMUCalibrationSampleMode: UInt8, Equatable {
     case `static` = 0
-    case vibration = 1
 }
 
 enum IMUCalibrationStage: UInt8, Equatable {
     case waitRadarReady = 0
     case staticStableWait = 1
     case staticSample = 2
-    case vibrationStableWait = 3
-    case vibrationSample = 4
-    case complete = 5
-    case error = 6
+    case complete = 3
+    case error = 4
 
     var displayName: String {
         switch self {
         case .waitRadarReady: return "WAIT_RADAR_READY"
         case .staticStableWait: return "STATIC_STABLE_WAIT"
         case .staticSample: return "STATIC_SAMPLE"
-        case .vibrationStableWait: return "VIBRATION_STABLE_WAIT"
-        case .vibrationSample: return "VIBRATION_SAMPLE"
         case .complete: return "COMPLETE"
         case .error: return "ERROR"
         }
@@ -278,14 +252,10 @@ enum IMUCalibrationStage: UInt8, Equatable {
 
 enum CalibrationEventID: UInt8, Equatable {
     case staticCalibrationComplete = 0x01
-    case vibrationStepComplete = 0x02
-    case complete = 0x03
 
     var displayName: String {
         switch self {
         case .staticCalibrationComplete: return "STATIC_CAL_DONE"
-        case .vibrationStepComplete: return "VIBRATION_STEP_DONE"
-        case .complete: return "COMPLETE"
         }
     }
 }
@@ -337,10 +307,10 @@ struct IMUCalibrationStatus: Equatable {
         } else {
             switch state {
             case .idle, .setPWM: self.stageCode = 0
-            case .waitStable: self.stageCode = sampleMode == .vibration ? 3 : 1
-            case .sample: self.stageCode = sampleMode == .vibration ? 4 : 2
-            case .complete: self.stageCode = 5
-            case .error: self.stageCode = 6
+            case .waitStable: self.stageCode = 1
+            case .sample: self.stageCode = 2
+            case .complete: self.stageCode = 3
+            case .error: self.stageCode = 4
             }
         }
         self.errorCode = errorCode
@@ -360,31 +330,6 @@ struct IMUCalibrationResult: Equatable {
     let gyroBias: Vector3?
 }
 
-struct LSM303VibrationProfile: Equatable, Identifiable {
-    let pwm: UInt8
-    let sampleCount: UInt32
-    let timestamp: UInt32
-    let accelRMS: Vector3
-    let totalRMS: Float
-    var id: UInt8 { pwm }
-}
-
-struct BMI323VibrationProfile: Equatable, Identifiable {
-    let pwm: UInt8
-    let sampleCount: UInt32
-    let timestamp: UInt32
-    let accelRMS: Vector3
-    let accelTotalRMS: Float
-    let gyroRMS: Vector3
-    let gyroTotalRMS: Float
-    var id: UInt8 { pwm }
-}
-
-enum IMUVibrationProfile: Equatable {
-    case lsm303(LSM303VibrationProfile)
-    case bmi323(BMI323VibrationProfile)
-}
-
 enum IMUTelemetry: Equatable {
     case lsm303(LSM303Data)
     case bmi323(BMI323Data)
@@ -395,8 +340,8 @@ enum DualIMUPhase: UInt8, Equatable {
     case initialize = 1
     case selfTest = 2
     case staticCalibration = 3
-    case vibrationCapture = 4
-    case verify = 5
+    case reserved4 = 4
+    case reserved5 = 5
     case ready = 6
     case failed = 7
 
@@ -406,8 +351,7 @@ enum DualIMUPhase: UInt8, Equatable {
         case .initialize: return "INIT"
         case .selfTest: return "SELF_TEST"
         case .staticCalibration: return "STATIC_CALIBRATION"
-        case .vibrationCapture: return "VIBRATION_CAPTURE"
-        case .verify: return "VERIFY"
+        case .reserved4, .reserved5: return "RESERVED"
         case .ready: return "READY"
         case .failed: return "FAILED"
         }
@@ -421,15 +365,12 @@ struct DualIMULifecycleStatus: Equatable {
     let overallProgress: UInt8
     let errorCode: UInt8
     let flags: UInt8
-    let vibrationIndex: UInt8
-    let radarPWM: UInt8
     let phaseStartTimeMs: UInt32
     let phaseEndTimeMs: UInt32
 
     var lsmPhaseComplete: Bool { (flags & 0x01) != 0 }
     var bmiPhaseComplete: Bool { (flags & 0x02) != 0 }
     var phaseActive: Bool { (flags & 0x04) != 0 }
-    var eventWaiting: Bool { (flags & 0x08) != 0 }
 }
 
 enum DecodedMessage: Equatable {
@@ -444,12 +385,9 @@ enum DecodedMessage: Equatable {
     case imuCalibrationBias(IMUCalibrationBias)
     case imuCalibrationResult(IMUCalibrationResult)
     case calibrationEvent(CalibrationEventID)
-    case imuVibrationProfile(IMUVibrationProfile)
     case imuTelemetry(IMUTelemetry)
     case dualIMUStatus(DualIMULifecycleStatus)
     case radarStatus(RadarStatus)
-    case radarCalibrationStatus(RadarCalibrationStatus)
-    case radarVibrationStatus(RadarVibrationStatus)
 
     private static func mapExtendedStage(_ raw: UInt8) -> (IMUCalibrationState, IMUCalibrationSampleMode)? {
         switch raw {
@@ -457,10 +395,8 @@ enum DecodedMessage: Equatable {
         case 0: return (.idle, .static) // WAIT_RADAR_READY
         case 1: return (.waitStable, .static) // STATIC_STABLE_WAIT
         case 2: return (.sample, .static) // STATIC_SAMPLE
-        case 3: return (.waitStable, .vibration) // VIBRATION_STABLE_WAIT
-        case 4: return (.sample, .vibration) // VIBRATION_SAMPLE
-        case 5: return (.complete, .vibration) // COMPLETE
-        case 6: return (.error, .vibration) // ERROR
+        case 3: return (.complete, .static)
+        case 4: return (.error, .static)
         default: return nil
         }
     }
@@ -743,30 +679,6 @@ enum DecodedMessage: Equatable {
                     accelBias: Vector3(x: float32(bytes, at: 2), y: float32(bytes, at: 6), z: float32(bytes, at: 10)),
                     gyroBias: Vector3(x: float32(bytes, at: 14), y: float32(bytes, at: 18), z: float32(bytes, at: 22))))
             }
-        case .imuVibrationProfile:
-            guard (bytes.count == 26 || bytes.count == 42),
-                  let sensor = IMUSource(rawValue: bytes[0]),
-                  bytes[1] <= 100 else {
-                throw DecodeError.invalidPayload("IMU_VIBRATION_PROFILE source/length")
-            }
-            let pwm = bytes[1]
-            let sampleCount = uint32(bytes, at: 2)
-            let timestamp = uint32(bytes, at: 6)
-            if sensor == .lsm303 {
-                guard bytes.count == 26 else { throw DecodeError.invalidPayload("LSM303 vibration profile") }
-                self = .imuVibrationProfile(.lsm303(LSM303VibrationProfile(
-                    pwm: pwm, sampleCount: sampleCount, timestamp: timestamp,
-                    accelRMS: Vector3(x: float32(bytes, at: 10), y: float32(bytes, at: 14), z: float32(bytes, at: 18)),
-                    totalRMS: float32(bytes, at: 22))))
-            } else {
-                guard bytes.count == 42 else { throw DecodeError.invalidPayload("BMI323 vibration profile") }
-                self = .imuVibrationProfile(.bmi323(BMI323VibrationProfile(
-                    pwm: pwm, sampleCount: sampleCount, timestamp: timestamp,
-                    accelRMS: Vector3(x: float32(bytes, at: 10), y: float32(bytes, at: 14), z: float32(bytes, at: 18)),
-                    accelTotalRMS: float32(bytes, at: 22),
-                    gyroRMS: Vector3(x: float32(bytes, at: 26), y: float32(bytes, at: 30), z: float32(bytes, at: 34)),
-                    gyroTotalRMS: float32(bytes, at: 38))))
-            }
         case .imuTelemetry:
             guard bytes.count == 30,
                   let sensor = IMUSource(rawValue: bytes[0]) else {
@@ -802,8 +714,7 @@ enum DecodedMessage: Equatable {
                   let phase = DualIMUPhase(rawValue: bytes[0]),
                   bytes[1] <= 100,
                   bytes[2] <= 100,
-                  bytes[3] <= 100,
-                  bytes[7] <= 100 else {
+                  bytes[3] <= 100 else {
                 throw DecodeError.invalidPayload("DUAL_IMU_STATUS payload")
             }
             self = .dualIMUStatus(DualIMULifecycleStatus(
@@ -813,8 +724,6 @@ enum DecodedMessage: Equatable {
                 overallProgress: bytes[3],
                 errorCode: bytes[4],
                 flags: bytes[5],
-                vibrationIndex: bytes[6],
-                radarPWM: bytes[7],
                 phaseStartTimeMs: uint32(bytes, at: 8),
                 phaseEndTimeMs: uint32(bytes, at: 12)
             ))
@@ -831,31 +740,6 @@ enum DecodedMessage: Equatable {
                 throw DecodeError.invalidPayload("RADAR_STATUS requires online and speed percent")
             }
             self = .radarStatus(RadarStatus(online: bytes[0] == 1, speedPercent: bytes[1]))
-        case .radarVibrationStatus:
-            if bytes.count == 1 {
-                guard let event = CalibrationEventID(rawValue: bytes[0]) else {
-                    throw DecodeError.invalidPayload("CAL_EVENT requires a known event id")
-                }
-                self = .calibrationEvent(event)
-            } else if bytes.count == 2 {
-                // Legacy 0x18 calibration status remains accepted.
-                guard bytes[0] <= 100, bytes[1] <= 1 else {
-                    throw DecodeError.invalidPayload("RADAR_CAL_STATUS requires PWM and active")
-                }
-                self = .radarCalibrationStatus(
-                    RadarCalibrationStatus(currentPWM: bytes[0], active: bytes[1] == 1))
-            } else {
-                guard bytes.count == 17, bytes[0] <= 100 else {
-                    throw DecodeError.invalidPayload("RADAR_VIBRATION_STATUS requires 17 bytes")
-                }
-                self = .radarVibrationStatus(RadarVibrationStatus(
-                    speedPercent: bytes[0],
-                    rmsX: float32(bytes, at: 1),
-                    rmsY: float32(bytes, at: 5),
-                    rmsZ: float32(bytes, at: 9),
-                    rmsTotal: float32(bytes, at: 13)
-                ))
-            }
         case .pwmError:
             throw DecodeError.invalidPayload("PWM_ERROR is S3 to STM32 only")
         }
@@ -874,11 +758,6 @@ enum DecodedMessage: Equatable {
         case .imuCalibrationBias(let bias): return "IMU_CAL_BIAS x=\(bias.x.displayValue) y=\(bias.y.displayValue) z=\(bias.z.displayValue)"
         case .imuCalibrationResult(let result): return "IMU_CAL_RESULT sensor=\(result.sensorID)"
         case .calibrationEvent(let event): return "CAL_EVENT id=\(event.rawValue) \(event.displayName)"
-        case .imuVibrationProfile(let profile):
-            switch profile {
-            case .lsm303(let value): return "IMU_VIBRATION_PROFILE LSM303 pwm=\(value.pwm)% rms=\(value.totalRMS.displayValue)"
-            case .bmi323(let value): return "IMU_VIBRATION_PROFILE BMI323 pwm=\(value.pwm)% accel=\(value.accelTotalRMS.displayValue) gyro=\(value.gyroTotalRMS.displayValue)"
-            }
         case .imuTelemetry(let telemetry):
             switch telemetry {
             case .lsm303(let value): return "IMU_TELEMETRY LSM303 online=\(value.online ? 1 : 0)"
@@ -886,8 +765,6 @@ enum DecodedMessage: Equatable {
             }
         case .dualIMUStatus(let status): return "DUAL_IMU_STATUS phase=\(status.phase.displayName) lsm=\(status.lsmProgress)% bmi=\(status.bmiProgress)% overall=\(status.overallProgress)% error=\(status.errorCode)"
         case .radarStatus(let status): return "RADAR_STATUS \(status.online ? "ONLINE" : "OFFLINE") speed=\(status.speedPercent)%"
-        case .radarCalibrationStatus(let status): return "RADAR_CAL_STATUS pwm=\(status.currentPWM)% active=\(status.active ? 1 : 0)"
-        case .radarVibrationStatus(let status): return "RADAR_VIBRATION_STATUS pwm=\(status.speedPercent)% rms=\(status.rmsTotal.displayValue)"
         }
     }
 }
