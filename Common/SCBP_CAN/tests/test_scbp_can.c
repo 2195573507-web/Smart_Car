@@ -3,6 +3,7 @@
 
 #include "scbp_crc.h"
 #include "scbp_link.h"
+#include "scbp_wire.h"
 
 #define TEST_ASSERT(condition) do { \
     if (!(condition)) { \
@@ -167,6 +168,50 @@ static int test_parser_fragment_and_resync(void)
     return 0;
 }
 
+static int test_explicit_float_wire_codec(void)
+{
+    const float source[4] = {1.25f, -2.5f, 0.0f, 800.0f};
+    float decoded[4] = {0.0f};
+    uint8_t bytes[SCBP_PAYLOAD_WHEEL_SPEED_CMD_SIZE];
+
+    scbp_wire_write_f32_array_le(bytes, source, 4U);
+    TEST_ASSERT(bytes[0] == 0x00U && bytes[1] == 0x00U &&
+                bytes[2] == 0xA0U && bytes[3] == 0x3FU);
+    TEST_ASSERT(scbp_wire_read_f32_array_le(bytes, sizeof(bytes), decoded, 4U));
+    for (size_t index = 0U; index < 4U; ++index) {
+        TEST_ASSERT(decoded[index] == source[index]);
+    }
+    bytes[0] = 0x00U;
+    bytes[1] = 0x00U;
+    bytes[2] = 0x80U;
+    bytes[3] = 0x7FU;
+    TEST_ASSERT(!scbp_wire_read_f32_array_le(bytes, sizeof(bytes), decoded, 1U));
+    TEST_ASSERT(!scbp_wire_read_f32_array_le(bytes, sizeof(bytes) - 1U, decoded, 4U));
+    return 0;
+}
+
+static int test_pid_params_payload_wire_contract(void)
+{
+    const float source[4] = {1.10f, 0.06f, 0.00f, 800.0f};
+    float decoded[4] = {0.0f};
+    uint8_t bytes[SCBP_PAYLOAD_PID_PARAMS_SIZE];
+
+    TEST_ASSERT(SCBP_MSG_ID_PID_PARAMS_CMD == UINT16_C(0x111));
+    scbp_wire_write_f32_array_le(bytes, source, 4U);
+    TEST_ASSERT(bytes[0] == 0xCDU && bytes[1] == 0xCCU &&
+                bytes[2] == 0x8CU && bytes[3] == 0x3FU);
+    TEST_ASSERT(bytes[12] == 0x00U && bytes[13] == 0x00U &&
+                bytes[14] == 0x48U && bytes[15] == 0x44U);
+    TEST_ASSERT(scbp_wire_read_f32_array_le(bytes, sizeof(bytes), decoded, 4U));
+    for (size_t index = 0U; index < 4U; ++index) {
+        TEST_ASSERT(decoded[index] == source[index]);
+    }
+    TEST_ASSERT(!scbp_wire_read_f32_array_le(bytes,
+                                             SCBP_PAYLOAD_PID_PARAMS_SIZE - 1U,
+                                             decoded, 4U));
+    return 0;
+}
+
 static int test_link_ack_retry_and_bus_off(void)
 {
     static const uint8_t payload[] = {0x44U};
@@ -238,7 +283,9 @@ static int test_link_ack_retry_and_bus_off(void)
 
 int main(void)
 {
-    if (test_crc_and_codec() != 0 || test_parser_fragment_and_resync() != 0 ||
+    if (test_crc_and_codec() != 0 || test_explicit_float_wire_codec() != 0 ||
+        test_pid_params_payload_wire_contract() != 0 ||
+        test_parser_fragment_and_resync() != 0 ||
         test_link_ack_retry_and_bus_off() != 0) {
         return 1;
     }

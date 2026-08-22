@@ -152,6 +152,7 @@ final class BLEManager: NSObject {
     }
 
     func disconnect() {
+        sendWheelSpeeds([0, 0, 0, 0])
         guard let peripheral else { return }
         central.cancelPeripheralConnection(peripheral)
     }
@@ -173,12 +174,38 @@ final class BLEManager: NSObject {
         sendFrame(SmartCarProtocol.encode(type: .radarPWMControl, payload: Data([clampedSpeed])))
     }
 
-    private func sendFrame(_ data: Data) {
+    func sendWheelSpeeds(_ speeds: [Float]) {
+        guard speeds.count == 4, speeds.allSatisfy(\.isFinite) else { return }
+        _ = sendFrame(SmartCarProtocol.encode(type: .wheelSpeedCommand,
+                                              payload: Self.floatPayload(speeds)))
+    }
+
+    @discardableResult
+    func sendPIDParameters(_ values: PIDParameterValues) -> Bool {
+        sendFrame(SmartCarProtocol.encode(type: .pidParams,
+                                          payload: Self.floatPayload([
+                                              values.kp, values.ki,
+                                              values.kd, values.maxAccel
+                                          ])))
+    }
+
+    @discardableResult
+    private func sendFrame(_ data: Data) -> Bool {
         guard let peripheral, let writeCharacteristic else {
             setError(.notConnected)
-            return
+            return false
         }
         peripheral.writeValue(data, for: writeCharacteristic, type: .withResponse)
+        return true
+    }
+
+    private static func floatPayload(_ values: [Float]) -> Data {
+        var payload = Data(capacity: values.count * MemoryLayout<UInt32>.size)
+        for value in values {
+            var bits = value.bitPattern.littleEndian
+            withUnsafeBytes(of: &bits) { payload.append(contentsOf: $0) }
+        }
+        return payload
     }
 
     private func handleReceivedEvents(_ events: [BLEReceiveEvent]) {

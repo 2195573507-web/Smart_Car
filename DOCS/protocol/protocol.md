@@ -11,6 +11,11 @@ The App BLE envelope is intentionally independent. ESP32-S3 validates
 SCBP-CAN payloads and creates a new App BLE frame for selected telemetry; it
 does not forward a raw UART frame to BLE.
 
+For command additions, use the detailed
+[STM32-S3 SCBP-CAN Command Reference](stm32-s3-command-reference.md). It is
+the registry for message direction, exact payload offsets, endpoint dispatch,
+transaction behavior, extension rules, and verification evidence.
+
 ## UART Frame
 
 ```text
@@ -57,9 +62,13 @@ Bits 4 through 7 are reserved and rejected by the parser.
 | Both | `ACK` | `0x005` | 4 B fast response |
 | Both | `ERROR` | `0x006` | 4 B fast response |
 | STM -> S3 | `BOOT_READY` | `0x007` | 2 B state/result |
+| S3 -> STM | `WHEEL_SPEED_CMD` | `0x110` | 16 B, transaction |
+| S3 -> STM | `PID_PARAMS_CMD` | `0x111` | 16 B, four f32 LE, transaction |
 | STM -> S3 | `ATTITUDE` | `0x201` | 80 B schema-2 DualAHRS |
 | STM -> S3 | `IMU_CAL_STATUS` | `0x202` | 11 B |
 | STM -> S3 | `IMU_TELEMETRY` | `0x207` | 30 B, one frame per sensor |
+| STM -> S3 | `POWER_STATUS` | `0x209` | 4 B float32 voltage |
+| STM -> S3 | `WHEEL_SPEED_STATUS` | `0x210` | 16 B, stream |
 | S3 -> STM, S3 -> App | `RADAR_STATUS` | `0x301` | 2 B |
 | S3 -> STM | `RADAR_PWM_READY` | `0x302` | 1 B, transaction |
 | STM -> S3 | `LOG` | `0x3F0` | existing bounded log payload |
@@ -79,6 +88,10 @@ message field.
 | `CAL_EVENT` | `event_id_u8`: 1 static done, 2 vibration step done, 3 complete |
 | `RADAR_STATUS` | `online_u8, speed_percent_u8` |
 | `RADAR_PWM_READY` | `speed_percent_u8` |
+| `WHEEL_SPEED_CMD` | `wheel_speed[4]_f32_le` in M1=RR, M2=RF, M3=LR, M4=LF order |
+| `PID_PARAMS_CMD` | `kp_f32_le, ki_f32_le, kd_f32_le, max_accel_f32_le` (16 B) |
+| `POWER_STATUS` | `battery_voltage_f32_le` |
+| `WHEEL_SPEED_STATUS` | `actual_speed[4]_f32_le` in M1=RR, M2=RF, M3=LR, M4=LF order |
 | `IMU_CAL_STATUS` | `stage_u8, radar_pwm_u8, sample_count_u32_le, sample_total_u32_le, error_code_u8` |
 | `IMU_TELEMETRY` | `sensor_id_u8, flags_u8, timestamp_ms_u32_le, accel[3]_f32_le, vector[3]_f32_le` |
 | `ATTITUDE` | `schema_u8=2, flags_u8, reserved_u16=0, timestamp_ms_u32_le, sample_sequence_u32_le, primary_euler[3], primary_quat[4], redundant_euler[3], redundant_quat[4], delta_euler[3]` float32 LE |

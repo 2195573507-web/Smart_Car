@@ -25,9 +25,10 @@ and handling guidance, is the [File List in the document audit](DOCUMENT_AUDIT_R
 | Hardware | [hardware facts](docs/hardware/facts.md) |
 | STM32 | [STM32H757](docs/stm32/stm32h757.md), [boot](docs/stm32/boot.md), [FreeRTOS](docs/stm32/freertos.md) |
 | ESP32-S3 | [S3](docs/esp32s3/esp32-s3.md), [BLE](docs/esp32s3/ble.md) |
-| Protocol/UART | [protocol](docs/protocol/protocol.md), [App BLE](docs/protocol/app-ble-protocol-v1.md), [STM-S3 transport](docs/protocol/stm32-s3-transport.md), [UART](docs/protocol/uart.md) |
+| Protocol/UART | [protocol](docs/protocol/protocol.md), [STM-S3 command reference](docs/protocol/stm32-s3-command-reference.md), [App BLE](docs/protocol/app-ble-protocol-v1.md), [STM-S3 transport](docs/protocol/stm32-s3-transport.md), [UART](docs/protocol/uart.md) |
 | IMU | [pipeline](docs/imu/imu-pipeline.md), [LSM303](docs/imu/lsm303.md), [BMI323](docs/imu/bmi323.md), [calibration](docs/imu/calibration.md), [attitude](docs/imu/attitude.md), [filter](docs/imu/filter.md) |
 | Radar/motion | [radar](docs/radar/radar.md), [motor](docs/motor/motor.md), [encoder](docs/motor/encoder.md) |
+| Motor board | [four-way motor-board guide](docs/motor/FOUR_WAY_MOTOR_BOARD_SMARTCAR_GUIDE.md) |
 | App/tools | [macOS App](docs/app/mac-control-app.md), [logger](docs/debug/logger.md) |
 | ROS2 | [ROS2](docs/ros2/ros2.md) |
 | Mapping | [code map](docs/code_map.md) |

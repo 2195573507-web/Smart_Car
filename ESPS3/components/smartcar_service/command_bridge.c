@@ -2,6 +2,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -19,6 +20,7 @@
 #include "s3_ble.h"
 #include "scbp_link.h"
 #include "scbp_parser.h"
+#include "scbp_wire.h"
 #include "stm_uart.h"
 
 #define SMARTCAR_SERVICE_TASK_NAME "smartcar_svc"
@@ -60,6 +62,7 @@ static uint32_t s_dual_schema_reject;
 static uint32_t s_dual_crc_reject;
 static uint32_t s_dual_notify_drop;
 static uint32_t s_dual_ble_not_ready;
+static volatile bool s_ble_disconnect_stop_pending;
 
 static uint8_t s_ble_rx_queue_buffer[
     SMARTCAR_SERVICE_BLE_RX_QUEUE_DEPTH * sizeof(smartcar_ble_rx_item_t)]
@@ -67,6 +70,7 @@ static uint8_t s_ble_rx_queue_buffer[
 static uint8_t s_uart_rx_buffer[256U];
 static smartcar_ble_rx_item_t s_ble_rx_item;
 static uint8_t s_app_tx_frame[SC_APP_FRAME_MAX_SIZE];
+static const uint8_t s_pid_params_app_type = SC_APP_TYPE_PID_PARAMS_CMD;
 
 static uint64_t now_us(void)
 {
@@ -170,7 +174,22 @@ static void relay_telemetry(const scbp_can_frame_t *frame, uint16_t message_id)
         if (frame->length != SCBP_PAYLOAD_RADAR_STATUS_SIZE) {
             return;
         }
-        app_type = UINT8_C(0x15);
+        app_type = SC_APP_TYPE_RADAR_STATUS;
+        break;
+    case SCBP_MSG_ID_WHEEL_SPEED_STATUS:
+        if (frame->length != SCBP_PAYLOAD_WHEEL_SPEED_STATUS_SIZE ||
+            !scbp_wire_read_f32_array_le(frame->payload, frame->length,
+                                         (float[4]){0}, 4U)) {
+            return;
+        }
+        app_type = SC_APP_TYPE_WHEEL_SPEED_STATUS;
+        break;
+    case SCBP_MSG_ID_POWER_STATUS:
+        if (frame->length != SCBP_PAYLOAD_POWER_STATUS_SIZE ||
+            !isfinite(scbp_wire_read_f32_le(frame->payload))) {
+            return;
+        }
+        app_type = SC_APP_TYPE_POWER_STATUS;
         break;
     default:
         return;
@@ -218,6 +237,8 @@ static void command_bridge_on_frame(const scbp_can_frame_t *frame, void *context
     case SCBP_MSG_ID_IMU_CAL_STATUS:
     case SCBP_MSG_ID_IMU_TELEMETRY:
     case SCBP_MSG_ID_RADAR_STATUS:
+    case SCBP_MSG_ID_WHEEL_SPEED_STATUS:
+    case SCBP_MSG_ID_POWER_STATUS:
         relay_telemetry(frame, message_id);
         return;
     case SCBP_MSG_ID_LOG:
@@ -300,6 +321,40 @@ static void send_app_ack(uint8_t acknowledged_type, uint8_t result)
     (void)notify_app_frame(SC_APP_TYPE_ACK, payload, sizeof(payload));
 }
 
+static void wheel_command_tx_complete(scbp_link_tx_result_t result,
+                                       uint8_t status_code, void *context)
+{
+    const uint8_t app_type = context == NULL ? SC_APP_TYPE_WHEEL_SPEED_CMD :
+                                                *(const uint8_t *)context;
+    const uint8_t accepted = result == SCBP_LINK_TX_OK &&
+                             status_code == SCBP_FAST_RESP_OK;
+    send_app_ack(app_type, accepted ? SC_APP_ACK_OK : SC_APP_ACK_REJECTED);
+}
+
+static void command_bridge_on_ble_disconnect(void *context)
+{
+    (void)context;
+    /* The GATT callback only signals the service task; SCBP link state is
+     * serialized there so the stop frame cannot race another transmission. */
+    s_ble_disconnect_stop_pending = true;
+}
+
+static void command_bridge_send_zero_wheel_speed(void)
+{
+    uint8_t payload[SCBP_PAYLOAD_WHEEL_SPEED_CMD_SIZE];
+    const float speeds[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+
+    scbp_wire_write_f32_array_le(payload, speeds, 4U);
+    if (scbp_link_send(&s_link, SCBP_CAN_PRIORITY_REALTIME,
+                       SCBP_NODE_STM32H757, SCBP_MSG_ID_WHEEL_SPEED_CMD,
+                       SCBP_CAN_FLAG_ACK_REQUIRED, payload, sizeof(payload),
+                       (uint32_t)(now_us() / UINT64_C(1000)), NULL, NULL) != 0) {
+        ESP_LOGE(TAG, "BLE disconnect stop frame send failed");
+    } else {
+        ESP_LOGI(TAG, "BLE disconnect stop frame queued");
+    }
+}
+
 static void app_command_on_frame(const sc_app_frame_view_t *frame, void *context)
 {
     uint8_t result = SC_APP_ACK_REJECTED;
@@ -309,7 +364,41 @@ static void app_command_on_frame(const sc_app_frame_view_t *frame, void *context
         return;
     }
 #if !SMARTCAR_BMI323_DEBUG_ONLY
-    if (frame->type == SC_APP_TYPE_RADAR_SET_SPEED && frame->length == 1U &&
+    if (frame->type == SC_APP_TYPE_WHEEL_SPEED_CMD &&
+        frame->length == SCBP_PAYLOAD_WHEEL_SPEED_CMD_SIZE &&
+        frame->payload != NULL) {
+        float speeds[4];
+        if (scbp_wire_read_f32_array_le(frame->payload, frame->length,
+                                        speeds, 4U) &&
+            scbp_link_send(&s_link, SCBP_CAN_PRIORITY_REALTIME,
+                           SCBP_NODE_STM32H757, SCBP_MSG_ID_WHEEL_SPEED_CMD,
+                           SCBP_CAN_FLAG_ACK_REQUIRED, frame->payload,
+                           (uint8_t)frame->length,
+                           (uint32_t)(now_us() / UINT64_C(1000)),
+                           wheel_command_tx_complete, NULL) == 0) {
+            return;
+        }
+    } else if (frame->type == SC_APP_TYPE_PID_PARAMS_CMD &&
+               frame->length == SCBP_PAYLOAD_PID_PARAMS_SIZE &&
+               frame->payload != NULL) {
+        float params[4];
+        const bool valid = scbp_wire_read_f32_array_le(
+            frame->payload, frame->length, params, 4U) &&
+            params[0] >= SCBP_PID_KP_MIN && params[0] <= SCBP_PID_KP_MAX &&
+            params[1] >= SCBP_PID_KI_MIN && params[1] <= SCBP_PID_KI_MAX &&
+            params[2] >= SCBP_PID_KD_MIN && params[2] <= SCBP_PID_KD_MAX &&
+            params[3] >= SCBP_PID_ACCEL_MIN && params[3] <= SCBP_PID_ACCEL_MAX;
+        if (valid &&
+            scbp_link_send(&s_link, SCBP_CAN_PRIORITY_REALTIME,
+                           SCBP_NODE_STM32H757, SCBP_MSG_ID_PID_PARAMS_CMD,
+                           SCBP_CAN_FLAG_ACK_REQUIRED, frame->payload,
+                           (uint8_t)frame->length,
+                           (uint32_t)(now_us() / UINT64_C(1000)),
+                           wheel_command_tx_complete,
+                           (void *)&s_pid_params_app_type) == 0) {
+            return;
+        }
+    } else if (frame->type == SC_APP_TYPE_RADAR_SET_SPEED && frame->length == 1U &&
         frame->payload != NULL && frame->payload[0] <= RADAR_MAX_SPEED &&
         radar_control_set_speed(frame->payload[0])) {
         result = SC_APP_ACK_OK;
@@ -333,16 +422,13 @@ static void notify_radar_status(void)
     uint8_t payload[SCBP_PAYLOAD_RADAR_STATUS_SIZE];
 
 #if !SMARTCAR_BMI323_DEBUG_ONLY
-    if (!radar_control_is_running()) {
-        return;
-    }
-    payload[0] = 1U;
-    payload[1] = radar_control_get_speed();
+    payload[0] = radar_control_is_running() ? 1U : 0U;
+    payload[1] = payload[0] != 0U ? radar_control_get_speed() : 0U;
     (void)scbp_link_send(&s_link, SCBP_CAN_PRIORITY_NORMAL,
                           SCBP_NODE_STM32H757, SCBP_MSG_ID_RADAR_STATUS,
                           SCBP_CAN_FLAG_STREAM_DATA, payload, sizeof(payload),
                           (uint32_t)(now_us() / UINT64_C(1000)), NULL, NULL);
-    (void)notify_app_frame(UINT8_C(0x15), payload, sizeof(payload));
+    (void)notify_app_frame(SC_APP_TYPE_RADAR_STATUS, payload, sizeof(payload));
 #else
     (void)payload;
 #endif
@@ -355,6 +441,10 @@ static void smartcar_service_task(void *context)
 
     (void)context;
     for (;;) {
+        if (s_ble_disconnect_stop_pending) {
+            s_ble_disconnect_stop_pending = false;
+            command_bridge_send_zero_wheel_speed();
+        }
         for (uint8_t budget = 0U; budget < SMARTCAR_SERVICE_BLE_RX_BUDGET;
              ++budget) {
             if (s_ble_rx_queue == NULL ||
@@ -422,6 +512,7 @@ esp_err_t smartcar_service_init(void)
     s_dual_crc_reject = 0U;
     s_dual_notify_drop = 0U;
     s_dual_ble_not_ready = 0U;
+    s_ble_disconnect_stop_pending = false;
     s_stack_hwm_valid = false;
     s_bus_off_recovery_pending = false;
     s_ble_rx_queue = xQueueCreateStatic(SMARTCAR_SERVICE_BLE_RX_QUEUE_DEPTH,
@@ -440,6 +531,11 @@ esp_err_t smartcar_service_init(void)
     radar_calibration_manager_init();
     radar_calibration_manager_set_transport(command_bridge_send_radar_pwm_ready, NULL);
 #endif
+    if (s3_ble_set_disconnect_callback(command_bridge_on_ble_disconnect, NULL) != ESP_OK) {
+        s_ble_rx_queue = NULL;
+        s_link_ready = 0U;
+        return ESP_FAIL;
+    }
     if (xTaskCreate(smartcar_service_task, SMARTCAR_SERVICE_TASK_NAME,
                     SMARTCAR_SERVICE_TASK_STACK, NULL,
                     SMARTCAR_SERVICE_TASK_PRIORITY, &s_task) != pdPASS) {

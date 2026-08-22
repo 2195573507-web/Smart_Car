@@ -10,11 +10,11 @@ SCBP-CAN gateway, STM32H757 CM7 motor controller, and macOS four-wheel speed UI.
 - [x] Phase 1: Inspect current architecture, dirty worktree, protocol, and UI
 - [x] Phase 2: Agree on visual interaction and ownership design
 - [x] Phase 3: Write and review the design specification
-- [ ] Phase 4: Implement shared protocol and host tests
-- [ ] Phase 5: Implement CM7 runtime update ownership and SCBP dispatch
-- [ ] Phase 6: Implement S3 App-to-SCBP bridge
-- [ ] Phase 7: Implement App controls and four-lane chart
-- [ ] Phase 8: Run host, CM7, S3, and Swift verification
+- [x] Phase 4: Implement shared protocol and host tests
+- [x] Phase 5: Implement CM7 runtime update ownership and SCBP dispatch
+- [x] Phase 6: Implement S3 App-to-SCBP bridge
+- [x] Phase 7: Implement App controls and four-lane chart
+- [x] Phase 8: Run host, CM7, S3, and Swift verification
 
 ## Confirmed Decisions
 
@@ -33,3 +33,15 @@ SCBP-CAN gateway, STM32H757 CM7 motor controller, and macOS four-wheel speed UI.
 Host tests and clean builds are source/build evidence. UART delivery, BLE
 delivery, flashed runtime updates, motor response, and vehicle safety remain
 unverified until matching hardware captures are available.
+
+## Verification Evidence (2026-08-21)
+
+- `cc -std=c11 -Wall -Wextra -Werror -pedantic ... && /tmp/test_scbp_can`:
+  `SCBP-CAN host tests passed`
+- `cmake --build --preset Debug --clean-first -j2` from `STM32H757/CM7`:
+  CM7 ELF linked with 0 errors/warnings; FLASH 9.58%, RAM 34.18%.
+- `ninja -C ESPS3/build-s3-bridge -j2`: gateway image and bootloader size
+  checks passed; app image remains within its partition.
+- `swift build` from `IOS_APP/SmartCar_Control_MAC`: executable linked with
+  0 errors/warnings.
+- `git diff --check`: passed.

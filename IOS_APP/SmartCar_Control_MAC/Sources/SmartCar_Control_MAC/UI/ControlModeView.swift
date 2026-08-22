@@ -21,6 +21,8 @@ struct ControlModeView: View {
             .frame(maxWidth: 365)
 
             VStack(spacing: 20) {
+                WheelSpeedControlCard(viewModel: viewModel, store: telemetryStore.wheelSpeed)
+                PIDTuningCard(viewModel: viewModel, tuning: viewModel.pidTuning)
                 Text(AppStrings.text("label.drive_control", locale: locale)).font(.headline.monospaced()).frame(maxWidth: .infinity, alignment: .leading)
                 VirtualJoystick(viewModel: viewModel)
                     .disabled(viewModel.status != .connected)

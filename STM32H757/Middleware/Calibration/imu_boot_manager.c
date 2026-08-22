@@ -18,13 +18,16 @@
 #define DUAL_IMU_STATIC_SETTLE_MS UINT32_C(2000)
 #define DUAL_IMU_STATIC_PWM_WAIT_MS UINT32_C(30000)
 #define DUAL_IMU_STATIC_TIMEOUT_MARGIN_MS UINT32_C(5000)
+#define DUAL_IMU_STATIC_MAX_RESTARTS UINT32_C(3)
 #define DUAL_IMU_STATUS_PERIOD_MS UINT32_C(200)
 #define DUAL_IMU_BOOT_READY_PERIOD_MS UINT32_C(500)
 #define DUAL_IMU_PRIMARY_GRAVITY_MIN_MPS2 (9.4f)
 #define DUAL_IMU_PRIMARY_GRAVITY_MAX_MPS2 (10.2f)
 #define DUAL_IMU_STATIC_PHASE_TIMEOUT_MS \
     (DUAL_IMU_STATIC_PWM_WAIT_MS + DUAL_IMU_STATIC_SETTLE_MS + \
-     IMU_CAL_STATIC_WINDOW_MS + DUAL_IMU_STATIC_TIMEOUT_MARGIN_MS)
+     ((IMU_CAL_STATIC_WINDOW_MS + DUAL_IMU_STATIC_SETTLE_MS) * \
+      (DUAL_IMU_STATIC_MAX_RESTARTS + UINT32_C(1))) + \
+     DUAL_IMU_STATIC_TIMEOUT_MARGIN_MS)
 
 /* These are the frozen legacy 0x0202 presentation counters. They are not
  * used as calibration quality gates. */
@@ -42,6 +45,7 @@ typedef struct
     uint8_t static_zero_ready;
     uint8_t static_window_started;
     uint8_t static_result_ready;
+    uint8_t static_restart_count;
     uint32_t static_window_start_ms;
     uint32_t settle_until_ms;
     uint32_t phase_deadline_ms;
@@ -142,7 +146,8 @@ static void boot_log_static_quality(void)
     const imu_calibration_quality_t quality = imu_calibration_get_quality();
 
     (void)snprintf(line, sizeof(line),
-                   "IMU_CAL cfg=%u/%u act=%lu/%lu/%lu min=%lu/%lu q=%u/%u/%u",
+                   "IMU_CAL cfg=%u/%u act=%lu/%lu/%lu min=%lu/%lu/%lu "
+                   "q=%u/%u/%u",
                    (unsigned)quality.lsm_accel.configured_rate_hz,
                    (unsigned)quality.bmi_accel.configured_rate_hz,
                    (unsigned long)quality.lsm_accel.actual_sample_count,
@@ -150,6 +155,7 @@ static void boot_log_static_quality(void)
                    (unsigned long)quality.bmi_gyro.actual_sample_count,
                    (unsigned long)quality.lsm_accel.minimum_sample_count,
                    (unsigned long)quality.bmi_accel.minimum_sample_count,
+                   (unsigned long)quality.bmi_gyro.minimum_sample_count,
                    (unsigned)quality.lsm_accel.quality_ok,
                    (unsigned)quality.bmi_accel.quality_ok,
                    (unsigned)quality.bmi_gyro.quality_ok);
@@ -407,6 +413,7 @@ static void enter_static_phase_locked(uint32_t now_ms)
     s_boot.static_zero_ready = 0U;
     s_boot.static_window_started = 0U;
     s_boot.static_result_ready = 0U;
+    s_boot.static_restart_count = 0U;
     s_boot.phase_deadline_ms = now_ms + DUAL_IMU_STATIC_PHASE_TIMEOUT_MS;
     s_boot.next_boot_ready_ms = now_ms + DUAL_IMU_BOOT_READY_PERIOD_MS;
     update_compat_state_locked();
@@ -457,6 +464,8 @@ void imu_boot_manager_step(void)
     uint8_t finalize_init = 0U;
     uint8_t start_static = 0U;
     uint8_t finish_static = 0U;
+    uint8_t reset_static = 0U;
+    uint8_t static_reset_accepted = 0U;
     uint8_t send_boot_ready_now = 0U;
     uint8_t send_static_result = 0U;
     uint8_t send_status = 0U;
@@ -550,6 +559,9 @@ void imu_boot_manager_step(void)
                             : IMU_ERROR_STATIC_WINDOW,
                         now_ms);
         } else if (s_boot.static_window_started != 0U &&
+                   imu_calibration_static_motion_detected() != 0U) {
+            reset_static = 1U;
+        } else if (s_boot.static_window_started != 0U &&
                    imu_calibration_window_expired(now_us) != 0U) {
             finish_static = 1U;
         } else if (s_boot.static_zero_ready != 0U &&
@@ -578,13 +590,76 @@ void imu_boot_manager_step(void)
             now_us, (uint16_t)imu_manager_get_bmi323_sample_rate());
         boot_log("DUAL_IMU_BOOT STATIC_CALIBRATION window opened");
     }
+    if (reset_static != 0U) {
+        boot_log_static_quality();
+        boot_log_leveling();
+        imu_calibration_start();
+        lock_boot();
+        if (s_boot.dual.phase == IMU_PHASE_STATIC_CALIBRATION) {
+            if (s_boot.static_restart_count >= DUAL_IMU_STATIC_MAX_RESTARTS) {
+                fail_locked(IMU_ERROR_STATIC_WINDOW, now_ms);
+            } else {
+                ++s_boot.static_restart_count;
+                s_boot.static_zero_ready = 1U;
+                s_boot.static_window_started = 0U;
+                s_boot.static_result_ready = 0U;
+                s_boot.settle_until_ms = now_ms + DUAL_IMU_STATIC_SETTLE_MS;
+                s_boot.next_boot_ready_ms = now_ms +
+                                            DUAL_IMU_BOOT_READY_PERIOD_MS;
+                update_compat_state_locked();
+                update_progress_locked(now_ms);
+                static_reset_accepted = 1U;
+            }
+        }
+        unlock_boot();
+        if (static_reset_accepted != 0U) {
+            boot_log("DUAL_IMU_BOOT static motion; calibration reset");
+        } else {
+            boot_log("DUAL_IMU_BOOT repeated static motion; calibration failed");
+        }
+    }
     if (finish_static != 0U) {
         uint8_t lsm_done =
             imu_calibration_finish_window(now_us) != 0U &&
             imu_calibration_is_lsm_complete() != 0U;
         uint8_t bmi_done = imu_calibration_is_bmi_complete();
+        const uint8_t static_motion =
+            imu_calibration_static_motion_detected();
 
-        if (lsm_done != 0U && bmi_done != 0U) {
+        if (static_motion != 0U) {
+            /* A dynamic sample invalidates the bias and leveling reference.
+             * Restart the local window while retaining the already-admitted
+             * zero-PWM radar synchronization; no motor task exists yet. */
+            boot_log_static_quality();
+            boot_log_leveling();
+            imu_calibration_start();
+            lock_boot();
+            if (s_boot.dual.phase == IMU_PHASE_STATIC_CALIBRATION) {
+                if (s_boot.static_restart_count >= DUAL_IMU_STATIC_MAX_RESTARTS) {
+                    fail_locked(IMU_ERROR_STATIC_WINDOW, now_ms);
+                } else {
+                    ++s_boot.static_restart_count;
+                    s_boot.static_zero_ready = 1U;
+                    s_boot.static_window_started = 0U;
+                    s_boot.static_result_ready = 0U;
+                    s_boot.settle_until_ms = now_ms + DUAL_IMU_STATIC_SETTLE_MS;
+                    s_boot.next_boot_ready_ms = now_ms +
+                                                DUAL_IMU_BOOT_READY_PERIOD_MS;
+                    update_compat_state_locked();
+                    update_progress_locked(now_ms);
+                    static_reset_accepted = 1U;
+                }
+            }
+            unlock_boot();
+            if (static_reset_accepted != 0U) {
+                boot_log("DUAL_IMU_BOOT static motion; calibration reset");
+            } else {
+                boot_log("DUAL_IMU_BOOT repeated static motion; calibration failed");
+            }
+            finish_static = 0U;
+        }
+
+        if (finish_static != 0U && lsm_done != 0U && bmi_done != 0U) {
             imu_manager_commit_leveling();
             if (leveling_states_are_ready() == 0U) {
                 lsm_done = 0U;
@@ -592,8 +667,10 @@ void imu_boot_manager_step(void)
                 boot_log("DUAL_IMU_BOOT leveling rejected");
             }
         }
-        boot_log_static_quality();
-        boot_log_leveling();
+        if (static_motion == 0U) {
+            boot_log_static_quality();
+            boot_log_leveling();
+        }
 
         lock_boot();
         if (s_boot.dual.phase == IMU_PHASE_STATIC_CALIBRATION &&

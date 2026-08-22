@@ -73,6 +73,8 @@ enum AppPresentationStrings {
         case "IMU_TELEMETRY": key = "protocol.imu_telemetry"
         case "DUAL_IMU_STATUS": return "DUAL_IMU_STATUS"
         case "RADAR_STATUS": key = "protocol.radar_status"
+        case "WHEEL_SPEED_STATUS": return "WHEEL_SPEED_STATUS"
+        case "POWER_STATUS": return "POWER_STATUS"
         default: return type
         }
         return AppStrings.text(key, locale: locale)
@@ -171,6 +173,10 @@ enum AppPresentationStrings {
                 AppPresentationStrings.availability(status.online, locale: locale),
                 Int(status.speedPercent)
             )
+        case .wheelSpeedStatus(let status):
+            summary = "WHEEL_SPEED_STATUS " + status.speeds.map { String(format: "%.1f", $0) }.joined(separator: ",")
+        case .powerStatus(let status):
+            summary = String(format: "POWER_STATUS %.2fV", status.voltage)
         }
         return "\(timestamp)  \(summary)"
     }

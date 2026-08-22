@@ -8,6 +8,7 @@
 #include "task.h"
 #include "rtos_health.h"
 #include "uart_link.h"
+#include "motor_board_transport_uart.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 /* USER CODE END Includes */
@@ -347,6 +348,11 @@ void DMA1_Stream0_IRQHandler(void)
 void USART2_IRQHandler(void)
 {
   uart_link_handle_usart_irq();
+}
+
+void USART6_IRQHandler(void)
+{
+  MB_Transport_IRQHandler();
 }
 
 void vApplicationStackOverflowHook(TaskHandle_t task, char *task_name)

@@ -182,6 +182,14 @@ struct RadarStatus: Equatable {
     let speedPercent: UInt8
 }
 
+struct WheelSpeedStatus: Equatable {
+    let speeds: [Float]
+}
+
+struct PowerStatus: Equatable {
+    let voltage: Float
+}
+
 enum StaticCalibrationPhase: Equatable {
     case waiting
     case sampling
@@ -388,6 +396,8 @@ enum DecodedMessage: Equatable {
     case imuTelemetry(IMUTelemetry)
     case dualIMUStatus(DualIMULifecycleStatus)
     case radarStatus(RadarStatus)
+    case wheelSpeedStatus(WheelSpeedStatus)
+    case powerStatus(PowerStatus)
 
     private static func mapExtendedStage(_ raw: UInt8) -> (IMUCalibrationState, IMUCalibrationSampleMode)? {
         switch raw {
@@ -727,12 +737,21 @@ enum DecodedMessage: Equatable {
                 phaseStartTimeMs: uint32(bytes, at: 8),
                 phaseEndTimeMs: uint32(bytes, at: 12)
             ))
+        case .wheelSpeedCommand:
+            throw DecodeError.invalidPayload("WHEEL_SPEED_CMD is app to S3 only")
+        case .pidParams:
+            throw DecodeError.invalidPayload("PID_PARAMS_CMD is app to S3 only")
+        case .wheelSpeedStatus:
+            guard bytes.count == 16 else {
+                throw DecodeError.invalidPayload("WHEEL_SPEED_STATUS requires four float values")
+            }
+            let speeds = (0..<4).map { float32(bytes, at: $0 * 4) }
+            guard speeds.allSatisfy({ $0.isFinite }) else {
+                throw DecodeError.invalidPayload("WHEEL_SPEED_STATUS contains non-finite value")
+            }
+            self = .wheelSpeedStatus(WheelSpeedStatus(speeds: speeds))
         case .radarPWMControl:
             throw DecodeError.invalidPayload("RADAR_PWM_CONTROL is app to S3 only")
-        case .pwmSet:
-            throw DecodeError.invalidPayload("PWM_SET is STM32 to S3 only")
-        case .pwmApplied:
-            throw DecodeError.invalidPayload("PWM_APPLIED is S3 to STM32 only")
         case .radarStatus:
             guard bytes.count == 2,
                   bytes[0] <= 1,
@@ -740,8 +759,15 @@ enum DecodedMessage: Equatable {
                 throw DecodeError.invalidPayload("RADAR_STATUS requires online and speed percent")
             }
             self = .radarStatus(RadarStatus(online: bytes[0] == 1, speedPercent: bytes[1]))
-        case .pwmError:
-            throw DecodeError.invalidPayload("PWM_ERROR is S3 to STM32 only")
+        case .powerStatus:
+            guard bytes.count == 4 else {
+                throw DecodeError.invalidPayload("POWER_STATUS requires one float value")
+            }
+            let voltage = float32(bytes, at: 0)
+            guard voltage.isFinite else {
+                throw DecodeError.invalidPayload("POWER_STATUS contains non-finite value")
+            }
+            self = .powerStatus(PowerStatus(voltage: voltage))
         }
     }
 
@@ -765,6 +791,8 @@ enum DecodedMessage: Equatable {
             }
         case .dualIMUStatus(let status): return "DUAL_IMU_STATUS phase=\(status.phase.displayName) lsm=\(status.lsmProgress)% bmi=\(status.bmiProgress)% overall=\(status.overallProgress)% error=\(status.errorCode)"
         case .radarStatus(let status): return "RADAR_STATUS \(status.online ? "ONLINE" : "OFFLINE") speed=\(status.speedPercent)%"
+        case .wheelSpeedStatus(let status): return "WHEEL_SPEED_STATUS " + status.speeds.map { String(format: "%.1f", $0) }.joined(separator: ",")
+        case .powerStatus(let status): return String(format: "POWER_STATUS %.2fV", status.voltage)
         }
     }
 }

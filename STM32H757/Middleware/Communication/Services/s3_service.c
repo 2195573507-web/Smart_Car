@@ -1,5 +1,7 @@
 #include "s3_service.h"
 
+#include <stdbool.h>
+#include <string.h>
 #include <stdio.h>
 
 #include "FreeRTOS.h"
@@ -8,8 +10,10 @@
 
 #include "imu_boot_manager.h"
 #include "log_service.h"
+#include "motor_board_task.h"
 #include "scbp_link.h"
 #include "scbp_parser.h"
+#include "scbp_wire.h"
 #include "uart_link.h"
 
 #define S3_SERVICE_STACK_WORDS UINT16_C(512)
@@ -18,6 +22,7 @@
 #define S3_SERVICE_BUS_OFF_RECOVERY_MS UINT32_C(100)
 #define S3_SERVICE_LINK_LOCK_MS UINT32_C(20)
 #define S3_SERVICE_STACK_MONITOR_PERIOD_MS UINT32_C(5000)
+#define S3_SERVICE_S3_FRAME_TIMEOUT_MS UINT32_C(3000)
 
 static scbp_parser_t s_parser;
 static scbp_link_t s_link;
@@ -32,6 +37,8 @@ static uint8_t s_link_stale_logged;
 static uint32_t s_parser_errors;
 static uint8_t s_step_bytes[128U];
 static char s_line[128U];
+static uint32_t s_last_s3_frame_ms;
+static uint8_t s_link_timeout_applied;
 
 static uint8_t s3_service_link_lock(void)
 {
@@ -56,6 +63,10 @@ static int s3_service_transport_send(const uint8_t *data, uint16_t length,
 static void s3_service_on_bus_off(void *context)
 {
     (void)context;
+    s_link_timeout_applied = 1U;
+    if (!motor_board_force_stop()) {
+        LOG_ERROR("SCBP_CAN BUS_OFF forced stop PWM queue drop\r\n");
+    }
     s_bus_off_recovery_pending = 1U;
     s_bus_off_recovery_at_ms = HAL_GetTick() + S3_SERVICE_BUS_OFF_RECOVERY_MS;
     uart_link_recover();
@@ -97,7 +108,9 @@ static void s3_service_on_frame(const scbp_can_frame_t *frame, void *context)
         (destination != SCBP_NODE_STM32H757 && destination != SCBP_NODE_BROADCAST)) {
         return;
     }
-
+    if (scbp_link_get_state(&s_link) == SCBP_LINK_BUS_OFF) {
+        return;
+    }
     if (message_id == SCBP_MSG_ID_RADAR_PWM_READY) {
         uint8_t admitted = 0U;
         if (frame->length == SCBP_PAYLOAD_RADAR_PWM_READY_SIZE &&
@@ -112,6 +125,46 @@ static void s3_service_on_frame(const scbp_can_frame_t *frame, void *context)
         return;
     }
 
+    if (message_id == SCBP_MSG_ID_PID_PARAMS_CMD) {
+        float params[4];
+        const bool valid = frame->length == SCBP_PAYLOAD_PID_PARAMS_SIZE &&
+                           frame->payload != NULL &&
+                           scbp_wire_read_f32_array_le(frame->payload,
+                                                       frame->length,
+                                                       params, 4U) &&
+                           motor_board_update_pid_params(params[0], params[1],
+                                                         params[2], params[3]);
+        if (valid) {
+            (void)snprintf(s_line, sizeof(s_line),
+                           "[PID_CONFIG] Updated: Kp=%.3f, Ki=%.3f, Kd=%.3f, Accel=%.1f\r\n",
+                           (double)params[0], (double)params[1],
+                           (double)params[2], (double)params[3]);
+            LOG_INFO(s_line);
+        }
+        if (ack_required != 0U) {
+            s3_service_send_response_locked(
+                frame, valid ? 0U : 1U,
+                valid ? SCBP_FAST_RESP_OK : SCBP_FAST_RESP_INVALID_PARAM);
+        }
+        return;
+    }
+
+    if (message_id == SCBP_MSG_ID_WHEEL_SPEED_CMD) {
+        float speeds[4];
+        const bool valid = frame->length == SCBP_PAYLOAD_WHEEL_SPEED_CMD_SIZE &&
+                           frame->payload != NULL &&
+                           scbp_wire_read_f32_array_le(frame->payload,
+                                                       frame->length,
+                                                       speeds, 4U) &&
+                           motor_board_set_target_wheel_speeds(speeds);
+        if (ack_required != 0U) {
+            s3_service_send_response_locked(
+                frame, valid ? 0U : 1U,
+                valid ? SCBP_FAST_RESP_OK : SCBP_FAST_RESP_INVALID_PARAM);
+        }
+        return;
+    }
+
     if (ack_required != 0U) {
         s3_service_send_response_locked(frame, 1U, SCBP_FAST_RESP_INVALID_PARAM);
     }
@@ -119,7 +172,17 @@ static void s3_service_on_frame(const scbp_can_frame_t *frame, void *context)
 
 static void s3_service_on_parsed_frame(const scbp_can_frame_t *frame, void *context)
 {
+    const uint8_t source = frame == NULL ? 0U : SCBP_CAN_ID_SOURCE(frame->can_id);
+    const uint8_t destination = frame == NULL ? 0U : SCBP_CAN_ID_DESTINATION(frame->can_id);
+
     (void)context;
+    if (frame != NULL && source == SCBP_NODE_ESP32_S3 &&
+        (destination == SCBP_NODE_STM32H757 || destination == SCBP_NODE_BROADCAST)) {
+        if (scbp_link_get_state(&s_link) != SCBP_LINK_BUS_OFF) {
+            s_last_s3_frame_ms = HAL_GetTick();
+            s_link_timeout_applied = 0U;
+        }
+    }
     scbp_link_receive(&s_link, frame);
 }
 
@@ -192,6 +255,8 @@ void s3_service_init(void)
     s_bus_off_recovery_pending = 0U;
     s_bus_off_recovery_at_ms = 0U;
     s_last_rx_time = 0U;
+    s_last_s3_frame_ms = HAL_GetTick();
+    s_link_timeout_applied = 0U;
     s_link_stale_logged = 0U;
     s_parser_errors = 0U;
     s_s3_service_min_free_words = S3_SERVICE_STACK_WORDS;
@@ -255,6 +320,14 @@ void s3_service_step(void)
 
     if (s_initialized == 0U) {
         return;
+    }
+    if (s_link_timeout_applied == 0U &&
+        (uint32_t)(now_ms - s_last_s3_frame_ms) >=
+            S3_SERVICE_S3_FRAME_TIMEOUT_MS) {
+        if (motor_board_force_stop()) {
+            s_link_timeout_applied = 1U;
+            LOG_WARN("SCBP S3 link timeout; PID reset and PWM stopped\r\n");
+        }
     }
     if (s3_service_link_lock() != 0U) {
         if (length != 0U) {

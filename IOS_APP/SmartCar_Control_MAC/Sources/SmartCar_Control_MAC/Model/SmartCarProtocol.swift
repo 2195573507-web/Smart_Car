@@ -15,11 +15,12 @@ enum SmartCarProtocol {
         case attitude = 0x11
         case imuCalibrationStatus = 0x12
         case imuCalibrationBias = 0x13
-        case radarPWMControl = 0x14
-        case radarStatus = 0x15
-        case pwmSet = 0x16
-        case pwmApplied = 0x17
-        case pwmError = 0x19
+        case wheelSpeedCommand = 0x15
+        case wheelSpeedStatus = 0x16
+        case radarStatus = 0x1A
+        case radarPWMControl = 0x1B
+        case powerStatus = 0x1C
+        case pidParams = 0x1D
         case imuCalibrationResult = 0x25
         case imuTelemetry = 0x27
         case dualIMUStatus = 0x28
@@ -34,14 +35,15 @@ enum SmartCarProtocol {
             case .attitude: return "ATTITUDE"
             case .imuCalibrationStatus: return "IMU_CAL_STATUS"
             case .imuCalibrationBias: return "IMU_CAL_BIAS"
-            case .radarPWMControl: return "RADAR_PWM_CONTROL"
+            case .wheelSpeedCommand: return "WHEEL_SPEED_CMD"
+            case .wheelSpeedStatus: return "WHEEL_SPEED_STATUS"
             case .radarStatus: return "RADAR_STATUS"
-            case .pwmSet: return "PWM_SET"
-            case .pwmApplied: return "PWM_APPLIED"
-            case .pwmError: return "PWM_ERROR"
+            case .powerStatus: return "POWER_STATUS"
+            case .radarPWMControl: return "RADAR_PWM_SET"
             case .imuCalibrationResult: return "IMU_CAL_RESULT"
             case .imuTelemetry: return "IMU_TELEMETRY"
             case .dualIMUStatus: return "DUAL_IMU_STATUS"
+            case .pidParams: return "PID_PARAMS_CMD"
             }
         }
     }

@@ -7,13 +7,17 @@
 extern "C" {
 #endif
 
-#define IMU_CAL_STATIC_WINDOW_MS UINT32_C(30000)
+#define IMU_CAL_STATIC_WINDOW_MS UINT32_C(6000)
 /* Retained for callers that use the older calibration-window name. */
 #define IMU_CALIBRATION_WINDOW_MS IMU_CAL_STATIC_WINDOW_MS
 #define IMU_CALIBRATION_WINDOW_US \
     ((uint64_t)IMU_CAL_STATIC_WINDOW_MS * UINT64_C(1000))
 #define IMU_CALIBRATION_SAMPLE_RATE_HZ UINT32_C(100)
 #define IMU_CALIBRATION_SAMPLE_TOLERANCE_PERCENT UINT32_C(10)
+/* BMI323 runs at 200 Hz in the normal image. A six-second static window
+ * leaves rate/scheduling headroom while the gyro-bias accumulator itself is
+ * capped at exactly this many accepted samples. */
+#define IMU_CAL_GYRO_BIAS_SAMPLE_COUNT UINT32_C(1000)
 #define BMI_ACCEL_STD_MAX (0.10f)
 #define LSM_ACCEL_STD_MAX (0.50f)
 #define IMU_CALIBRATION_LSM303_NOMINAL_SAMPLES \
@@ -130,6 +134,9 @@ void imu_calibration_begin_window(uint64_t start_timestamp_us,
 uint8_t imu_calibration_bmi_capture_active(void);
 uint8_t imu_calibration_window_expired(uint64_t now_timestamp_us);
 uint8_t imu_calibration_finish_window(uint64_t now_timestamp_us);
+/* True when a dynamic sample was observed during the most recent static
+ * window. The flag is cleared by imu_calibration_start(). */
+uint8_t imu_calibration_static_motion_detected(void);
 void imu_calibration_update(const imu_raw_data_t *raw_data);
 void imu_calibration_update_bmi323(float accel_x, float accel_y, float accel_z,
                                    float gyro_x, float gyro_y, float gyro_z,

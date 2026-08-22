@@ -39,6 +39,13 @@ struct RadarStateSnapshot: Equatable {
     }
 }
 
+struct WheelSpeedStateSnapshot: Equatable {
+    var actual = Array(repeating: Float(0), count: 4)
+    var history = Array(repeating: [Float](), count: 4)
+    var voltage: Float?
+    var lastUpdatedAt: Date?
+}
+
 struct CalibrationStateSnapshot: Equatable {
     var status = IMUCalibrationStatus(state: .idle, sampleMode: .static,
                                       totalProgress: 0, currentPWM: 0,
@@ -306,6 +313,34 @@ final class RadarState: ObservableObject {
 
 }
 
+@MainActor
+final class WheelSpeedState: ObservableObject {
+    @Published private(set) var snapshot = WheelSpeedStateSnapshot()
+
+    func ingest(_ status: WheelSpeedStatus, at date: Date) {
+        guard status.speeds.count == 4 else { return }
+        var next = snapshot
+        next.actual = status.speeds
+        for index in 0..<4 {
+            next.history[index].append(status.speeds[index])
+            if next.history[index].count > 48 { next.history[index].removeFirst() }
+        }
+        next.lastUpdatedAt = date
+        if next != snapshot { snapshot = next }
+    }
+
+    func ingest(_ status: PowerStatus, at date: Date) {
+        var next = snapshot
+        next.voltage = status.voltage
+        next.lastUpdatedAt = date
+        if next != snapshot { snapshot = next }
+    }
+
+    func setConnection(_ connection: BLEConnectionStatus) {
+        if connection != .connected { snapshot = WheelSpeedStateSnapshot() }
+    }
+}
+
 struct StaticCalibrationStateSnapshot: Equatable {
     var result = StaticCalibrationResult()
     var lastUpdatedAt: Date?
@@ -571,6 +606,7 @@ final class TelemetryStore {
     let dualAttitude = DualAttitudeState()
     let imu = IMUState()
     let radar = RadarState()
+    let wheelSpeed = WheelSpeedState()
     let staticCalibration = StaticCalibrationState()
     let calibration = CalibrationState()
     let dualIMU = DualIMUState()
@@ -595,6 +631,10 @@ final class TelemetryStore {
             self.attitude.ingest(dual.primary.attitudeData, at: date)
         case .radarStatus(let status):
             radar.ingest(status, at: date)
+        case .wheelSpeedStatus(let status):
+            wheelSpeed.ingest(status, at: date)
+        case .powerStatus(let status):
+            wheelSpeed.ingest(status, at: date)
         default:
             break
         }
@@ -606,6 +646,7 @@ final class TelemetryStore {
         imu.setConnection(connection)
         status.setConnection(connection)
         radar.setConnection(connection)
+        wheelSpeed.setConnection(connection)
         staticCalibration.setConnection(connection)
         calibration.setConnection(connection)
         dualIMU.setConnection(connection)

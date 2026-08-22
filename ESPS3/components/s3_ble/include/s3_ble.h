@@ -36,6 +36,12 @@ typedef void (*s3_ble_ready_callback_t)(void *context);
 esp_err_t s3_ble_set_ready_callback(s3_ble_ready_callback_t callback,
                                     void *context);
 
+typedef void (*s3_ble_disconnect_callback_t)(void *context);
+
+/** Register a callback invoked from the GATT disconnect event. */
+esp_err_t s3_ble_set_disconnect_callback(s3_ble_disconnect_callback_t callback,
+                                         void *context);
+
 /* Compatibility wrapper; new callers must use s3_ble_notify_send(). */
 esp_err_t s3_ble_send(const uint8_t *data, uint16_t len);
 

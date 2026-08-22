@@ -18,13 +18,18 @@ telemetry. It never relays raw SCBP-CAN bytes to BLE.
 | --- | ---: | --- |
 | `ATTITUDE(0x201)` | `0x11` | 80-byte schema-2 DualAHRS, byte-preserving |
 | `IMU_CAL_STATUS(0x202)` | `0x12` | 11 bytes |
-| `RADAR_STATUS(0x301)` | `0x15` | 2 bytes |
+| `WHEEL_SPEED_STATUS(0x210)` | `0x16` | 16 bytes, four float32 LE mm/s values |
+| `RADAR_STATUS(0x301)` | `0x1A` | 2 bytes |
+| `POWER_STATUS(0x209)` | `0x1C` | 4 bytes, float32 LE volts |
 | `IMU_TELEMETRY(0x207)` | `0x27` | 30 bytes |
 | App command response | `0x06` | `acknowledged_type_u8, result_u8` |
 
-S3 also emits radar status from its radar-control owner on the same 2-byte
-App type `0x15` payload. Text logs remain on the separate FFE3 notification
-path in the existing SmartCar log envelope.
+App commands use `0x15=WHEEL_SPEED_CMD` with a 16-byte payload and
+`0x1B=RADAR_PWM_SET` with one speed-percent byte. PID tuning uses
+`0x1D=PID_PARAMS_CMD` with four float32 little-endian values in the order
+`kp, ki, kd, max_accel`; the S3 returns App ACK `0x06` only after STM ACK.
+Text logs remain on the separate FFE3 notification path in the existing
+SmartCar log envelope.
 
 ## Compatibility Boundary
 

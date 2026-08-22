@@ -13,6 +13,8 @@
 #define IMU_CALIBRATION_GRAVITY_MPS2 (9.80665f)
 #define IMU_CALIBRATION_BMI323_LSB_PER_G (8192.0f)
 #define IMU_CALIBRATION_RAW_ACCEL_THRESHOLD_MPS2 (100.0f)
+#define IMU_CALIBRATION_GYRO_MOTION_THRESHOLD_RADPS (0.15f)
+#define IMU_CALIBRATION_ACCEL_MOTION_DELTA_MPS2 (1.0f)
 
 #if defined(IMU_MANAGER_USE_FREERTOS)
 #include "FreeRTOS.h"
@@ -45,6 +47,7 @@ typedef struct
     uint8_t lsm_observed;
     uint8_t bmi_accel_observed;
     uint8_t bmi_gyro_observed;
+    uint8_t static_motion_detected;
     imu_calibration_quality_t quality;
     imu_calibration_static_statistics_t static_statistics;
 } imu_calibration_state_t;
@@ -182,6 +185,28 @@ static uint32_t minimum_sample_count(uint32_t expected)
     return (uint32_t)((numerator + UINT64_C(99)) / UINT64_C(100));
 }
 
+static uint16_t actual_rate_hz(uint32_t sample_count, uint64_t duration_us);
+
+static void set_gyro_bias_quality(void)
+{
+    const uint16_t rate_hz = s_calibration.bmi_configured_rate_hz;
+    const uint64_t duration_us = rate_hz == 0U
+                                     ? 0U
+                                     : ((uint64_t)IMU_CAL_GYRO_BIAS_SAMPLE_COUNT *
+                                        UINT64_C(1000000)) /
+                                           rate_hz;
+    const uint32_t actual = s_calibration.bmi_gyro.sample_count;
+
+    s_calibration.quality.bmi_gyro = (imu_sample_quality_t){
+        .configured_rate_hz = rate_hz,
+        .actual_rate_hz = actual_rate_hz(actual, duration_us),
+        .expected_sample_count = IMU_CAL_GYRO_BIAS_SAMPLE_COUNT,
+        .minimum_sample_count = IMU_CAL_GYRO_BIAS_SAMPLE_COUNT,
+        .actual_sample_count = actual,
+        .quality_ok = actual == IMU_CAL_GYRO_BIAS_SAMPLE_COUNT ? 1U : 0U,
+    };
+}
+
 static uint16_t actual_rate_hz(uint32_t sample_count, uint64_t duration_us)
 {
     const uint64_t rate = duration_us == 0U
@@ -223,9 +248,7 @@ static void store_quality(void)
     set_quality(&s_calibration.quality.bmi_accel,
                 s_calibration.bmi_configured_rate_hz,
                 s_calibration.bmi_accel.sample_count);
-    set_quality(&s_calibration.quality.bmi_gyro,
-                s_calibration.bmi_configured_rate_hz,
-                s_calibration.bmi_gyro.sample_count);
+    set_gyro_bias_quality();
 }
 
 static uint8_t window_accepts_sample(uint64_t timestamp_us)
@@ -346,6 +369,15 @@ static void store_static_statistics(void)
                            &s_calibration.bmi_accel, bmi_ratio);
     s_calibration.static_statistics.bmi.gyro_rms_radps =
         gyro_rms(&s_calibration.bmi_gyro);
+
+    if (s_calibration.static_statistics.lsm.accel_std_mps2 >
+            LSM_ACCEL_STD_MAX ||
+        s_calibration.static_statistics.bmi.accel_std_mps2 >
+            BMI_ACCEL_STD_MAX ||
+        s_calibration.static_statistics.bmi.gyro_rms_radps >
+            IMU_CALIBRATION_GYRO_MOTION_THRESHOLD_RADPS) {
+        s_calibration.static_motion_detected = 1U;
+    }
 }
 
 void imu_calibration_init(void)
@@ -401,6 +433,16 @@ uint8_t imu_calibration_window_expired(uint64_t now_timestamp_us)
     return expired;
 }
 
+uint8_t imu_calibration_static_motion_detected(void)
+{
+    uint8_t detected;
+
+    lock_calibration();
+    detected = s_calibration.static_motion_detected;
+    unlock_calibration();
+    return detected;
+}
+
 uint8_t imu_calibration_finish_window(uint64_t now_timestamp_us)
 {
     uint8_t complete;
@@ -448,6 +490,17 @@ void imu_calibration_update(const imu_raw_data_t *raw_data)
                                           ? raw_data->lsm_timestamp_us
                                           : raw_data->timestamp_us;
 
+    if (s_calibration.window_active != 0U && lsm_accel_valid != 0U) {
+        const float accel_norm = sqrtf((lsm_ax * lsm_ax) +
+                                       (lsm_ay * lsm_ay) +
+                                       (lsm_az * lsm_az));
+        if (isfinite(accel_norm) &&
+            fabsf(accel_norm - IMU_CALIBRATION_GRAVITY_MPS2) >
+                IMU_CALIBRATION_ACCEL_MOTION_DELTA_MPS2) {
+            s_calibration.static_motion_detected = 1U;
+        }
+    }
+
     if (lsm_accel_valid != 0U &&
         window_accepts_sample(lsm_timestamp_us) != 0U) {
         if (accumulate_xyz(&s_calibration.lsm_accel, lsm_ax, lsm_ay, lsm_az) !=
@@ -471,13 +524,29 @@ void imu_calibration_update_bmi323(float accel_x, float accel_y, float accel_z,
         return;
     }
     bmi323_accel_input_to_mps2(accel_mps2);
+    if (s_calibration.window_active != 0U) {
+        const float accel_norm = sqrtf((accel_mps2[0] * accel_mps2[0]) +
+                                       (accel_mps2[1] * accel_mps2[1]) +
+                                       (accel_mps2[2] * accel_mps2[2]));
+        const float gyro_norm = sqrtf((gyro_x * gyro_x) + (gyro_y * gyro_y) +
+                                      (gyro_z * gyro_z));
+        if ((isfinite(accel_norm) &&
+             fabsf(accel_norm - IMU_CALIBRATION_GRAVITY_MPS2) >
+                 IMU_CALIBRATION_ACCEL_MOTION_DELTA_MPS2) ||
+            (isfinite(gyro_norm) &&
+             gyro_norm > IMU_CALIBRATION_GYRO_MOTION_THRESHOLD_RADPS)) {
+            s_calibration.static_motion_detected = 1U;
+        }
+    }
     if (window_accepts_sample(timestamp_us) != 0U) {
         if (accumulate_xyz(&s_calibration.bmi_accel,
                            accel_mps2[0], accel_mps2[1],
                            accel_mps2[2]) != 0U) {
             s_calibration.bmi_accel_observed = 1U;
         }
-        if (accumulate_xyz(&s_calibration.bmi_gyro,
+        if (s_calibration.bmi_gyro.sample_count <
+                IMU_CAL_GYRO_BIAS_SAMPLE_COUNT &&
+            accumulate_xyz(&s_calibration.bmi_gyro,
                            gyro_x, gyro_y, gyro_z) != 0U) {
             s_calibration.bmi_gyro_observed = 1U;
         }

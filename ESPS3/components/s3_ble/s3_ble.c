@@ -81,6 +81,8 @@ static void *s_rx_callback_context;
 static portMUX_TYPE s_rx_callback_lock = portMUX_INITIALIZER_UNLOCKED;
 static s3_ble_ready_callback_t s_ready_callback;
 static void *s_ready_callback_context;
+static s3_ble_disconnect_callback_t s_disconnect_callback;
+static void *s_disconnect_callback_context;
 
 /* Keep boot and early bring-up events until the FFE3 subscriber is ready. */
 #define S3_LOG_PENDING_CAPACITY 48U
@@ -354,6 +356,9 @@ static void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_
         s_ble_state.notify_enabled = false;
         s_ble_state.log_notify_enabled = false;
         update_ready_state();
+        if (s_disconnect_callback != NULL) {
+            s_disconnect_callback(s_disconnect_callback_context);
+        }
         s_adv_start_requested = false;
         ESP_LOGI(TAG, "[S3_BLE] CLIENT DISCONNECTED");
         ESP_LOGI(TAG, "reason=0x%02x", (unsigned)param->disconnect.reason);
@@ -582,6 +587,14 @@ esp_err_t s3_ble_set_ready_callback(s3_ble_ready_callback_t callback,
     if (s_ble_state.ready && s_ready_callback != NULL) {
         s_ready_callback(s_ready_callback_context);
     }
+    return ESP_OK;
+}
+
+esp_err_t s3_ble_set_disconnect_callback(s3_ble_disconnect_callback_t callback,
+                                         void *context)
+{
+    s_disconnect_callback = callback;
+    s_disconnect_callback_context = context;
     return ESP_OK;
 }
 

@@ -1,5 +1,6 @@
 import Combine
 import Foundation
+import AppKit
 
 enum DeveloperPage: Equatable {
     case overview
@@ -14,6 +15,7 @@ final class SmartCarViewModel: ObservableObject {
     let bleManager: BLEManager
     let telemetryStore: TelemetryStore
     let calibrationViewModel: CalibrationViewModel
+    let pidTuning = PIDTuningState()
 
     @Published var mode: AppMode = .control
     @Published var developerPage: DeveloperPage = .overview
@@ -24,6 +26,7 @@ final class SmartCarViewModel: ObservableObject {
     }
     @Published var speed: Double = 50
     @Published var radarSpeed: Double = 0
+    @Published var wheelTargets: [Float] = Array(repeating: 0, count: 4)
     @Published private(set) var status: BLEConnectionStatus
     @Published private(set) var discoveredDeviceName: String
     @Published private(set) var lastError: BLEUserFacingError?
@@ -37,6 +40,9 @@ final class SmartCarViewModel: ObservableObject {
     private var pendingLastPacketType = "--"
     private var debugTimer: Timer?
     private var statusCancellable: AnyCancellable?
+    private var wheelCommandTimer: Timer?
+    private var wheelHeartbeatTimer: Timer?
+    private var lifecycleObservers: [NSObjectProtocol] = []
 
     var decodedMessages: [DecodedMessageRecord] { bleManager.decodedMessages }
     var stmLogStore: DeviceLogStore { bleManager.stmLogStore }
@@ -62,7 +68,13 @@ final class SmartCarViewModel: ObservableObject {
             }
 
         manager.onStatusChange = { [weak self] status in
-            self?.status = status
+            guard let self else { return }
+            self.status = status
+            if status != .connected {
+                self.stopWheelHeartbeat()
+                self.wheelTargets = Array(repeating: 0, count: 4)
+                self.pidTuning.applyStatus = .unavailable
+            }
         }
         manager.onDeviceNameChange = { [weak self] name in
             self?.discoveredDeviceName = name
@@ -74,18 +86,96 @@ final class SmartCarViewModel: ObservableObject {
             guard let self else { return }
             self.pendingReceivedFrameCount += 1
             self.pendingLastPacketType = Self.packetType(for: record.message)
+            if case .ack(let payload) = record.message,
+               payload.count >= 2,
+               payload[0] == SmartCarProtocol.FrameType.pidParams.rawValue {
+                self.pidTuning.applyStatus = payload[1] == 0
+                    ? .applied : .rejected
+            }
         }
 
         debugTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in self?.flushDebugMetrics() }
         }
+        let center = NotificationCenter.default
+        lifecycleObservers = [
+            center.addObserver(forName: NSApplication.didResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor [weak self] in self?.sendZeroWheelSpeeds() }
+            },
+            center.addObserver(forName: NSApplication.didHideNotification, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor [weak self] in self?.sendZeroWheelSpeeds() }
+            },
+            center.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor [weak self] in self?.sendZeroWheelSpeeds() }
+            }
+        ]
     }
 
-    deinit { debugTimer?.invalidate() }
+    deinit {
+        debugTimer?.invalidate()
+        wheelCommandTimer?.invalidate()
+        wheelHeartbeatTimer?.invalidate()
+        for observer in lifecycleObservers { NotificationCenter.default.removeObserver(observer) }
+    }
 
     func scan() { bleManager.startScanning() }
     func connect() { bleManager.connectToDevice() }
-    func disconnect() { bleManager.disconnect() }
+    func disconnect() {
+        stopWheelHeartbeat()
+        wheelTargets = Array(repeating: 0, count: 4)
+        bleManager.disconnect()
+    }
+
+    func setWheelTarget(index: Int, value: Double) {
+        guard wheelTargets.indices.contains(index) else { return }
+        wheelTargets[index] = Float(max(-800, min(800, value)))
+        if wheelTargets.allSatisfy({ $0 == 0.0 }) {
+            sendZeroWheelSpeeds()
+        } else {
+            scheduleWheelCommand()
+        }
+    }
+
+    func setAllWheelTargets(_ value: Double) {
+        let clamped = Float(max(-800, min(800, value)))
+        wheelTargets = Array(repeating: clamped, count: 4)
+        if clamped == 0.0 {
+            sendZeroWheelSpeeds()
+        } else {
+            scheduleWheelCommand()
+        }
+    }
+
+    func emergencyWheelBrake() {
+        sendZeroWheelSpeeds()
+    }
+
+    func applyPIDParameters() {
+        guard status == .connected else {
+            pidTuning.applyStatus = .unavailable
+            return
+        }
+        guard let values = pidTuning.values else {
+            pidTuning.applyStatus = .invalid(
+                pidTuning.validationMessage ?? "Invalid PID values")
+            return
+        }
+        pidTuning.normalizeValidFields()
+        guard bleManager.sendPIDParameters(values) else {
+            pidTuning.applyStatus = .unavailable
+            return
+        }
+        transmittedFrameCount += 1
+        pidTuning.applyStatus = .sending
+    }
+
+    func sendZeroWheelSpeeds() {
+        stopWheelHeartbeat()
+        wheelTargets = Array(repeating: 0, count: 4)
+        guard status == .connected else { return }
+        transmittedFrameCount += 1
+        bleManager.sendWheelSpeeds(wheelTargets)
+    }
 
     func ping() {
         guard status == .connected else { return }
@@ -114,6 +204,58 @@ final class SmartCarViewModel: ObservableObject {
         radarSpeed = Double(percent)
         transmittedFrameCount += 1
         bleManager.sendRadarSpeed(percent)
+    }
+
+    private func scheduleWheelCommand() {
+        wheelCommandTimer?.invalidate()
+        let timer = Timer(timeInterval: 0.05, repeats: false) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, self.status == .connected,
+                      self.wheelTargets.contains(where: { $0 != 0.0 }) else {
+                    self?.stopWheelHeartbeat()
+                    return
+                }
+                self.sendCurrentWheelSpeeds()
+                self.startWheelHeartbeat()
+            }
+        }
+        wheelCommandTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    private func sendCurrentWheelSpeeds() {
+        guard status == .connected else {
+            stopWheelHeartbeat()
+            return
+        }
+        transmittedFrameCount += 1
+        bleManager.sendWheelSpeeds(wheelTargets)
+    }
+
+    private func startWheelHeartbeat() {
+        wheelHeartbeatTimer?.invalidate()
+        let timer = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, self.status == .connected else {
+                    self?.stopWheelHeartbeat()
+                    return
+                }
+                guard self.wheelTargets.contains(where: { $0 != 0.0 }) else {
+                    self.stopWheelHeartbeat()
+                    return
+                }
+                self.sendCurrentWheelSpeeds()
+            }
+        }
+        wheelHeartbeatTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    private func stopWheelHeartbeat() {
+        wheelCommandTimer?.invalidate()
+        wheelCommandTimer = nil
+        wheelHeartbeatTimer?.invalidate()
+        wheelHeartbeatTimer = nil
     }
 
     func refreshLogs() {
@@ -146,6 +288,8 @@ final class SmartCarViewModel: ObservableObject {
         case .imuTelemetry: return "IMU_TELEMETRY"
         case .dualIMUStatus: return "DUAL_IMU_STATUS"
         case .radarStatus: return "RADAR_STATUS"
+        case .wheelSpeedStatus: return "WHEEL_SPEED_STATUS"
+        case .powerStatus: return "POWER_STATUS"
         }
     }
 }

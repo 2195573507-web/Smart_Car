@@ -21,8 +21,11 @@ include("mx-generated.cmake")
 # Enable floating-point formatting in newlib-nano for DUAL_AHRS diagnostics.
 target_link_options(${PROJECT_NAME} PRIVATE -u _printf_float)
 
-# The normal application owns both IMU acquisition paths. Set this option ON
-# only for the bounded BMI323 diagnostic image.
+# The normal CM7 image owns the completed IMU/attitude lifecycle. Set this
+# option ON only for an isolated motor-board UART bring-up image.
+option(SMARTCAR_MOTOR_BOARD_ONLY
+       "Run the CM7 motor-board UART bring-up image without BMI/LSM tasks" OFF)
+
 option(SMARTCAR_BMI323_DEBUG_ONLY
        "Run the CM7 BMI323-only diagnostic configuration" OFF)
 
@@ -41,13 +44,19 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../Middleware/Attitude/Leveling/imu_leveling.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../Middleware/Attitude/DualAHRS/dual_ahrs.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../Middleware/Boot/boot_log.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../Application/Safety/attitude_startup_coordinator.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../Application/RTOS/imu_runtime.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../Middleware/Communication/UART_Link/uart_link.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../../Common/SCBP_CAN/scbp_crc.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../Common/SCBP_CAN/scbp_wire.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../../Common/SCBP_CAN/scbp_parser.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../../Common/SCBP_CAN/scbp_link.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../Middleware/Communication/Services/s3_service.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../Middleware/Communication/Services/log_service.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../Middleware/MotorBoard/motor_board_transport_uart.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../Middleware/MotorBoard/motor_board_protocol.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../Middleware/MotorBoard/motor_board_task.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/pid_controller.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../System/Task/rtos_health.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../Middleware/FreeRTOS/tasks.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../Middleware/FreeRTOS/list.c
@@ -69,6 +78,9 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../Middleware/Attitude/Leveling
     ${CMAKE_CURRENT_SOURCE_DIR}/../Middleware/Attitude/DualAHRS
     ${CMAKE_CURRENT_SOURCE_DIR}/../Middleware/Boot
+    ${CMAKE_CURRENT_SOURCE_DIR}/../Application/Safety
+    ${CMAKE_CURRENT_SOURCE_DIR}/../Middleware/MotorBoard
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Inc
     ${CMAKE_CURRENT_SOURCE_DIR}/../Application/RTOS
     ${CMAKE_CURRENT_SOURCE_DIR}/../System/Task
     ${CMAKE_CURRENT_SOURCE_DIR}/../Middleware/FreeRTOS/include
@@ -77,6 +89,7 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
 )
 target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
     IMU_MANAGER_USE_FREERTOS=1
+    SMARTCAR_MOTOR_BOARD_ONLY=$<BOOL:${SMARTCAR_MOTOR_BOARD_ONLY}>
     SMARTCAR_BMI323_DEBUG_ONLY=$<BOOL:${SMARTCAR_BMI323_DEBUG_ONLY}>
 )
 

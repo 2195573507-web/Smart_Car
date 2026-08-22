@@ -26,14 +26,18 @@
 #include "log_service.h"
 #include "rtos_health.h"
 #include "stm32h7xx_it.h"
+#include "motor_board_protocol.h"
+#include "motor_board_task.h"
+#include "motor_board_transport_uart.h"
+#include "attitude_startup_coordinator.h"
 
 #include <stdio.h>
 
 #include "FreeRTOS.h"
 #include "task.h"
 
-#ifndef SMARTCAR_BMI323_DEBUG_ONLY
-#define SMARTCAR_BMI323_DEBUG_ONLY 0
+#ifndef SMARTCAR_MOTOR_BOARD_ONLY
+#define SMARTCAR_MOTOR_BOARD_ONLY 0
 #endif
 
 /* Private includes ----------------------------------------------------------*/
@@ -67,6 +71,7 @@ TIM_HandleTypeDef htim2;
 TIM_HandleTypeDef htim3;
 
 UART_HandleTypeDef huart1;
+UART_HandleTypeDef huart6;
 
 /* USER CODE BEGIN PV */
 /* USER CODE END PV */
@@ -75,11 +80,13 @@ UART_HandleTypeDef huart1;
 void SystemClock_Config(void);
 static void MPU_Config(void);
 static void MX_GPIO_Init(void);
+#if !SMARTCAR_MOTOR_BOARD_ONLY
 static void MX_I2C4_Init(void);
-static void MX_USART1_UART_Init(void);
 static void MX_TIM1_Init(void);
-static void MX_TIM3_Init(void);
 static void MX_TIM2_Init(void);
+#endif
+static void MX_USART1_UART_Init(void);
+static void MX_USART6_UART_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -178,9 +185,27 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   boot_log("GPIO", "OK");
-  /* USART1 owns PA9/PA10 for the CH340 debug adapter; initialize it last. */
+  /* USART1 owns PA9/PA10 for the CH340 debug adapter. */
   MX_USART1_UART_Init();
+#if !SMARTCAR_MOTOR_BOARD_ONLY
+  MX_I2C4_Init();
+  MX_TIM1_Init();
+  MX_TIM2_Init();
+#else
+  boot_log("MODE", "MOTOR BOARD ONLY");
+#endif
+  /* USART6 is initialized after all timer/PWM setup so no later peripheral
+   * initialization can rewrite PC6/PC7. */
+  MX_USART6_UART_Init();
   uart_link_init();
+  MB_Transport_Init();
+  MB_Protocol_Init();
+  /* Establish the physical zero-PWM gate before any RTOS task can accept a
+   * command. The coordinator repeats this request until attitude is ready. */
+  if (!motor_board_force_stop()) {
+    LOG_ERROR("[ATTITUDE_STARTUP] initial motor forced stop queue drop");
+  }
+  boot_log("MOTOR", "LOCKED");
   /* USER CODE BEGIN 2 */
 
   if (bsp_uart_init(BSP_UART_USART1, 115200U) == BSP_STATUS_OK) {
@@ -192,20 +217,17 @@ int main(void)
   report_retained_fault();
   report_retained_rtos_health();
 
-#if !SMARTCAR_BMI323_DEBUG_ONLY
-  MX_I2C4_Init();
-  MX_TIM1_Init();
-  MX_TIM3_Init();
-  MX_TIM2_Init();
-#else
-  boot_log("MODE", "BMI323 DEBUG ONLY");
-#endif
+#if !SMARTCAR_MOTOR_BOARD_ONLY
   imu_runtime_start();
+#endif
   boot_log("RTOS", "READY");
   boot_log("SYSTEM", "READY");
   uart_link_task_start();
-#if !SMARTCAR_BMI323_DEBUG_ONLY
   s3_service_start();
+#if SMARTCAR_MOTOR_BOARD_ONLY
+  motor_board_task_start();
+#else
+  attitude_startup_coordinator_start();
 #endif
   vTaskStartScheduler();
 
@@ -281,6 +303,7 @@ void SystemClock_Config(void)
   }
 }
 
+#if !SMARTCAR_MOTOR_BOARD_ONLY
 /**
   * @brief I2C4 Initialization Function
   * @param None
@@ -429,67 +452,7 @@ static void MX_TIM2_Init(void)
 
 }
 
-/**
-  * @brief TIM3 Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_TIM3_Init(void)
-{
-
-  /* USER CODE BEGIN TIM3_Init 0 */
-
-  /* USER CODE END TIM3_Init 0 */
-
-  TIM_MasterConfigTypeDef sMasterConfig = {0};
-  TIM_OC_InitTypeDef sConfigOC = {0};
-
-  /* USER CODE BEGIN TIM3_Init 1 */
-
-  /* USER CODE END TIM3_Init 1 */
-  htim3.Instance = TIM3;
-  htim3.Init.Prescaler = 0;
-  htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim3.Init.Period = 65535;
-  htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
-  htim3.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
-  if (HAL_TIM_PWM_Init(&htim3) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
-  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
-  if (HAL_TIMEx_MasterConfigSynchronization(&htim3, &sMasterConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  sConfigOC.OCMode = TIM_OCMODE_PWM1;
-  sConfigOC.Pulse = 0;
-  sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
-  sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
-  if (HAL_TIM_PWM_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  if (HAL_TIM_PWM_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_2) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  if (HAL_TIM_PWM_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_3) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  if (HAL_TIM_PWM_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_4) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN TIM3_Init 2 */
-
-  /* USER CODE END TIM3_Init 2 */
-  HAL_TIM_MspPostInit(&htim3);
-
-}
-
+#endif
 /**
   * @brief USART1 Initialization Function
   * @param None
@@ -539,6 +502,41 @@ static void MX_USART1_UART_Init(void)
 }
 
 /**
+  * @brief USART6 Initialization Function
+  * @note PC6 is TX and PC7 is RX for the four-way motor board.
+  */
+static void MX_USART6_UART_Init(void)
+{
+  huart6.Instance = USART6;
+  huart6.Init.BaudRate = 115200;
+  huart6.Init.WordLength = UART_WORDLENGTH_8B;
+  huart6.Init.StopBits = UART_STOPBITS_1;
+  huart6.Init.Parity = UART_PARITY_NONE;
+  huart6.Init.Mode = UART_MODE_TX_RX;
+  huart6.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart6.Init.OverSampling = UART_OVERSAMPLING_16;
+  huart6.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
+  huart6.Init.ClockPrescaler = UART_PRESCALER_DIV1;
+  huart6.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
+  if (HAL_UART_Init(&huart6) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_SetTxFifoThreshold(&huart6, UART_TXFIFO_THRESHOLD_1_8) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_SetRxFifoThreshold(&huart6, UART_RXFIFO_THRESHOLD_1_8) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_DisableFifoMode(&huart6) != HAL_OK)
+  {
+    Error_Handler();
+  }
+}
+
+/**
   * @brief GPIO Initialization Function
   * @param None
   * @retval None
@@ -560,8 +558,10 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_WritePin(STM_TX_NO_UART_TX_AF_GPIO_Port, STM_TX_NO_UART_TX_AF_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOC, BMI323_CS_Pin, GPIO_PIN_SET);
   HAL_GPIO_WritePin(GPIOC, AT1_BIN2_Pin|AT1_AIN2_Pin, GPIO_PIN_RESET);
+#if !SMARTCAR_MOTOR_BOARD_ONLY
+  HAL_GPIO_WritePin(GPIOC, BMI323_CS_Pin, GPIO_PIN_SET);
+#endif
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOB, AT2_BIN2_Pin|AT2_AIN2_Pin, GPIO_PIN_RESET);
@@ -579,11 +579,17 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(STM_TX_NO_UART_TX_AF_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : LB_INT2_Pin LB_INT1_Pin BMI323_INT1_Pin */
-  GPIO_InitStruct.Pin = LB_INT2_Pin|LB_INT1_Pin|BMI323_INT1_Pin;
+  /*Configure GPIO pins : LB_INT2_Pin LB_INT1_Pin */
+  GPIO_InitStruct.Pin = LB_INT2_Pin|LB_INT1_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+#if !SMARTCAR_MOTOR_BOARD_ONLY
+  /*Configure GPIO pin : BMI323_INT1_Pin */
+  GPIO_InitStruct.Pin = BMI323_INT1_Pin;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+#endif
 
   /*Configure GPIO pin : LF_INT1_Pin */
   GPIO_InitStruct.Pin = LF_INT1_Pin;
@@ -591,11 +597,16 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(LF_INT1_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : AT1_BIN2_Pin BMI323_CS_Pin AT1_AIN2_Pin */
-  GPIO_InitStruct.Pin = AT1_BIN2_Pin|BMI323_CS_Pin|AT1_AIN2_Pin;
+  /*Configure GPIO pins : AT1_BIN2_Pin AT1_AIN2_Pin */
+  GPIO_InitStruct.Pin = AT1_BIN2_Pin|AT1_AIN2_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+
+#if !SMARTCAR_MOTOR_BOARD_ONLY
+  /*Configure GPIO pin : BMI323_CS_Pin */
+  GPIO_InitStruct.Pin = BMI323_CS_Pin;
   HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
   /*Configure GPIO pins : PA6 PA7 PA5 */
@@ -605,6 +616,7 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   GPIO_InitStruct.Alternate = GPIO_AF5_SPI1;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+#endif
 
   /*Configure GPIO pins : AT2_BIN2_Pin AT2_AIN2_Pin */
   GPIO_InitStruct.Pin = AT2_BIN2_Pin|AT2_AIN2_Pin;
