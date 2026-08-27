@@ -4,7 +4,7 @@
 
 - 状态：已获用户确认，待实施
 - 范围：`SmartCar_Control_MAC` 的 BLE Session 日志持久化、连接时 UI 日志清空和日志页状态入口
-- 不包含：BLE UUID、FFE3 数据格式、日志解析器、S3/STM32 固件、现有手动导出功能或车辆控制逻辑修改
+- 不包含：BLE UUID、FFE3 数据格式、日志解析器、S3/STM32 固件或车辆控制逻辑修改
 
 ## 目标与约束
 
@@ -98,7 +98,7 @@ BLEManager didDisconnectPeripheral
 - 正在录制时：`Recording: smartcar_log_YYYY-MM-dd_HH-mm-ss.md`
 - 未建立 Session 时：`Not recording`
 
-工具栏加入带 Finder 图标的无文字按钮，hover 提示为 `Open LOG Folder`，调用 `NSWorkspace.shared.open()` 打开 `/Users/zhiqin/Projects/Smart_Car/LOG/`。它不要求用户手动选择目录，也不取代原有的 TXT 导出按钮。
+工具栏加入带 Finder 图标的无文字按钮，hover 提示为 `Open LOG Folder`，调用 `NSWorkspace.shared.open()` 打开 `/Users/zhiqin/Projects/Smart_Car/LOG/`。自动 Markdown Session 记录取代原有的手动 `Export TXT` 按钮；现有 Copy All 操作保留。
 
 ## 生命周期与边界条件
 
