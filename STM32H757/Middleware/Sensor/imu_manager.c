@@ -570,85 +570,41 @@ static void imu_bmi323_init_log(void)
 static void imu_bmi323_debug_log(void)
 {
     char line[LOG_SERVICE_TEXT_MAX + 1U];
-    char raw_line[LOG_SERVICE_TEXT_MAX + 1U];
-    char state_line[LOG_SERVICE_TEXT_MAX + 1U];
-    char sample_line[LOG_SERVICE_TEXT_MAX + 1U];
     bmi323_diagnostics_t diagnostics;
     bmi323_diag_t diag;
-    bmi323_data_t sample;
     bmi323_capture_stat_t capture = {0};
     bmi323_diag_status_t reported_status;
-    uint8_t online;
+    static uint32_t last_overflow_count;
+    static uint32_t last_driver_read_fail_count;
+    static uint32_t last_capture_read_fail_count;
 
     imu_lock_bmi_driver();
     bmi323_get_diagnostics(&diagnostics);
     bmi323_get_diag(&diag);
-    online = bmi323_is_online();
     imu_unlock_bmi_driver();
-    imu_lock_bmi();
-    sample = bmi_data;
-    imu_unlock_bmi();
     (void)imu_manager_get_bmi323_capture_stats(&capture);
     reported_status = diagnostics.last_status;
     if (diag.valid == 0U && reported_status == BMI323_DIAG_STATUS_OK) {
         reported_status = BMI323_DIAG_STATUS_DATA_NOT_READY;
     }
     imu_bmi323_error_log(reported_status);
-    (void)snprintf(state_line, sizeof(state_line),
-                   "[BMI323][STATE]\r\nonline=%u\r\nraw_valid=%u\r\n"
-                   "init_result=%ld\r\n",
-                   (unsigned)online, (unsigned)diag.valid,
-                   (long)diagnostics.init_result);
-    imu_init_log(state_line);
-    (void)snprintf(line, sizeof(line),
-                   "[BMI323][DEBUG]\r\nread_ok=%lu\r\nread_fail=%lu\r\n"
-                   "last_status=%s\r\n",
-                   (unsigned long)diagnostics.read_ok,
-                   (unsigned long)diagnostics.read_fail,
-                   bmi323_diag_status_name(reported_status));
-    imu_init_log(line);
-    (void)snprintf(raw_line, sizeof(raw_line),
-                   "[BMI323][DEBUG]\r\nwhoami=0x%02X\r\n"
-                   "rx0=0x%02X\r\nrx1=0x%02X\r\n"
-                   "rx2=0x%02X\r\nrx3=0x%02X\r\n"
-                   "spi_status=0x%02X\r\n",
-                   (unsigned)diag.whoami,
-                   (unsigned)diag.rx0,
-                   (unsigned)diag.rx1,
-                   (unsigned)diag.rx2,
-                   (unsigned)diag.rx3,
-                   (unsigned)diag.spi_status);
-    imu_init_log(raw_line);
-    (void)snprintf(sample_line, sizeof(sample_line),
-                   "[BMI323][SAMPLE]\r\nvalid=%u sample=%lu timestamp_ms=%lu\r\n",
-                   (unsigned)sample.valid, (unsigned long)sample.sample_count,
-                   (unsigned long)sample.timestamp);
-    imu_init_log(sample_line);
-    (void)snprintf(sample_line, sizeof(sample_line),
-                   "[BMI323][CAPTURE]\r\nconfigured_rate=%u\r\n"
-                   "measured_rate=%u\r\nsample=%lu\r\noverflow=%lu\r\n",
-                   (unsigned)capture.configured_rate_hz,
-                   (unsigned)capture.measured_rate_hz,
-                   (unsigned long)capture.sample_count,
-                   (unsigned long)capture.overflow_count);
-    imu_init_log(sample_line);
-    (void)snprintf(sample_line, sizeof(sample_line),
-                   "[BMI323][CAPTURE]\r\npending=%u\r\nlatency_us=%lu\r\n"
-                   "read_fail=%lu\r\n",
-                   (unsigned)capture.pending_count,
-                   (unsigned long)capture.max_latency_us,
-                   (unsigned long)capture.read_fail_count);
-    imu_init_log(sample_line);
-    (void)snprintf(sample_line, sizeof(sample_line),
-                   "[BMI323][RAW]\r\naccel=%d,%d,%d\r\n",
-                   (int)diagnostics.accel_raw_x, (int)diagnostics.accel_raw_y,
-                   (int)diagnostics.accel_raw_z);
-    imu_init_log(sample_line);
-    (void)snprintf(sample_line, sizeof(sample_line),
-                   "[BMI323][RAW]\r\ngyro=%d,%d,%d\r\n",
-                   (int)diagnostics.gyro_raw_x, (int)diagnostics.gyro_raw_y,
-                   (int)diagnostics.gyro_raw_z);
-    imu_init_log(sample_line);
+    if (capture.overflow_count != last_overflow_count ||
+        diagnostics.read_fail != last_driver_read_fail_count ||
+        capture.read_fail_count != last_capture_read_fail_count) {
+        if (capture.overflow_count != 0U || diagnostics.read_fail != 0U ||
+            capture.read_fail_count != 0U) {
+            (void)snprintf(line, sizeof(line),
+                           "[BMI323][CAPTURE_WARN] overflow=%lu driver_read_fail=%lu "
+                           "capture_read_fail=%lu\r\n",
+                           (unsigned long)capture.overflow_count,
+                           (unsigned long)diagnostics.read_fail,
+                           (unsigned long)capture.read_fail_count);
+            LOG_WARN(line);
+        }
+        last_overflow_count = capture.overflow_count;
+        last_driver_read_fail_count = diagnostics.read_fail;
+        last_capture_read_fail_count = capture.read_fail_count;
+    }
 }
 
 static void imu_publish_filter_snapshot(const imu_raw_data_t *data)

@@ -1,0 +1,511 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		035DB217A3EE6391A5382A4D /* HealthView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B856D190640532B317A11B0C /* HealthView.swift */; };
+		261D4FFEE8F5A6D07C0EB52C /* SmartCarIOSApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2DEDCFA198468F47FC26BACF /* SmartCarIOSApp.swift */; };
+		2A8892FC6F803D82F4826085 /* DeviceLogStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1CD9697266018D444FB40A02 /* DeviceLogStore.swift */; };
+		2D70FD7980ACBDB6472F31BB /* ControlDashboardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02740D0BCFEC5725EF0727A0 /* ControlDashboardView.swift */; };
+		350566256FA4FFB02A6D5270 /* SmartCarLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2E9762BDD0FFF015C7F8641 /* SmartCarLog.swift */; };
+		388AD670464AEE5A6810AEE2 /* SwiftUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 4FF165ADF0A4D7DDB92CF6B1 /* SwiftUI.framework */; };
+		40C55B91456F4FFF769DF8F8 /* SmartCarViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = BEB67A68EEC5EF009E24F415 /* SmartCarViewModel.swift */; };
+		438C65EF5A9F0EA70A44FA80 /* AppMode.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5310ADE9C41BB71C63174C2B /* AppMode.swift */; };
+		598B7C53CC7903B8CE7C82A7 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 16E233FBCCCAD2B06F3360C9 /* Assets.xcassets */; };
+		5A91DFCCD5B266DAF339DA28 /* SmartCarProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 58E46FC49D29B6EB94BBF72D /* SmartCarProtocol.swift */; };
+		5D2C98F6BA9D86D416D4C5C4 /* LanguageManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3418B52F1D094C18EA0756C0 /* LanguageManager.swift */; };
+		65550DD21C832BC996B8EC5D /* WheelTuningView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6105D5D82F09EB67CC968DB7 /* WheelTuningView.swift */; };
+		710311E8599F961290EC7920 /* LogConsoleView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 67FE4D5A8F247C6586CB6602 /* LogConsoleView.swift */; };
+		776CF6AF36EBD7C4BBA0A22D /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7E3B948076FC2A27C14BD50 /* RootView.swift */; };
+		924D2B63C2D091A24157387E /* Haptics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5ED89B153434ED4704E7D41A /* Haptics.swift */; };
+		9E81BB23DC9F8807D3745E8C /* CoreBluetooth.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = E69D8B69730C085C9F297B83 /* CoreBluetooth.framework */; };
+		AF7552A885DCEC1020A852E8 /* TelemetryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3F2FA7FB726E8046C6818211 /* TelemetryView.swift */; };
+		BD0F05178E1CB18CD0548D97 /* LocalizedBLEError.swift in Sources */ = {isa = PBXBuildFile; fileRef = DBF1A13236A1A647BBF1ABAE /* LocalizedBLEError.swift */; };
+		C38ED761D06D608905DDDF1B /* BLEManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B008B95D472A1C9E46482C /* BLEManager.swift */; };
+		CB2804D241323A5AE3B04DF9 /* TelemetryStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 21F16C3666DAADE8FBF5D494 /* TelemetryStore.swift */; };
+		CEA4EC7A7B84E58B6E00CBB4 /* BLEPacket.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6F6D8EDFCE8A6713232401AE /* BLEPacket.swift */; };
+		D42FA1FD89423D34D3F3AF0E /* SceneKitPoseView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 632352D313E397C1879CF3B5 /* SceneKitPoseView.swift */; };
+		EB055A5728DE938DC1E27EA9 /* CommonComponents.swift in Sources */ = {isa = PBXBuildFile; fileRef = 869D0968CBDE86A880364101 /* CommonComponents.swift */; };
+		EC50B17BF2E10D0636D3B7F9 /* VehicleState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11F79C8810AF219B5D0B429F /* VehicleState.swift */; };
+		EDE3414C243C225C23E96356 /* SceneKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 22B2F2A792DE115840C411BA /* SceneKit.framework */; };
+		F927185F4CA92E1C9D2ADF60 /* CalibrationViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 75921EBD716A89101ED3D6EC /* CalibrationViewModel.swift */; };
+		FD2F4E7324F241D8C2CFD414 /* PIDTuning.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7BBA13CA33417E6C79D42D1 /* PIDTuning.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		02740D0BCFEC5725EF0727A0 /* ControlDashboardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ControlDashboardView.swift; sourceTree = "<group>"; };
+		11F79C8810AF219B5D0B429F /* VehicleState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VehicleState.swift; sourceTree = "<group>"; };
+		16E233FBCCCAD2B06F3360C9 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		1CD9697266018D444FB40A02 /* DeviceLogStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceLogStore.swift; sourceTree = "<group>"; };
+		21F16C3666DAADE8FBF5D494 /* TelemetryStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TelemetryStore.swift; sourceTree = "<group>"; };
+		22B2F2A792DE115840C411BA /* SceneKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SceneKit.framework; path = System/Library/Frameworks/SceneKit.framework; sourceTree = SDKROOT; };
+		2DEDCFA198468F47FC26BACF /* SmartCarIOSApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SmartCarIOSApp.swift; sourceTree = "<group>"; };
+		3418B52F1D094C18EA0756C0 /* LanguageManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LanguageManager.swift; sourceTree = "<group>"; };
+		3F2FA7FB726E8046C6818211 /* TelemetryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TelemetryView.swift; sourceTree = "<group>"; };
+		4FF165ADF0A4D7DDB92CF6B1 /* SwiftUI.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SwiftUI.framework; path = System/Library/Frameworks/SwiftUI.framework; sourceTree = SDKROOT; };
+		5310ADE9C41BB71C63174C2B /* AppMode.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppMode.swift; sourceTree = "<group>"; };
+		58E46FC49D29B6EB94BBF72D /* SmartCarProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SmartCarProtocol.swift; sourceTree = "<group>"; };
+		5ED89B153434ED4704E7D41A /* Haptics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Haptics.swift; sourceTree = "<group>"; };
+		6105D5D82F09EB67CC968DB7 /* WheelTuningView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WheelTuningView.swift; sourceTree = "<group>"; };
+		632352D313E397C1879CF3B5 /* SceneKitPoseView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SceneKitPoseView.swift; sourceTree = "<group>"; };
+		67FE4D5A8F247C6586CB6602 /* LogConsoleView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LogConsoleView.swift; sourceTree = "<group>"; };
+		6F6D8EDFCE8A6713232401AE /* BLEPacket.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BLEPacket.swift; sourceTree = "<group>"; };
+		75921EBD716A89101ED3D6EC /* CalibrationViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CalibrationViewModel.swift; sourceTree = "<group>"; };
+		869D0968CBDE86A880364101 /* CommonComponents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommonComponents.swift; sourceTree = "<group>"; };
+		9DE263A7F85EAE881A6ED6B9 /* SmartCarIOS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SmartCarIOS.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A1B008B95D472A1C9E46482C /* BLEManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BLEManager.swift; sourceTree = "<group>"; };
+		A7BBA13CA33417E6C79D42D1 /* PIDTuning.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PIDTuning.swift; sourceTree = "<group>"; };
+		B856D190640532B317A11B0C /* HealthView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthView.swift; sourceTree = "<group>"; };
+		BEB67A68EEC5EF009E24F415 /* SmartCarViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SmartCarViewModel.swift; sourceTree = "<group>"; };
+		C2E9762BDD0FFF015C7F8641 /* SmartCarLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SmartCarLog.swift; sourceTree = "<group>"; };
+		DBF1A13236A1A647BBF1ABAE /* LocalizedBLEError.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalizedBLEError.swift; sourceTree = "<group>"; };
+		E69D8B69730C085C9F297B83 /* CoreBluetooth.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreBluetooth.framework; path = System/Library/Frameworks/CoreBluetooth.framework; sourceTree = SDKROOT; };
+		E7E3B948076FC2A27C14BD50 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		7D87C19115BDAA2B1F60C837 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				EDE3414C243C225C23E96356 /* SceneKit.framework in Frameworks */,
+				9E81BB23DC9F8807D3745E8C /* CoreBluetooth.framework in Frameworks */,
+				388AD670464AEE5A6810AEE2 /* SwiftUI.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		1063E84AA9453DDBDB93D524 /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				16E233FBCCCAD2B06F3360C9 /* Assets.xcassets */,
+			);
+			path = Resources;
+			sourceTree = "<group>";
+		};
+		1832C242B1372132B69864A1 /* ViewModels */ = {
+			isa = PBXGroup;
+			children = (
+				75921EBD716A89101ED3D6EC /* CalibrationViewModel.swift */,
+				BEB67A68EEC5EF009E24F415 /* SmartCarViewModel.swift */,
+			);
+			path = ViewModels;
+			sourceTree = "<group>";
+		};
+		2232FB82CA0227FFAAEF3AFC /* BLE */ = {
+			isa = PBXGroup;
+			children = (
+				A1B008B95D472A1C9E46482C /* BLEManager.swift */,
+			);
+			path = BLE;
+			sourceTree = "<group>";
+		};
+		2AC220FDC18D1186FA028F90 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				9DE263A7F85EAE881A6ED6B9 /* SmartCarIOS.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		468F79C2294739D5CAF847E7 /* Model */ = {
+			isa = PBXGroup;
+			children = (
+				6F6D8EDFCE8A6713232401AE /* BLEPacket.swift */,
+				A7BBA13CA33417E6C79D42D1 /* PIDTuning.swift */,
+				C2E9762BDD0FFF015C7F8641 /* SmartCarLog.swift */,
+				58E46FC49D29B6EB94BBF72D /* SmartCarProtocol.swift */,
+				11F79C8810AF219B5D0B429F /* VehicleState.swift */,
+			);
+			path = Model;
+			sourceTree = "<group>";
+		};
+		4B583E7EC338304830546A46 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				E69D8B69730C085C9F297B83 /* CoreBluetooth.framework */,
+				22B2F2A792DE115840C411BA /* SceneKit.framework */,
+				4FF165ADF0A4D7DDB92CF6B1 /* SwiftUI.framework */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+		588505CF954F729969F91523 /* Sources */ = {
+			isa = PBXGroup;
+			children = (
+				85BE471C7ABFD49FD81A7204 /* SmartCarIOS */,
+			);
+			path = Sources;
+			sourceTree = "<group>";
+		};
+		6665A92F380F8BB0EE04D3FD /* Support */ = {
+			isa = PBXGroup;
+			children = (
+				3418B52F1D094C18EA0756C0 /* LanguageManager.swift */,
+				DBF1A13236A1A647BBF1ABAE /* LocalizedBLEError.swift */,
+			);
+			path = Support;
+			sourceTree = "<group>";
+		};
+		85BE471C7ABFD49FD81A7204 /* SmartCarIOS */ = {
+			isa = PBXGroup;
+			children = (
+				DF647A70E480311ED1231661 /* Core */,
+				F62FC0B178B5A6C80D772512 /* UI */,
+				2DEDCFA198468F47FC26BACF /* SmartCarIOSApp.swift */,
+			);
+			path = SmartCarIOS;
+			sourceTree = "<group>";
+		};
+		948FF31439E38805F5BF99ED /* Stores */ = {
+			isa = PBXGroup;
+			children = (
+				1CD9697266018D444FB40A02 /* DeviceLogStore.swift */,
+				21F16C3666DAADE8FBF5D494 /* TelemetryStore.swift */,
+			);
+			path = Stores;
+			sourceTree = "<group>";
+		};
+		B0EF7B712BAE81A86544C409 = {
+			isa = PBXGroup;
+			children = (
+				1063E84AA9453DDBDB93D524 /* Resources */,
+				588505CF954F729969F91523 /* Sources */,
+				4B583E7EC338304830546A46 /* Frameworks */,
+				2AC220FDC18D1186FA028F90 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		DF647A70E480311ED1231661 /* Core */ = {
+			isa = PBXGroup;
+			children = (
+				2232FB82CA0227FFAAEF3AFC /* BLE */,
+				468F79C2294739D5CAF847E7 /* Model */,
+				948FF31439E38805F5BF99ED /* Stores */,
+				6665A92F380F8BB0EE04D3FD /* Support */,
+				1832C242B1372132B69864A1 /* ViewModels */,
+			);
+			path = Core;
+			sourceTree = "<group>";
+		};
+		F62FC0B178B5A6C80D772512 /* UI */ = {
+			isa = PBXGroup;
+			children = (
+				5310ADE9C41BB71C63174C2B /* AppMode.swift */,
+				869D0968CBDE86A880364101 /* CommonComponents.swift */,
+				02740D0BCFEC5725EF0727A0 /* ControlDashboardView.swift */,
+				5ED89B153434ED4704E7D41A /* Haptics.swift */,
+				B856D190640532B317A11B0C /* HealthView.swift */,
+				67FE4D5A8F247C6586CB6602 /* LogConsoleView.swift */,
+				E7E3B948076FC2A27C14BD50 /* RootView.swift */,
+				632352D313E397C1879CF3B5 /* SceneKitPoseView.swift */,
+				3F2FA7FB726E8046C6818211 /* TelemetryView.swift */,
+				6105D5D82F09EB67CC968DB7 /* WheelTuningView.swift */,
+			);
+			path = UI;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		56D5315CD743D4863601D7C6 /* SmartCarIOS */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 20CD28E58E5998358865C039 /* Build configuration list for PBXNativeTarget "SmartCarIOS" */;
+			buildPhases = (
+				D94AE4450F134329DAA8C3C9 /* Sources */,
+				148C92A0A95D9A4ABCF9BDC9 /* Resources */,
+				7D87C19115BDAA2B1F60C837 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = SmartCarIOS;
+			packageProductDependencies = (
+				E7A6F9D3A0B941D4A6D7B2F1 /* SmartCarAppCore */,
+			);
+			productName = SmartCarIOS;
+			productReference = 9DE263A7F85EAE881A6ED6B9 /* SmartCarIOS.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		C26EA65C5C81ABC08B871B7C /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+			};
+			buildConfigurationList = 71949BA6638F8F7B120483A5 /* Build configuration list for PBXProject "SmartCarIOS" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = B0EF7B712BAE81A86544C409;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 2AC220FDC18D1186FA028F90 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			packageReferences = (
+				D4F2B7A1C98E4E0C9F6A13B8 /* XCLocalSwiftPackageReference \"../Shared/SmartCarAppCore\" */,
+			);
+			targets = (
+				56D5315CD743D4863601D7C6 /* SmartCarIOS */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		D4F2B7A1C98E4E0C9F6A13B8 /* XCLocalSwiftPackageReference \"../Shared/SmartCarAppCore\" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ../Shared/SmartCarAppCore;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		E7A6F9D3A0B941D4A6D7B2F1 /* SmartCarAppCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = D4F2B7A1C98E4E0C9F6A13B8 /* XCLocalSwiftPackageReference \"../Shared/SmartCarAppCore\" */;
+			productName = SmartCarAppCore;
+		};
+/* End XCSwiftPackageProductDependency section */
+
+/* Begin PBXResourcesBuildPhase section */
+		148C92A0A95D9A4ABCF9BDC9 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				598B7C53CC7903B8CE7C82A7 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		D94AE4450F134329DAA8C3C9 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				438C65EF5A9F0EA70A44FA80 /* AppMode.swift in Sources */,
+				C38ED761D06D608905DDDF1B /* BLEManager.swift in Sources */,
+				CEA4EC7A7B84E58B6E00CBB4 /* BLEPacket.swift in Sources */,
+				F927185F4CA92E1C9D2ADF60 /* CalibrationViewModel.swift in Sources */,
+				EB055A5728DE938DC1E27EA9 /* CommonComponents.swift in Sources */,
+				2D70FD7980ACBDB6472F31BB /* ControlDashboardView.swift in Sources */,
+				2A8892FC6F803D82F4826085 /* DeviceLogStore.swift in Sources */,
+				924D2B63C2D091A24157387E /* Haptics.swift in Sources */,
+				035DB217A3EE6391A5382A4D /* HealthView.swift in Sources */,
+				5D2C98F6BA9D86D416D4C5C4 /* LanguageManager.swift in Sources */,
+				BD0F05178E1CB18CD0548D97 /* LocalizedBLEError.swift in Sources */,
+				710311E8599F961290EC7920 /* LogConsoleView.swift in Sources */,
+				FD2F4E7324F241D8C2CFD414 /* PIDTuning.swift in Sources */,
+				776CF6AF36EBD7C4BBA0A22D /* RootView.swift in Sources */,
+				D42FA1FD89423D34D3F3AF0E /* SceneKitPoseView.swift in Sources */,
+				261D4FFEE8F5A6D07C0EB52C /* SmartCarIOSApp.swift in Sources */,
+				350566256FA4FFB02A6D5270 /* SmartCarLog.swift in Sources */,
+				5A91DFCCD5B266DAF339DA28 /* SmartCarProtocol.swift in Sources */,
+				40C55B91456F4FFF769DF8F8 /* SmartCarViewModel.swift in Sources */,
+				CB2804D241323A5AE3B04DF9 /* TelemetryStore.swift in Sources */,
+				AF7552A885DCEC1020A852E8 /* TelemetryView.swift in Sources */,
+				EC50B17BF2E10D0636D3B7F9 /* VehicleState.swift in Sources */,
+				65550DD21C832BC996B8EC5D /* WheelTuningView.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		164ECC50FADF4E4941970E74 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				DEVELOPMENT_TEAM = HK5ZYZ63Y8;
+				INFOPLIST_FILE = Resources/Info.plist;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.smartcar.iosapp;
+				SDKROOT = iphoneos;
+				SUPPORTS_MACCATALYST = NO;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		2FA1D934DEF51FE85CAC17CA /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		39212A318AA133E4692B889A /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				DEVELOPMENT_TEAM = HK5ZYZ63Y8;
+				INFOPLIST_FILE = Resources/Info.plist;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.smartcar.iosapp;
+				SDKROOT = iphoneos;
+				SUPPORTS_MACCATALYST = NO;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		E9862DF46CA4191F23FF6608 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		20CD28E58E5998358865C039 /* Build configuration list for PBXNativeTarget "SmartCarIOS" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				164ECC50FADF4E4941970E74 /* Debug */,
+				39212A318AA133E4692B889A /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		71949BA6638F8F7B120483A5 /* Build configuration list for PBXProject "SmartCarIOS" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				E9862DF46CA4191F23FF6608 /* Debug */,
+				2FA1D934DEF51FE85CAC17CA /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = C26EA65C5C81ABC08B871B7C /* Project object */;
+}

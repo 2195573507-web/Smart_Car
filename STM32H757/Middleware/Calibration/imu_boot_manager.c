@@ -6,7 +6,7 @@
 #include "imu_manager.h"
 #include "imu_time.h"
 #include "log_service.h"
-#include "scbp_protocol_defs.h"
+#include "srp_registry.h"
 
 #if defined(IMU_MANAGER_USE_FREERTOS)
 #include "FreeRTOS.h"
@@ -32,7 +32,7 @@
 /* These are the frozen legacy 0x0202 presentation counters. They are not
  * used as calibration quality gates. */
 #define IMU_COMPAT_STATIC_SAMPLE_TOTAL UINT32_C(1000)
-#define IMU_STAGE_READY SCBP_IMU_CAL_STAGE_COMPLETE
+#define IMU_STAGE_READY SRP_IMU_CAL_STAGE_COMPLETE
 
 typedef struct
 {
@@ -357,20 +357,20 @@ static uint8_t legacy_cal_stage_locked(void)
     switch (s_boot.dual.phase) {
     case IMU_PHASE_STATIC_CALIBRATION:
         if (s_boot.static_window_started != 0U) {
-            return SCBP_IMU_CAL_STAGE_STATIC_SAMPLE;
+            return SRP_IMU_CAL_STAGE_STATIC_SAMPLE;
         }
         return s_boot.static_zero_ready != 0U
-                   ? SCBP_IMU_CAL_STAGE_STATIC_STABLE_WAIT
-                   : SCBP_IMU_CAL_STAGE_WAIT_RADAR_READY;
+                   ? SRP_IMU_CAL_STAGE_STATIC_STABLE_WAIT
+                   : SRP_IMU_CAL_STAGE_WAIT_RADAR_READY;
     case IMU_PHASE_READY:
         return IMU_STAGE_READY;
     case IMU_PHASE_FAILED:
-        return SCBP_IMU_CAL_STAGE_ERROR;
+        return SRP_IMU_CAL_STAGE_ERROR;
     case IMU_PHASE_IDLE:
     case IMU_PHASE_INIT:
     case IMU_PHASE_SELF_TEST:
     default:
-        return SCBP_IMU_CAL_STAGE_WAIT_RADAR_READY;
+        return SRP_IMU_CAL_STAGE_WAIT_RADAR_READY;
     }
 }
 
@@ -389,21 +389,21 @@ static void send_cal_status(void)
     put_u32_le(&payload[2], status.sample_count);
     put_u32_le(&payload[6], status.sample_total);
     payload[10] = status.error;
-    (void)send_message(SCBP_MSG_ID_IMU_CAL_STATUS, SCBP_CAN_FLAG_STREAM_DATA,
+    (void)send_message(SRP_MSG_ID_IMU_CAL_STATUS, SRP_FLAG_STREAM_DATA,
                        payload, (uint8_t)sizeof(payload));
 }
 
 static void send_cal_event(uint8_t event_id)
 {
     const uint8_t payload[1] = {event_id};
-    (void)send_message(SCBP_MSG_ID_CAL_EVENT, SCBP_CAN_FLAG_ACK_REQUIRED,
+    (void)send_message(SRP_MSG_ID_CAL_EVENT, SRP_FLAG_ACK_REQUIRED,
                        payload, (uint8_t)sizeof(payload));
 }
 
 static void send_stm_boot_ready(void)
 {
     const uint8_t payload[2] = {(uint8_t)WAIT_SYNC, 0U};
-    (void)send_message(SCBP_MSG_ID_BOOT_READY, SCBP_CAN_FLAG_ACK_REQUIRED,
+    (void)send_message(SRP_MSG_ID_BOOT_READY, SRP_FLAG_ACK_REQUIRED,
                        payload, (uint8_t)sizeof(payload));
 }
 
@@ -692,7 +692,7 @@ void imu_boot_manager_step(void)
         unlock_boot();
         if (send_static_result != 0U) {
             send_cal_status();
-            send_cal_event(SCBP_CAL_EVENT_STATIC_DONE);
+            send_cal_event(SRP_CAL_EVENT_STATIC_DONE);
             boot_log("DUAL_IMU_BOOT READY");
             boot_log_leveling();
         }

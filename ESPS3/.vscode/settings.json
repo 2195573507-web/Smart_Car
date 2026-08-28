@@ -3,9 +3,9 @@
   "idf.toolsPath": "/Users/zhiqin/.espressif/tools",
   "idf.pythonBinPath": "/Users/zhiqin/.espressif/tools/python/v5.5.4/venv/bin/python",
   "idf.pythonInstallPath": "/Users/zhiqin/.espressif/tools/python/v5.5.4/venv/bin/python",
-  "idf.adapterTargetName": "esp32c5",
+  "idf.adapterTargetName": "esp32s3",
   "idf.currentSetup": "/Users/zhiqin/.espressif/v5.5.4/esp-idf",
-  "idf.port": "/dev/tty.usbmodem5B901601171",
+  "idf.port": "/dev/tty.usbmodem142101",
   "idf.customExtraVars": {},
   "idf.customExtraPaths": [
     "/opt/homebrew/bin",
@@ -19,10 +19,17 @@
   "clangd.arguments": [
     "--background-index",
     "--query-driver=**",
-    "--compile-commands-dir=/Users/zhiqin/Projects/ESP32-Project/Mic/build"
+    "--compile-commands-dir=/Users/zhiqin/Projects/Smart_Car/ESPS3/build"
   ],
   "idf.flashType": "JTAG",
   "idf.openOcdConfigs": [
-    "board/esp32c5-builtin.cfg"
-  ]
+    "board/esp32s3-builtin.cfg"
+  ],
+  "python.analysis.extraPaths": [
+    "/Users/zhiqin/.kendryte/k230_canmv_stubs/791c1ceee8acb4699d59d8dbf8f043ea3940a766"
+  ],
+  "python.analysis.stubPath": "/Users/zhiqin/.kendryte/k230_canmv_pylance/4b1febbaf6f39690/typings",
+  "python.analysis.diagnosticSeverityOverrides": {
+    "reportMissingModuleSource": "none"
+  }
 }

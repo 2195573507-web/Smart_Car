@@ -31,6 +31,9 @@
 
 .global  g_pfnVectors
 .global  Default_Handler
+#if SMARTCAR_RAW_DIAGNOSTICS
+.extern  cm7_raw_diag_default_handler
+#endif
 
 /* start address for the initialization values of the .data section.
 defined in linker script */
@@ -111,8 +114,12 @@ LoopFillZerobss:
 */
     .section  .text.Default_Handler,"ax",%progbits
 Default_Handler:
+#if SMARTCAR_RAW_DIAGNOSTICS
+  b  cm7_raw_diag_default_handler
+#else
 Infinite_Loop:
   b  Infinite_Loop
+#endif
   .size  Default_Handler, .-Default_Handler
 /******************************************************************************
 *
@@ -769,5 +776,3 @@ g_pfnVectors:
 
    .weak      WAKEUP_PIN_IRQHandler
    .thumb_set WAKEUP_PIN_IRQHandler,Default_Handler
-
-

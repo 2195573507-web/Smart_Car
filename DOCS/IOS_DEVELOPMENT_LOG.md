@@ -1,5 +1,10 @@
 # iOS Development Log
 
+The early `IOS_APP/` scaffold entries below are historical. That source tree
+was removed on 2026-08-23 after the replacement iOS target under `IOS-APP/`
+was verified; current implementation evidence is tracked in
+`.planning/ios-app/deliverable.md`.
+
 ## 2026-07-30: L1 App Architecture Scaffold
 
 ### Delivered

@@ -9,6 +9,7 @@
 #include "rtos_health.h"
 #include "uart_link.h"
 #include "motor_board_transport_uart.h"
+#include "cm7_raw_diag.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 /* USER CODE END Includes */
@@ -27,6 +28,9 @@
 #define FAULT_EXC_RETURN_FLOAT_FRAME_MASK  UINT32_C(0x10)
 #define FAULT_STACK_RAM_START               UINT32_C(0x20000000)
 #define FAULT_STACK_RAM_END                 UINT32_C(0x20020000)
+#ifndef SMARTCAR_RAW_DIAGNOSTICS
+#define SMARTCAR_RAW_DIAGNOSTICS 0
+#endif
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -38,6 +42,9 @@
 volatile fault_record_t g_fault_record
     __attribute__((section(".noinit"), used, aligned(8)));
 static volatile uint32_t s_fault_capture_active;
+volatile uint32_t g_cm7_svc_count;
+volatile uint32_t g_cm7_pendsv_count;
+volatile uint32_t g_cm7_systick_count;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -296,7 +303,16 @@ extern void vPortSVCHandler(void);
 
 __attribute__((naked)) void SVC_Handler(void)
 {
+#if SMARTCAR_RAW_DIAGNOSTICS
+  __asm volatile(
+      "ldr r0, =g_cm7_svc_count\n"
+      "ldr r1, [r0]\n"
+      "adds r1, r1, #1\n"
+      "str r1, [r0]\n"
+      "b vPortSVCHandler");
+#else
   __asm volatile("b vPortSVCHandler");
+#endif
 }
 
 /**
@@ -317,7 +333,16 @@ extern void xPortPendSVHandler(void);
 
 __attribute__((naked)) void PendSV_Handler(void)
 {
+#if SMARTCAR_RAW_DIAGNOSTICS
+  __asm volatile(
+      "ldr r0, =g_cm7_pendsv_count\n"
+      "ldr r1, [r0]\n"
+      "adds r1, r1, #1\n"
+      "str r1, [r0]\n"
+      "b xPortPendSVHandler");
+#else
   __asm volatile("b xPortPendSVHandler");
+#endif
 }
 
 /**
@@ -325,6 +350,9 @@ __attribute__((naked)) void PendSV_Handler(void)
   */
 void SysTick_Handler(void)
 {
+#if SMARTCAR_RAW_DIAGNOSTICS
+  ++g_cm7_systick_count;
+#endif
   HAL_IncTick();
   if (xTaskGetSchedulerState() != taskSCHEDULER_NOT_STARTED) {
     extern void xPortSysTickHandler(void);
@@ -357,12 +385,20 @@ void USART6_IRQHandler(void)
 
 void vApplicationStackOverflowHook(TaskHandle_t task, char *task_name)
 {
+#if SMARTCAR_RAW_DIAGNOSTICS
+  cm7_raw_diag_marker("[ERROR] RTOS stack overflow");
+  cm7_raw_diag_value("STACK_TASK", (uint32_t)(uintptr_t)task);
+  cm7_raw_diag_value("STACK_NAME_PTR", (uint32_t)(uintptr_t)task_name);
+#endif
   rtos_health_record_stack_overflow((uintptr_t)task, task_name);
   rtos_health_halt();
 }
 
 void vApplicationMallocFailedHook(void)
 {
+#if SMARTCAR_RAW_DIAGNOSTICS
+  cm7_raw_diag_marker("[ERROR] RTOS malloc failed");
+#endif
   rtos_health_record_malloc_failed();
   rtos_health_halt();
 }

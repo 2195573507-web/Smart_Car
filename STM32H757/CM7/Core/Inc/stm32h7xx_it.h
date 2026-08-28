@@ -74,6 +74,9 @@ void SVC_Handler(void);
 void DebugMon_Handler(void);
 void PendSV_Handler(void);
 void SysTick_Handler(void);
+extern volatile uint32_t g_cm7_svc_count;
+extern volatile uint32_t g_cm7_pendsv_count;
+extern volatile uint32_t g_cm7_systick_count;
 /* USER CODE BEGIN EFP */
 /* The record is retained in a no-init RAM section across software resets. */
 extern volatile fault_record_t g_fault_record;

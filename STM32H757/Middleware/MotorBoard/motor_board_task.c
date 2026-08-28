@@ -1,6 +1,7 @@
 #include "motor_board_task.h"
 
 #include <stdbool.h>
+#include <ctype.h>
 #include <stdint.h>
 #include <math.h>
 #include <stdio.h>
@@ -9,52 +10,71 @@
 #include "FreeRTOS.h"
 #include "task.h"
 
+#include "bsp_timer.h"
 #include "log_service.h"
 #include "motor_board_protocol.h"
 #include "motor_board_transport_uart.h"
 #include "pid_controller.h"
-#include "scbp_protocol_defs.h"
-#include "scbp_wire.h"
+#include "srp_registry.h"
+#include "srp_wire.h"
 #include "s3_service.h"
 #include "wheel_control_params.h"
 
-#define MB_TASK_STACK_WORDS UINT16_C(384)
+#define MB_TASK_STACK_WORDS UINT16_C(1024)
 #define MB_TASK_PRIORITY (tskIDLE_PRIORITY + 2U)
 #define MB_TASK_POLL_PERIOD_MS UINT32_C(1)
 #define MB_TASK_SEQUENCE_GAP_MS UINT32_C(100)
 #define MB_TASK_RESPONSE_TIMEOUT_MS UINT32_C(1000)
+#define MB_TASK_FEEDBACK_TIMEOUT_MS UINT32_C(1000)
 #define MB_TASK_REPORT_PERIOD_MS UINT32_C(1000)
 #define MB_TASK_STATS_PERIOD_MS UINT32_C(5000)
 #define MB_TASK_WHEEL_STATUS_PERIOD_MS UINT32_C(50)
 #define MB_TASK_POWER_STATUS_PERIOD_MS UINT32_C(500)
-#define MB_PID_DT_SECONDS 0.05f
+/* Valid elapsed time between MSPD feedback frames (s); integer microsecond
+ * thresholds below avoid floating-point overflow during timestamp checks. */
+#define MB_PID_DT_MIN_SECONDS 0.002f
+#define MB_PID_DT_MAX_SECONDS 0.100f
+#define MB_PID_DT_MIN_US UINT64_C(2000)
+#define MB_PID_DT_MAX_US UINT64_C(100000)
+#define MB_MSPD_WATCHDOG_TIMEOUT_US UINT64_C(200000)
+#define MB_BATTERY_FRESHNESS_TIMEOUT_US UINT64_C(2000000)
 #define MB_WHEEL_COUNT 4U
 #define MB_LOG_RAW_CHUNK_LENGTH UINT16_C(64)
 
 #define MB_520_MOTOR_TYPE UINT8_C(1)
+#define MB_520_DEAD_ZONE UINT16_C(1600)
 #define MB_520_MAGNETIC_LINE_COUNT UINT16_C(11)
 #define MB_520_GEAR_RATIO UINT16_C(30)
 #define MB_520_WHEEL_DIAMETER_MM UINT16_C(65)
 
 typedef enum {
     MB_SEQUENCE_LINK_PROBE = 0U,
+    MB_SEQUENCE_READ_FLASH,
     MB_SEQUENCE_MTYPE,
+    MB_SEQUENCE_DEADZONE,
     MB_SEQUENCE_MLINE,
     MB_SEQUENCE_MPHASE,
     MB_SEQUENCE_WDIAMETER,
-    MB_SEQUENCE_READ_FLASH,
     MB_SEQUENCE_READ_VOLTAGE,
     MB_SEQUENCE_UPLOAD,
+    MB_SEQUENCE_WAIT_FEEDBACK,
     MB_SEQUENCE_RUNNING,
     MB_SEQUENCE_FAILED
 } mb_sequence_step_t;
 
 typedef enum {
+    MB_CONTROL_LOCKED = 0U,
+    MB_CONTROL_CONFIGURING,
+    MB_CONTROL_WAIT_FEEDBACK,
+    MB_CONTROL_READY,
+    MB_CONTROL_FAULT
+} mb_control_state_t;
+
+typedef enum {
     MB_WAIT_NONE = 0U,
     MB_WAIT_CONFIG_OK,
     MB_WAIT_FLASH_RESPONSE,
-    MB_WAIT_BATTERY_RESPONSE,
-    MB_WAIT_UPLOAD_RESPONSE
+    MB_WAIT_BATTERY_RESPONSE
 } mb_wait_response_t;
 
 /* Motor-board order is fixed as M1=RR, M2=RF, M3=LR, M4=LF. The RF encoder
@@ -67,9 +87,11 @@ static const float s_wheel_trim[4] = {
 
 static TaskHandle_t s_task_handle;
 static mb_sequence_step_t s_sequence_step;
+static mb_control_state_t s_control_state;
 static mb_wait_response_t s_wait_response;
 static TickType_t s_next_sequence_tick;
 static TickType_t s_response_deadline;
+static TickType_t s_feedback_deadline;
 static TickType_t s_next_report_tick;
 static TickType_t s_next_stats_tick;
 static TickType_t s_next_wheel_status_tick;
@@ -89,14 +111,58 @@ static Ramp_Profile_t s_wheel_ramp[MB_WHEEL_COUNT];
 static bool s_motion_forced_stop;
 static char s_latest_raw[MB_PROTOCOL_MAX_FRAME_LEN];
 static uint32_t s_link_probe_attempts;
+static int16_t s_last_logged_pwm[MB_WHEEL_COUNT];
+static bool s_have_logged_pwm;
+static uint64_t s_last_mspd_timestamp_us;
+static bool s_mspd_timestamp_valid;
+static uint64_t s_last_mspd_rx_timestamp_us;
+static bool s_mspd_rx_timestamp_valid;
+static uint32_t s_feedback_valid_count;
+static bool s_feedback_first_seen;
+static uint64_t s_battery_timestamp_us;
+static bool s_battery_timestamp_valid;
+static uint32_t s_config_pending_mask;
+static bool s_flash_verify_required;
 
 static bool tick_due(TickType_t now, TickType_t due)
 {
     return (int32_t)(now - due) >= 0;
 }
 
+static bool motor_board_text_contains_ci(const char *text, const char *needle)
+{
+    size_t text_length;
+    size_t needle_length;
+
+    if (text == NULL || needle == NULL) {
+        return false;
+    }
+    text_length = strlen(text);
+    needle_length = strlen(needle);
+    if (needle_length == 0U || needle_length > text_length) {
+        return false;
+    }
+    for (size_t start = 0U; start + needle_length <= text_length; ++start) {
+        size_t offset;
+
+        for (offset = 0U; offset < needle_length; ++offset) {
+            if (tolower((unsigned char)text[start + offset]) !=
+                tolower((unsigned char)needle[offset])) {
+                break;
+            }
+        }
+        if (offset == needle_length) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static float clamp_wheel_pwm(float value)
 {
+    if (!isfinite(value)) {
+        return 0.0f;
+    }
     if (value > WHEEL_PID_MAX_OUT) {
         return WHEEL_PID_MAX_OUT;
     }
@@ -106,11 +172,60 @@ static float clamp_wheel_pwm(float value)
     return value;
 }
 
+/* Use the shared monotonic DWT-backed clock. A bad interval establishes a new
+ * baseline and suppresses one control update, so a delayed MSPD frame cannot
+ * inject an oversized integral or feedback-filter step. */
+static bool motor_board_get_mspd_dt(float *dt_seconds)
+{
+    const uint64_t now_us = bsp_timer_get_us();
+    uint64_t delta_us;
+    float dt;
+    bool valid = false;
+
+    if (dt_seconds == NULL || now_us == 0U) {
+        return false;
+    }
+    taskENTER_CRITICAL();
+    if (!s_mspd_timestamp_valid) {
+        s_last_mspd_timestamp_us = now_us;
+        s_mspd_timestamp_valid = true;
+    } else if (now_us <= s_last_mspd_timestamp_us) {
+        s_last_mspd_timestamp_us = now_us;
+    } else {
+        delta_us = now_us - s_last_mspd_timestamp_us;
+        s_last_mspd_timestamp_us = now_us;
+        if (delta_us <= MB_PID_DT_MAX_US) {
+            if (delta_us < MB_PID_DT_MIN_US) {
+                delta_us = MB_PID_DT_MIN_US;
+            }
+            dt = (float)delta_us * 1.0e-6f;
+            if (!isfinite(dt) || dt < MB_PID_DT_MIN_SECONDS ||
+                dt > MB_PID_DT_MAX_SECONDS) {
+                taskEXIT_CRITICAL();
+                return false;
+            }
+            *dt_seconds = dt;
+            valid = true;
+        }
+    }
+    taskEXIT_CRITICAL();
+    return valid;
+}
+
+static void motor_board_reset_pid_history(void)
+{
+    for (size_t index = 0U; index < MB_WHEEL_COUNT; ++index) {
+        pid_controller_reset(&s_wheel_pid[index]);
+    }
+}
+
 static const char *motor_board_step_name(mb_sequence_step_t step)
 {
     switch (step) {
     case MB_SEQUENCE_MTYPE:
         return "mtype";
+    case MB_SEQUENCE_DEADZONE:
+        return "deadzone";
     case MB_SEQUENCE_MLINE:
         return "mline";
     case MB_SEQUENCE_MPHASE:
@@ -123,6 +238,8 @@ static const char *motor_board_step_name(mb_sequence_step_t step)
         return "read_vol";
     case MB_SEQUENCE_UPLOAD:
         return "upload";
+    case MB_SEQUENCE_WAIT_FEEDBACK:
+        return "feedback";
     case MB_SEQUENCE_LINK_PROBE:
         return "link_probe";
     case MB_SEQUENCE_RUNNING:
@@ -131,6 +248,50 @@ static const char *motor_board_step_name(mb_sequence_step_t step)
     default:
         return "failed";
     }
+}
+
+static void motor_board_reset_control_state(void)
+{
+    taskENTER_CRITICAL();
+    (void)memset(s_target_wheel_speed, 0, sizeof(s_target_wheel_speed));
+    for (size_t index = 0U; index < MB_WHEEL_COUNT; ++index) {
+        pid_controller_reset(&s_wheel_pid[index]);
+        s_wheel_ramp[index].current_target = 0.0f;
+        s_actual_wheel_speed[index] = 0.0f;
+    }
+    s_last_mspd_timestamp_us = 0U;
+    s_mspd_timestamp_valid = false;
+    s_feedback_valid_count = 0U;
+    s_feedback_first_seen = false;
+    s_motion_forced_stop = true;
+    taskEXIT_CRITICAL();
+}
+
+static uint32_t motor_board_flash_mismatch(const mb_flash_config_t *config)
+{
+    uint32_t mismatch = 0U;
+
+    if (config == NULL || !config->complete) {
+        return MB_FLASH_FIELD_REQUIRED_MASK;
+    }
+    if (config->motor_type != MB_520_MOTOR_TYPE) {
+        mismatch |= MB_FLASH_FIELD_MOTOR_TYPE;
+    }
+    if (config->dead_zone != MB_520_DEAD_ZONE) {
+        mismatch |= MB_FLASH_FIELD_DEAD_ZONE;
+    }
+    if (config->pulse_line != MB_520_MAGNETIC_LINE_COUNT) {
+        mismatch |= MB_FLASH_FIELD_PULSE_LINE;
+    }
+    if (config->pulse_phase != MB_520_GEAR_RATIO) {
+        mismatch |= MB_FLASH_FIELD_PULSE_PHASE;
+    }
+    if (!isfinite(config->wheel_diameter) ||
+        fabsf(config->wheel_diameter - (float)MB_520_WHEEL_DIAMETER_MM) >
+            0.01f) {
+        mismatch |= MB_FLASH_FIELD_WHEEL_DIAMETER;
+    }
+    return mismatch;
 }
 
 static void motor_board_log(const char *text)
@@ -229,34 +390,19 @@ static void motor_board_enter_failed(const char *reason)
 {
     char line[SMARTCAR_LOG_MAX_PAYLOAD + 1U];
     const char *failed_step = motor_board_step_name(s_sequence_step);
-    const bool stop_queued = MB_Protocol_SendPwm(0, 0, 0, 0);
+    bool stop_queued;
 
+    motor_board_reset_control_state();
+    stop_queued = MB_Protocol_SendPwm(0, 0, 0, 0);
     s_wait_response = MB_WAIT_NONE;
     s_sequence_step = MB_SEQUENCE_FAILED;
+    s_control_state = MB_CONTROL_FAULT;
     (void)snprintf(line, sizeof(line),
                    "[MOTOR_BOARD] init failed step=%s reason=%s stop=%s",
                    failed_step,
                    reason == NULL ? "?" : reason,
                    stop_queued ? "QUEUED" : "DROP");
     LOG_ERROR(line);
-}
-
-static bool motor_board_upload_response_is_success(mb_frame_type_t type)
-{
-    switch (type) {
-    case MB_FRAME_OK_ACK:
-    case MB_FRAME_MTEP:
-    case MB_FRAME_MSPD:
-    case MB_FRAME_BATTERY:
-    case MB_FRAME_MALL:
-        return true;
-    case MB_FRAME_INVALID:
-    case MB_FRAME_NACK:
-    case MB_FRAME_UNKNOWN:
-    case MB_FRAME_FLASH_RAW:
-    default:
-        return false;
-    }
 }
 
 static void motor_board_log_rx_health(const char *reason)
@@ -289,10 +435,17 @@ static void motor_board_restart_link_probe(TickType_t now, const char *reason)
 {
     char line[SMARTCAR_LOG_MAX_PAYLOAD + 1U];
 
+    motor_board_reset_control_state();
+    (void)MB_Protocol_SendPwm(0, 0, 0, 0);
     MB_Transport_ClearRx();
     MB_Protocol_ResetRx();
     s_wait_response = MB_WAIT_NONE;
     s_sequence_step = MB_SEQUENCE_LINK_PROBE;
+    s_control_state = MB_CONTROL_LOCKED;
+    s_config_pending_mask = 0U;
+    s_flash_verify_required = false;
+    s_last_mspd_rx_timestamp_us = 0U;
+    s_mspd_rx_timestamp_valid = false;
     s_next_sequence_tick = now;
     motor_board_log_rx_health(reason);
     (void)snprintf(line, sizeof(line),
@@ -300,14 +453,6 @@ static void motor_board_restart_link_probe(TickType_t now, const char *reason)
                    (unsigned long)(s_link_probe_attempts + 1U),
                    reason == NULL ? "?" : reason);
     LOG_WARN(line);
-}
-
-static void motor_board_advance_sequence(TickType_t now)
-{
-    s_wait_response = MB_WAIT_NONE;
-    s_response_deadline = now;
-    s_sequence_step = (mb_sequence_step_t)(s_sequence_step + 1U);
-    s_next_sequence_tick = now + pdMS_TO_TICKS(MB_TASK_SEQUENCE_GAP_MS);
 }
 
 static bool motor_board_wait_for_response(mb_wait_response_t response,
@@ -319,6 +464,92 @@ static bool motor_board_wait_for_response(mb_wait_response_t response,
     s_wait_response = response;
     s_response_deadline = now + pdMS_TO_TICKS(MB_TASK_RESPONSE_TIMEOUT_MS);
     return true;
+}
+
+static void motor_board_select_next_config(TickType_t now)
+{
+    s_wait_response = MB_WAIT_NONE;
+    if ((s_config_pending_mask & MB_FLASH_FIELD_MOTOR_TYPE) != 0U) {
+        s_sequence_step = MB_SEQUENCE_MTYPE;
+    } else if ((s_config_pending_mask & MB_FLASH_FIELD_DEAD_ZONE) != 0U) {
+        s_sequence_step = MB_SEQUENCE_DEADZONE;
+    } else if ((s_config_pending_mask & MB_FLASH_FIELD_PULSE_LINE) != 0U) {
+        s_sequence_step = MB_SEQUENCE_MLINE;
+    } else if ((s_config_pending_mask & MB_FLASH_FIELD_PULSE_PHASE) != 0U) {
+        s_sequence_step = MB_SEQUENCE_MPHASE;
+    } else if ((s_config_pending_mask & MB_FLASH_FIELD_WHEEL_DIAMETER) != 0U) {
+        s_sequence_step = MB_SEQUENCE_WDIAMETER;
+    } else if (s_flash_verify_required) {
+        s_sequence_step = MB_SEQUENCE_READ_FLASH;
+    } else {
+        s_sequence_step = MB_SEQUENCE_READ_VOLTAGE;
+    }
+    s_next_sequence_tick = now + pdMS_TO_TICKS(MB_TASK_SEQUENCE_GAP_MS);
+}
+
+static bool motor_board_ack_matches_step(const mb_protocol_frame_t *frame)
+{
+    const char *raw;
+
+    if (frame == NULL || frame->type != MB_FRAME_OK_ACK) {
+        return false;
+    }
+    raw = frame->response_status[0] == '\0' ? frame->raw :
+                                                frame->response_status;
+    switch (s_sequence_step) {
+    case MB_SEQUENCE_MTYPE:
+        return motor_board_text_contains_ci(raw, "mtype") ||
+               motor_board_text_contains_ci(raw, "motor_type") ||
+               motor_board_text_contains_ci(raw, "motor type");
+    case MB_SEQUENCE_DEADZONE:
+        return motor_board_text_contains_ci(raw, "deadzone") ||
+               motor_board_text_contains_ci(raw, "dead_zone") ||
+               motor_board_text_contains_ci(raw, "dead zone");
+    case MB_SEQUENCE_MLINE:
+        return motor_board_text_contains_ci(raw, "mline") ||
+               motor_board_text_contains_ci(raw, "pulse_line") ||
+               motor_board_text_contains_ci(raw, "pulse line");
+    case MB_SEQUENCE_MPHASE:
+        return motor_board_text_contains_ci(raw, "mphase") ||
+               motor_board_text_contains_ci(raw, "pulse_phase") ||
+               motor_board_text_contains_ci(raw, "pulse phase");
+    case MB_SEQUENCE_WDIAMETER:
+        return motor_board_text_contains_ci(raw, "wdiameter") ||
+               motor_board_text_contains_ci(raw, "wheel_diameter") ||
+               motor_board_text_contains_ci(raw, "wheel diameter");
+    default:
+        return false;
+    }
+}
+
+static void motor_board_handle_flash_complete(TickType_t now)
+{
+    mb_flash_config_t config;
+    uint32_t mismatch;
+
+    if (!MB_Protocol_GetFlashConfig(&config)) {
+        if (config.invalid) {
+            motor_board_enter_failed("flash_invalid");
+        }
+        return;
+    }
+    mismatch = motor_board_flash_mismatch(&config);
+    MB_Protocol_EndReadFlash();
+    if (s_flash_verify_required) {
+        if (mismatch != 0U) {
+            motor_board_enter_failed("flash_verify_mismatch");
+            return;
+        }
+        s_flash_verify_required = false;
+        s_config_pending_mask = 0U;
+        motor_board_select_next_config(now);
+        return;
+    }
+    s_config_pending_mask = mismatch;
+    if (mismatch != 0U) {
+        s_flash_verify_required = true;
+    }
+    motor_board_select_next_config(now);
 }
 
 static void motor_board_log_frame_event(const mb_protocol_frame_t *frame)
@@ -333,6 +564,8 @@ static void motor_board_log_frame_event(const mb_protocol_frame_t *frame)
     case MB_FRAME_BATTERY:
         s_latest_battery = *frame;
         s_have_battery = true;
+        s_battery_timestamp_us = bsp_timer_get_us();
+        s_battery_timestamp_valid = s_battery_timestamp_us != 0U;
         break;
     case MB_FRAME_MTEP:
         s_latest_mtep = *frame;
@@ -387,27 +620,52 @@ static void motor_board_handle_response(const mb_protocol_frame_t *frame,
     }
     switch (s_wait_response) {
     case MB_WAIT_CONFIG_OK:
-        if (frame->type == MB_FRAME_OK_ACK) {
+        if (motor_board_ack_matches_step(frame)) {
             (void)snprintf(line, sizeof(line),
                            "[MOTOR_BOARD] 520 %s=OK status=%.48s",
                            motor_board_step_name(s_sequence_step),
                            frame->response_status[0] == '\0' ? frame->raw :
                                                                frame->response_status);
             motor_board_log(line);
-            motor_board_advance_sequence(now);
+            switch (s_sequence_step) {
+            case MB_SEQUENCE_MTYPE:
+                s_config_pending_mask &= ~MB_FLASH_FIELD_MOTOR_TYPE;
+                break;
+            case MB_SEQUENCE_DEADZONE:
+                s_config_pending_mask &= ~MB_FLASH_FIELD_DEAD_ZONE;
+                break;
+            case MB_SEQUENCE_MLINE:
+                s_config_pending_mask &= ~MB_FLASH_FIELD_PULSE_LINE;
+                break;
+            case MB_SEQUENCE_MPHASE:
+                s_config_pending_mask &= ~MB_FLASH_FIELD_PULSE_PHASE;
+                break;
+            case MB_SEQUENCE_WDIAMETER:
+                s_config_pending_mask &= ~MB_FLASH_FIELD_WHEEL_DIAMETER;
+                break;
+            default:
+                break;
+            }
+            motor_board_select_next_config(now);
+        } else if (frame->type == MB_FRAME_OK_ACK) {
+            LOG_WARN("[MOTOR_BOARD] unassociated config ACK ignored");
         }
         break;
     case MB_WAIT_FLASH_RESPONSE:
-        /* read_flash may return several plain-text configuration lines before
-         * the final OK acknowledgement. Keep each line and wait for OK. */
-        if (frame->type == MB_FRAME_OK_ACK) {
-            (void)snprintf(line, sizeof(line),
-                           "[MOTOR_BOARD] read_flash response=OK status=%.48s",
-                           frame->response_status[0] == '\0' ? frame->raw :
-                                                               frame->response_status);
-            motor_board_log(line);
-            motor_board_advance_sequence(now);
+        /* read_flash is a multiline response. The first read_flash:OK! line
+         * only opens the response; the five required fields complete it. */
+        if (frame->type == MB_FRAME_FLASH_RAW) {
+            motor_board_handle_flash_complete(now);
+        } else if (frame->type == MB_FRAME_OK_ACK) {
+            LOG_WARN("[MOTOR_BOARD] read_flash ACK without complete snapshot");
         }
+        if (s_wait_response == MB_WAIT_NONE) {
+            (void)snprintf(line, sizeof(line),
+                           "[MOTOR_BOARD] read_flash response=COMPLETE");
+            motor_board_log(line);
+        }
+        /* A generic OK must never complete a partial read_flash response. */
+        /* no further action */
         break;
     case MB_WAIT_BATTERY_RESPONSE:
         if (frame->type == MB_FRAME_BATTERY) {
@@ -415,18 +673,10 @@ static void motor_board_handle_response(const mb_protocol_frame_t *frame,
                            "[MOTOR_BOARD] read_vol=%.2fV OK",
                            (double)frame->battery_voltage);
             motor_board_log(line);
-            motor_board_advance_sequence(now);
-        }
-        break;
-    case MB_WAIT_UPLOAD_RESPONSE:
-        if (motor_board_upload_response_is_success(frame->type)) {
-            (void)snprintf(line, sizeof(line),
-                           "[MOTOR_BOARD] upload=OK source=%s data=%.48s",
-                           frame->type == MB_FRAME_OK_ACK ? "ACK" : "STREAM",
-                           frame->response_status[0] == '\0' ? frame->raw :
-                                                               frame->response_status);
-            motor_board_log(line);
-            motor_board_advance_sequence(now);
+            s_wait_response = MB_WAIT_NONE;
+            s_response_deadline = now;
+            s_sequence_step = MB_SEQUENCE_UPLOAD;
+            s_next_sequence_tick = now + pdMS_TO_TICKS(MB_TASK_SEQUENCE_GAP_MS);
         }
         break;
     case MB_WAIT_NONE:
@@ -438,6 +688,7 @@ static void motor_board_handle_response(const mb_protocol_frame_t *frame,
 bool motor_board_set_target_wheel_speeds(const float speeds[MB_WHEEL_COUNT])
 {
     bool any_nonzero = false;
+    bool ready;
 
     if (speeds == NULL) {
         return false;
@@ -453,6 +704,13 @@ bool motor_board_set_target_wheel_speeds(const float speeds[MB_WHEEL_COUNT])
         return motor_board_force_stop();
     }
     taskENTER_CRITICAL();
+    ready = s_control_state == MB_CONTROL_READY;
+    taskEXIT_CRITICAL();
+    if (!ready) {
+        LOG_WARN("[MOTOR_BOARD] nonzero target rejected: board not READY");
+        return false;
+    }
+    taskENTER_CRITICAL();
     (void)memcpy(s_target_wheel_speed, speeds, sizeof(s_target_wheel_speed));
     s_motion_forced_stop = false;
     taskEXIT_CRITICAL();
@@ -463,10 +721,10 @@ bool motor_board_update_pid_params(float kp, float ki, float kd,
                                    float max_accel)
 {
     if (!isfinite(kp) || !isfinite(ki) || !isfinite(kd) ||
-        !isfinite(max_accel) || kp < SCBP_PID_KP_MIN || kp > SCBP_PID_KP_MAX ||
-        ki < SCBP_PID_KI_MIN || ki > SCBP_PID_KI_MAX ||
-        kd < SCBP_PID_KD_MIN || kd > SCBP_PID_KD_MAX ||
-        max_accel < SCBP_PID_ACCEL_MIN || max_accel > SCBP_PID_ACCEL_MAX) {
+        !isfinite(max_accel) || kp < SRP_PID_KP_MIN || kp > SRP_PID_KP_MAX ||
+        ki < SRP_PID_KI_MIN || ki > SRP_PID_KI_MAX ||
+        kd < SRP_PID_KD_MIN || kd > SRP_PID_KD_MAX ||
+        max_accel < SRP_PID_ACCEL_MIN || max_accel > SRP_PID_ACCEL_MAX) {
         return false;
     }
 
@@ -483,15 +741,10 @@ bool motor_board_force_stop(void)
 {
     bool sent;
 
+    motor_board_reset_control_state();
+    /* Serialize the physical stop after clearing the target, so a stale
+     * nonzero PWM cannot follow this stop. */
     taskENTER_CRITICAL();
-    (void)memset(s_target_wheel_speed, 0, sizeof(s_target_wheel_speed));
-    for (size_t index = 0U; index < MB_WHEEL_COUNT; ++index) {
-        pid_controller_reset(&s_wheel_pid[index]);
-        s_wheel_ramp[index].current_target = 0.0f;
-    }
-    s_motion_forced_stop = true;
-    /* Serialize the physical stop with a PID update that may already have
-     * copied a target, so a stale nonzero PWM cannot follow this stop. */
     sent = MB_Protocol_SendPwm(0, 0, 0, 0);
     taskEXIT_CRITICAL();
     if (!sent) {
@@ -509,7 +762,12 @@ void motor_board_get_actual_wheel_speeds(float speeds[MB_WHEEL_COUNT])
 
 bool motor_board_get_battery_voltage(float *voltage)
 {
-    if (voltage == NULL || !s_have_battery || !isfinite(s_latest_battery.battery_voltage)) {
+    const uint64_t now_us = bsp_timer_get_us();
+
+    if (voltage == NULL || !s_have_battery || !s_battery_timestamp_valid ||
+        now_us < s_battery_timestamp_us ||
+        now_us - s_battery_timestamp_us > MB_BATTERY_FRESHNESS_TIMEOUT_US ||
+        !isfinite(s_latest_battery.battery_voltage)) {
         return false;
     }
     *voltage = s_latest_battery.battery_voltage;
@@ -520,82 +778,183 @@ static void motor_board_update_pid(const mb_protocol_frame_t *frame)
 {
     int16_t pwm[MB_WHEEL_COUNT];
     float target_speed[MB_WHEEL_COUNT];
+    float dt_seconds;
+    uint64_t now_us;
+    bool dt_valid;
+    bool ready_before;
+    bool became_ready = false;
     bool sent;
 
     if (frame == NULL || frame->type != MB_FRAME_MSPD) {
         return;
     }
+    for (size_t index = 0U; index < MB_WHEEL_COUNT; ++index) {
+        if (!isfinite(frame->speed[index])) {
+            return;
+        }
+    }
+    now_us = bsp_timer_get_us();
+    if (now_us == 0U) {
+        return;
+    }
+    dt_valid = motor_board_get_mspd_dt(&dt_seconds);
     taskENTER_CRITICAL();
-    if (s_motion_forced_stop) {
+    ready_before = s_control_state == MB_CONTROL_READY;
+    if (s_control_state == MB_CONTROL_WAIT_FEEDBACK) {
+        if (!s_feedback_first_seen) {
+            s_feedback_first_seen = true;
+            s_feedback_valid_count = 1U;
+        } else if (dt_valid) {
+            ++s_feedback_valid_count;
+        } else {
+            s_feedback_first_seen = false;
+            s_feedback_valid_count = 0U;
+        }
+        if (s_feedback_valid_count >= 2U) {
+            s_control_state = MB_CONTROL_READY;
+            s_sequence_step = MB_SEQUENCE_RUNNING;
+            s_wait_response = MB_WAIT_NONE;
+            s_motion_forced_stop = false;
+            became_ready = true;
+        }
+    }
+    if (!dt_valid) {
+        for (size_t index = 0U; index < MB_WHEEL_COUNT; ++index) {
+            s_actual_wheel_speed[index] =
+                frame->speed[index] * (float)ENCODER_DIR_SIGN[index];
+        }
+        motor_board_reset_pid_history();
+        taskEXIT_CRITICAL();
+        if (became_ready) {
+            motor_board_log("[MOTOR_BOARD] state=READY feedback=2");
+        }
+        return;
+    }
+    s_last_mspd_rx_timestamp_us = now_us;
+    s_mspd_rx_timestamp_valid = true;
+    if (!ready_before || s_motion_forced_stop) {
         for (size_t index = 0U; index < MB_WHEEL_COUNT; ++index) {
             s_actual_wheel_speed[index] =
                 frame->speed[index] * (float)ENCODER_DIR_SIGN[index];
         }
         taskEXIT_CRITICAL();
+        if (became_ready) {
+            motor_board_log("[MOTOR_BOARD] state=READY feedback=2");
+        }
         return;
     }
     (void)memcpy(target_speed, s_target_wheel_speed, sizeof(target_speed));
     for (size_t index = 0U; index < MB_WHEEL_COUNT; ++index) {
         const float raw_speed = frame->speed[index];
-        const float actual_speed = raw_speed * (float)ENCODER_DIR_SIGN[index];
+        float actual_speed = raw_speed * (float)ENCODER_DIR_SIGN[index];
+
+        if (!isfinite(actual_speed)) {
+            actual_speed = 0.0f;
+        }
+        if (!isfinite(target_speed[index])) {
+            target_speed[index] = 0.0f;
+        }
         if (fabsf(target_speed[index]) > 0.0f &&
             fabsf(target_speed[index]) < WHEEL_SPEED_MIN_TARGET_LIMIT) {
             target_speed[index] = 0.0f;
         }
         const float smooth_target = Ramp_Update(&s_wheel_ramp[index],
                                                 target_speed[index],
-                                                MB_PID_DT_SECONDS);
+                                                dt_seconds);
 
         /* PID output is already signed. Trim changes magnitude only; it
          * neither changes direction nor bypasses the final output limit. */
         const float raw_pwm = pid_controller_step(
             &s_wheel_pid[index], smooth_target,
-            actual_speed, MB_PID_DT_SECONDS);
+            actual_speed, dt_seconds);
         s_actual_wheel_speed[index] = actual_speed;
-        pwm[index] = (int16_t)clamp_wheel_pwm(
-            raw_pwm * s_wheel_trim[index]);
+        if (!isfinite(raw_pwm)) {
+            pwm[index] = 0;
+        } else {
+            pwm[index] = (int16_t)clamp_wheel_pwm(
+                raw_pwm * s_wheel_trim[index]);
+        }
     }
     sent = MB_Protocol_SendPwm(pwm[0], pwm[1], pwm[2], pwm[3]);
     taskEXIT_CRITICAL();
+    if (sent && (!s_have_logged_pwm ||
+                 memcmp(s_last_logged_pwm, pwm, sizeof(pwm)) != 0)) {
+        char line[SMARTCAR_LOG_MAX_PAYLOAD + 1U];
+
+        (void)snprintf(line, sizeof(line),
+                       "[MOTOR_CMD] target=[RR %.0f RF %.0f LR %.0f LF %.0f] "
+                       "pwm=$pwm:%d,%d,%d,%d#",
+                       (double)target_speed[0], (double)target_speed[1],
+                       (double)target_speed[2], (double)target_speed[3],
+                       (int)pwm[0], (int)pwm[1], (int)pwm[2], (int)pwm[3]);
+        LOG_INFO(line);
+        (void)memcpy(s_last_logged_pwm, pwm, sizeof(s_last_logged_pwm));
+        s_have_logged_pwm = true;
+    }
     if (!sent) {
         LOG_WARN("[MOTOR_BOARD] PID PWM queue drop");
     }
 }
 
+static void motor_board_check_mspd_watchdog(TickType_t now)
+{
+    const uint64_t now_us = bsp_timer_get_us();
+    bool timed_out = false;
+
+    if (now_us == 0U) {
+        return;
+    }
+    taskENTER_CRITICAL();
+    if (s_control_state == MB_CONTROL_READY &&
+        s_mspd_rx_timestamp_valid &&
+        now_us >= s_last_mspd_rx_timestamp_us &&
+        now_us - s_last_mspd_rx_timestamp_us >
+            MB_MSPD_WATCHDOG_TIMEOUT_US) {
+        timed_out = true;
+    }
+    taskEXIT_CRITICAL();
+    if (timed_out) {
+        motor_board_restart_link_probe(now, "mspd_timeout");
+    }
+}
+
 static void motor_board_send_wheel_status(void)
 {
-    uint8_t payload[SCBP_PAYLOAD_WHEEL_SPEED_STATUS_SIZE];
+    uint8_t payload[SRP_PAYLOAD_WHEEL_SPEED_STATUS_SIZE];
 
-    scbp_wire_write_f32_array_le(payload, s_actual_wheel_speed, MB_WHEEL_COUNT);
-    (void)s3_service_send_message(SCBP_CAN_PRIORITY_NORMAL,
-                                  SCBP_MSG_ID_WHEEL_SPEED_STATUS,
-                                  SCBP_CAN_FLAG_STREAM_DATA, payload,
+    srp_wire_write_f32_array_le(payload, s_actual_wheel_speed, MB_WHEEL_COUNT);
+    (void)s3_service_send_message(SRP_PRIORITY_TELEMETRY,
+                                  SRP_MSG_ID_WHEEL_SPEED_STATUS,
+                                  SRP_FLAG_STREAM_DATA, payload,
                                   sizeof(payload));
 }
 
 static void motor_board_send_power_status(void)
 {
     float voltage;
-    uint8_t payload[SCBP_PAYLOAD_POWER_STATUS_SIZE];
+    uint8_t payload[SRP_PAYLOAD_POWER_STATUS_SIZE];
 
     if (!motor_board_get_battery_voltage(&voltage)) {
         return;
     }
-    scbp_wire_write_f32_le(payload, voltage);
-    (void)s3_service_send_message(SCBP_CAN_PRIORITY_NORMAL,
-                                  SCBP_MSG_ID_POWER_STATUS,
-                                  SCBP_CAN_FLAG_STREAM_DATA, payload,
+    srp_wire_write_f32_le(payload, voltage);
+    (void)s3_service_send_message(SRP_PRIORITY_TELEMETRY,
+                                  SRP_MSG_ID_POWER_STATUS,
+                                  SRP_FLAG_STREAM_DATA, payload,
                                   sizeof(payload));
 }
 
 static void motor_board_log_snapshot(void)
 {
     char line[SMARTCAR_LOG_MAX_PAYLOAD + 1U];
+    float voltage;
 
-    if (s_have_battery) {
+    if (motor_board_get_battery_voltage(&voltage)) {
         (void)snprintf(line, sizeof(line), "[MOTOR_BOARD] Battery=%.2fV",
-                       (double)s_latest_battery.battery_voltage);
+                       (double)voltage);
         motor_board_log(line);
+    } else if (s_have_battery) {
+        motor_board_log("[MOTOR_BOARD] Battery=STALE");
     }
     if (s_have_mtep) {
         (void)snprintf(line, sizeof(line),
@@ -681,7 +1040,8 @@ static void motor_board_run_sequence(TickType_t now)
         sent = MB_Protocol_SendPwm(0, 0, 0, 0);
         motor_board_log_send("$pwm:0,0,0,0#", sent);
         if (sent) {
-            s_sequence_step = MB_SEQUENCE_MTYPE;
+            s_control_state = MB_CONTROL_CONFIGURING;
+            s_sequence_step = MB_SEQUENCE_READ_FLASH;
             s_next_sequence_tick = now + pdMS_TO_TICKS(MB_TASK_SEQUENCE_GAP_MS);
         } else {
             s_next_sequence_tick =
@@ -691,6 +1051,15 @@ static void motor_board_run_sequence(TickType_t now)
     case MB_SEQUENCE_MTYPE:
         sent = MB_Protocol_SendMotorType(MB_520_MOTOR_TYPE);
         motor_board_log_send("$mtype:1#", sent);
+        if (sent) {
+            (void)motor_board_wait_for_response(MB_WAIT_CONFIG_OK, now);
+        } else {
+            motor_board_enter_failed("tx_drop");
+        }
+        break;
+    case MB_SEQUENCE_DEADZONE:
+        sent = MB_Protocol_SendDeadzone(MB_520_DEAD_ZONE);
+        motor_board_log_send("$deadzone:1600#", sent);
         if (sent) {
             (void)motor_board_wait_for_response(MB_WAIT_CONFIG_OK, now);
         } else {
@@ -746,9 +1115,19 @@ static void motor_board_run_sequence(TickType_t now)
         sent = MB_Protocol_SendUpload(false, true, true);
         motor_board_log_send("$upload:0,1,1#", sent);
         if (sent) {
-            (void)motor_board_wait_for_response(MB_WAIT_UPLOAD_RESPONSE, now);
+            s_control_state = MB_CONTROL_WAIT_FEEDBACK;
+            s_sequence_step = MB_SEQUENCE_WAIT_FEEDBACK;
+            s_feedback_deadline = now + pdMS_TO_TICKS(MB_TASK_FEEDBACK_TIMEOUT_MS);
+            s_feedback_valid_count = 0U;
+            s_feedback_first_seen = false;
+            s_mspd_rx_timestamp_valid = false;
         } else {
             motor_board_enter_failed("tx_drop");
+        }
+        break;
+    case MB_SEQUENCE_WAIT_FEEDBACK:
+        if (tick_due(now, s_feedback_deadline)) {
+            motor_board_restart_link_probe(now, "feedback_timeout");
         }
         break;
     case MB_SEQUENCE_RUNNING:
@@ -767,13 +1146,22 @@ void motor_board_task(void *argument)
     MB_Transport_ClearRx();
     s_sequence_step = MB_SEQUENCE_LINK_PROBE;
     s_wait_response = MB_WAIT_NONE;
+    s_control_state = MB_CONTROL_LOCKED;
     s_have_battery = false;
     s_have_mtep = false;
     s_have_mspd = false;
     s_have_mall = false;
     s_latest_raw[0] = '\0';
     s_link_probe_attempts = 0U;
-    s_motion_forced_stop = false;
+    s_motion_forced_stop = true;
+    s_last_mspd_timestamp_us = 0U;
+    s_mspd_timestamp_valid = false;
+    s_last_mspd_rx_timestamp_us = 0U;
+    s_mspd_rx_timestamp_valid = false;
+    s_feedback_valid_count = 0U;
+    s_feedback_first_seen = false;
+    s_have_logged_pwm = false;
+    (void)memset(s_last_logged_pwm, 0, sizeof(s_last_logged_pwm));
     now = xTaskGetTickCount();
     s_next_sequence_tick = now;
     s_next_report_tick = now + pdMS_TO_TICKS(MB_TASK_REPORT_PERIOD_MS);
@@ -782,6 +1170,11 @@ void motor_board_task(void *argument)
     s_next_power_status_tick = now + pdMS_TO_TICKS(MB_TASK_POWER_STATUS_PERIOD_MS);
     (void)memset(s_target_wheel_speed, 0, sizeof(s_target_wheel_speed));
     (void)memset(s_actual_wheel_speed, 0, sizeof(s_actual_wheel_speed));
+    s_config_pending_mask = 0U;
+    s_flash_verify_required = false;
+    s_feedback_deadline = now;
+    s_battery_timestamp_us = 0U;
+    s_battery_timestamp_valid = false;
     for (size_t index = 0U; index < MB_WHEEL_COUNT; ++index) {
         s_wheel_ramp[index].current_target = 0.0f;
         s_wheel_ramp[index].max_accel = WHEEL_RAMP_MAX_ACCEL;
@@ -797,6 +1190,7 @@ void motor_board_task(void *argument)
             motor_board_update_pid(&frame);
             now = xTaskGetTickCount();
         }
+        motor_board_check_mspd_watchdog(now);
         motor_board_run_sequence(now);
         if (tick_due(now, s_next_wheel_status_tick)) {
             s_next_wheel_status_tick = now + pdMS_TO_TICKS(MB_TASK_WHEEL_STATUS_PERIOD_MS);

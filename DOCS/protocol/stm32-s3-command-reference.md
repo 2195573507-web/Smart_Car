@@ -1,4 +1,9 @@
-# STM32-S3 SCBP-CAN Command Reference
+# STM32-S3 SCBP-CAN Command Reference (Deprecated)
+
+> Deprecated historical record. The active UART contract is SRP v4. Read
+> [`../SRP_v4_Spec.md`](../SRP_v4_Spec.md) and
+> [`../Integration_Manual.md`](../Integration_Manual.md). Do not use the
+> SCBP-CAN IDs or build commands below for new code.
 
 Status: `CONFIRMED` for the source contract inspected on 2026-08-21.
 
@@ -132,13 +137,18 @@ means no physical or end-to-end runtime capture has been performed.
 | `ACK` | `0x005` | Both | `IS_ACK` | 4 B | Shared link consumes exact correlation |
 | `ERROR` | `0x006` | Both | `IS_ERROR` | 4 B | Shared link completes pending transaction as remote error |
 | `BOOT_READY` | `0x007` | STM -> S3 | `ACK_REQUIRED` | 2 B | STM retries while waiting; S3 admits expected wait-sync state |
-| `WHEEL_SPEED_CMD` | `0x110` | S3 -> STM | `ACK_REQUIRED` | 16 B, four f32 LE | STM validates, updates M1=RR/M2=RF/M3=LR/M4=LF targets, and ACKs |
+| `WHEEL_SPEED_CMD` | `0x110` | S3 -> STM | `ACK_REQUIRED`; all-zero stop uses `STREAM_DATA` | 16 B, four f32 LE | STM validates, updates all four raw targets in wheel-independent mode, and ACKs nonzero transactions; the zero stop bypasses pending ACK slots |
 | `PID_PARAMS_CMD` | `0x111` | S3 -> STM | `ACK_REQUIRED` | 16 B, four f32 LE | STM validates and atomically updates all four PID/Ramp instances, then ACKs |
+| `WHEEL_SPEED_SINGLE_CMD` | `0x112` | S3 -> STM | `ACK_REQUIRED` | 5 B, wheel_id u8 + f32 LE | Enters wheel-independent mode and updates only the selected raw target |
+| `MASTER_SPEED_CMD` | `0x113` | S3 -> STM | `ACK_REQUIRED` | 4 B, scale f32 LE | Updates MasterScale in the range 0..4 without changing raw targets |
+| `CHASSIS_SPEED_CMD` | `0x114` | S3 -> STM | `ACK_REQUIRED` | 16 B, base_speed f32 LE + target_yaw_rate f32 LE + 8 B zero reserved | Enters chassis-diff mode and runs HEADING control when Primary IMU is valid |
 | `ATTITUDE` | `0x201` | STM -> S3 | `STREAM_DATA` | 80 B | STM sends schema 2; S3 validates and relays App type `0x11` |
 | `IMU_CAL_STATUS` | `0x202` | STM -> S3 | `STREAM_DATA` | 11 B | STM sends lifecycle status; S3 relays App type `0x12` |
 | `IMU_TELEMETRY` | `0x207` | STM -> S3 | `STREAM_DATA` | 30 B | STM sends one frame per sensor; S3 relays App type `0x27` |
 | `POWER_STATUS` | `0x209` | STM -> S3 | `STREAM_DATA` | 4 B, battery voltage f32 LE | STM emits latest finite MotorBoard voltage; S3 relays App type `0x1C` |
 | `WHEEL_SPEED_STATUS` | `0x210` | STM -> S3 | `STREAM_DATA` | 16 B, four f32 LE | STM emits calibrated actual wheel speeds every 50 ms; S3 relays App type `0x16` |
+| `CHASSIS_STATE` | `0x211` | STM -> S3 | `STREAM_DATA` | 24 B schema 1 | STM emits wheel-speed plus Primary-Yaw odometry and local safety state every 50 ms; S3 validates and relays App type `0x29` |
+| `WHEEL_CONTROL_STATUS` | `0x212` | STM -> S3 | `STREAM_DATA` | 44 B schema 1 | STM emits mode, MasterScale, raw targets, and actual speeds every 50 ms; S3 relays App type `0x2C` |
 | `RADAR_STATUS` | `0x301` | S3 -> STM and S3 -> App | `STREAM_DATA` | 2 B | S3 emits once per second while radar runs; current STM service has no consumer branch |
 | `RADAR_PWM_READY` | `0x302` | S3 -> STM | `ACK_REQUIRED` | 1 B | S3 sends zero PWM; STM admits only during static calibration |
 | `LOG` | `0x3F0` | STM -> S3 | `STREAM_DATA` | 8 B header + text | S3 validates and converts to separate log notification |
@@ -214,8 +224,11 @@ offset 12: M4 LF target speed   f32 LE, mm/s
 ```
 
 The receiver rejects non-finite values and any length other than 16 bytes.
-The STM command watchdog clears all four targets after 1000 ms without a
-valid command.
+Nonzero targets are ACK-required transactions. An all-zero target is the
+explicit safety stop and uses a realtime non-transactional frame so it cannot
+wait for a pending ACK slot; the App ACK is emitted after S3 accepts the
+transport send. The STM command watchdog clears all four targets after 1000 ms
+without a valid command.
 
 ### `PID_PARAMS_CMD`, 16 bytes
 
@@ -242,6 +255,72 @@ offset 12: M4 LF actual speed   f32 LE, mm/s
 
 The STM emits this stream every 50 ms after applying the fixed motor-board
 polarity map `(+1, -1, +1, +1)`.
+
+### `WHEEL_SPEED_SINGLE_CMD`, 5 bytes
+
+```text
+offset 0: wheel_id u8: 0=RR, 1=RF, 2=LR, 3=LF
+offset 1: raw target speed f32 LE, mm/s, absolute value <= 1000
+```
+
+This command enters `MODE_WHEEL_INDEPENDENT`, suspends HEADING control, and
+updates only the selected raw target. `WHEEL_SPEED_CMD` uses the same mode and
+updates all four raw targets while retaining the current MasterScale.
+
+### `MASTER_SPEED_CMD`, 4 bytes
+
+```text
+offset 0: MasterScale f32 LE, range 0..4
+```
+
+The final PID target is `raw_target[i] * MasterScale`. Raw targets are retained.
+
+### `CHASSIS_SPEED_CMD`, 16 bytes
+
+```text
+offset 0: base_speed       f32 LE, mm/s
+offset 4: target_yaw_rate  f32 LE, rad/s
+offset 8..15: reserved = 0.0 (all eight bytes zero)
+```
+
+The STM derives right-wheel targets as
+`base_speed + 0.5 * target_yaw_rate * track_width_mm` and left-wheel targets
+as `base_speed - 0.5 * target_yaw_rate * track_width_mm`, then enters
+`MODE_CHASSIS_DIFF`. With a valid Primary IMU the runtime calls HEADING control;
+when Primary is invalid it keeps the open-loop differential targets and logs
+`[WARN] Heading bypassed: IMU invalid`.
+
+### `WHEEL_CONTROL_STATUS`, 44 bytes
+
+```text
+offset 0: schema u8 = 1
+offset 1: mode u8: 0=MODE_CHASSIS_DIFF, 1=MODE_WHEEL_INDEPENDENT
+offset 2..3: reserved = 0
+offset 4: timestamp_ms u32 LE
+offset 8: MasterScale f32 LE
+offset 12: raw_target[RR,RF,LR,LF] four f32 LE
+offset 28: actual_speed[RR,RF,LR,LF] four f32 LE
+```
+
+### `CHASSIS_STATE`, 24 bytes
+
+```text
+offset 0:  schema        u8 = 1
+offset 1:  flags         bit 0 attitude safety fused; bit 1 heading lock;
+                         bit 2 odometry valid; bit 3 attitude startup ready
+offset 2:  reserved      u16 LE = 0
+offset 4:  timestamp_ms  u32 LE
+offset 8:  x_mm          f32 LE
+offset 12: y_mm          f32 LE
+offset 16: yaw_deg       f32 LE
+offset 20: total_dist_m  f32 LE
+```
+
+CM7 integrates the four calibrated `MSPD` actual speeds over 50 ms and uses
+Primary DualAHRS Yaw to project the body-forward increment. It does not infer
+distance from unscaled `MTEP` pulse counts. S3 rejects any other schema,
+nonzero reserved bytes, reserved flag bits, invalid length, or non-finite
+float before constructing the App BLE `0x29` frame.
 
 ### `POWER_STATUS`, 4 bytes
 
@@ -418,8 +497,11 @@ acceptance without matching flash and capture steps.
   the STM-S3 UART; it is not a compatibility mode of SCBP-CAN.
 - App control/telemetry uses `AA | 01 | TYPE | LEN_LE | PAYLOAD | CRC16-MODBUS_LE | 55`.
 - App BLE types are `0x15=WHEEL_SPEED_CMD` (16 B), `0x16=WHEEL_SPEED_STATUS`
-  (16 B), `0x1A=RADAR_STATUS` (2 B), `0x1B=RADAR_PWM_SET` (1 B), and
-  `0x1C=POWER_STATUS` (4 B), `0x1D=PID_PARAMS_CMD` (16 B).
+  (16 B), `0x1A=RADAR_STATUS` (2 B), `0x1B=RADAR_PWM_SET` (1 B),
+  `0x1C=POWER_STATUS` (4 B), `0x1D=PID_PARAMS_CMD` (16 B),
+  `0x29=CHASSIS_STATE` (24 B), `0x2A=WHEEL_SPEED_SINGLE_CMD` (5 B),
+  `0x2B=MASTER_SPEED_CMD` (4 B), `0x2C=WHEEL_CONTROL_STATUS` (44 B), and
+  `0x2D=CHASSIS_SPEED_CMD` (16 B).
 - SmartCar log notification uses a separate `AA 55 01 ... CRC16` envelope.
 - Historical `SC_TYPE_*`, PING/PONG, `0x0200`, `0x0208`, `0x0401`, `0xF000`,
   legacy 30-byte ATTITUDE, and old bias/result payloads are `DEPRECATED` or

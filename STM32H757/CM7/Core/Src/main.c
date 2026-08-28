@@ -30,8 +30,11 @@
 #include "motor_board_task.h"
 #include "motor_board_transport_uart.h"
 #include "attitude_startup_coordinator.h"
+#include "chassis_task.h"
+#include "cm7_raw_diag.h"
 
 #include <stdio.h>
+#include <string.h>
 
 #include "FreeRTOS.h"
 #include "task.h"
@@ -39,6 +42,24 @@
 #ifndef SMARTCAR_MOTOR_BOARD_ONLY
 #define SMARTCAR_MOTOR_BOARD_ONLY 0
 #endif
+
+#ifndef SMARTCAR_SCHEDULER_PROBE
+#define SMARTCAR_SCHEDULER_PROBE 0
+#endif
+
+#ifndef SMARTCAR_RAW_DIAGNOSTICS
+#define SMARTCAR_RAW_DIAGNOSTICS 0
+#endif
+
+#define SMARTCAR_SCHEDULER_PROBE_STACK_WORDS UINT16_C(512)
+#define SMARTCAR_SCHEDULER_PROBE_PERIOD_MS UINT32_C(50)
+#define SMARTCAR_SCHEDULER_PROBE_LOG_PERIOD_MS UINT32_C(1000)
+#define SMARTCAR_SCHEDULER_PROBE_TEXT "SCHEDULER_PROBE"
+#define SMARTCAR_SCHEDULER_PROBE_TEXT_LENGTH \
+  ((uint16_t)(sizeof(SMARTCAR_SCHEDULER_PROBE_TEXT) - 1U))
+#define SMARTCAR_SCHEDULER_PROBE_PAYLOAD_LENGTH \
+  ((uint16_t)(LOG_SERVICE_PAYLOAD_HEADER_SIZE + \
+              SMARTCAR_SCHEDULER_PROBE_TEXT_LENGTH))
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -103,6 +124,12 @@ static void report_retained_fault(void)
     return;
   }
   record = fault_record_get();
+#if SMARTCAR_RAW_DIAGNOSTICS
+  cm7_raw_diag_marker("[ERROR] RETAINED_FAULT");
+  cm7_raw_diag_value("FAULT_EXCEPTION", record->exception);
+  cm7_raw_diag_value("FAULT_PC", record->pc);
+  cm7_raw_diag_value("FAULT_CFSR", record->cfsr);
+#endif
   LOG_ERROR("FAULT DETECTED");
   (void)snprintf(line, sizeof(line), "PC=0x%08lX",
                  (unsigned long)record->pc);
@@ -138,6 +165,183 @@ static void report_retained_rtos_health(void)
   LOG_ERROR(line);
   rtos_health_clear();
 }
+
+static uint8_t scheduler_task_present(const char *name)
+{
+  return (name != NULL && xTaskGetHandle(name) != NULL) ? 1U : 0U;
+}
+
+/* This snapshot is deliberately emitted before the scheduler starts. It
+ * distinguishes a pre-start task-admission/heap failure from a task that was
+ * admitted but never scheduled. */
+static void scheduler_log_task_admission(void)
+{
+  char line[SMARTCAR_LOG_MAX_PAYLOAD + 1U];
+
+  (void)snprintf(line, sizeof(line),
+                 "RTOS_ADMISSION sched=%ld heap=%lu min=%lu "
+                 "log=%u uart=%u s3=%u imu=%u imulog=%u gate=%u",
+                 (long)xTaskGetSchedulerState(),
+                 (unsigned long)xPortGetFreeHeapSize(),
+                 (unsigned long)xPortGetMinimumEverFreeHeapSize(),
+                 (unsigned)scheduler_task_present("logger"),
+                 (unsigned)scheduler_task_present("srp_uart"),
+                 (unsigned)scheduler_task_present("s3_service"),
+                 (unsigned)scheduler_task_present("imu_task"),
+                 (unsigned)scheduler_task_present("imu_data_logger"),
+                 (unsigned)scheduler_task_present("attitude_gate"));
+#if SMARTCAR_RAW_DIAGNOSTICS
+  cm7_raw_diag_marker("RTOS_ADMISSION");
+  cm7_raw_diag_value("ADMISSION_HEAP", (uint32_t)xPortGetFreeHeapSize());
+  cm7_raw_diag_value("ADMISSION_MIN_HEAP",
+                     (uint32_t)xPortGetMinimumEverFreeHeapSize());
+  cm7_raw_diag_value("ADMISSION_SCHEDULER", (uint32_t)xTaskGetSchedulerState());
+#endif
+  LOG_INFO(line);
+}
+
+#if SMARTCAR_SCHEDULER_PROBE
+static TaskHandle_t s_scheduler_probe_task;
+static uint8_t s_scheduler_probe_payload[SMARTCAR_SCHEDULER_PROBE_PAYLOAD_LENGTH];
+static uint32_t s_scheduler_probe_send_count;
+static uint32_t s_scheduler_probe_send_failures;
+
+static HAL_StatusTypeDef scheduler_probe_send_once(void)
+{
+  const uint32_t timestamp = HAL_GetTick();
+  int result;
+
+  s_scheduler_probe_payload[0] = 0U; /* STM32 source */
+  s_scheduler_probe_payload[1] = SMARTCAR_LOG_LEVEL_INFO;
+  s_scheduler_probe_payload[2] = (uint8_t)(timestamp & 0xFFU);
+  s_scheduler_probe_payload[3] = (uint8_t)((timestamp >> 8U) & 0xFFU);
+  s_scheduler_probe_payload[4] = (uint8_t)((timestamp >> 16U) & 0xFFU);
+  s_scheduler_probe_payload[5] = (uint8_t)((timestamp >> 24U) & 0xFFU);
+  s_scheduler_probe_payload[6] =
+      (uint8_t)(SMARTCAR_SCHEDULER_PROBE_TEXT_LENGTH & 0xFFU);
+  s_scheduler_probe_payload[7] =
+      (uint8_t)(SMARTCAR_SCHEDULER_PROBE_TEXT_LENGTH >> 8U);
+  (void)memcpy(&s_scheduler_probe_payload[LOG_SERVICE_PAYLOAD_HEADER_SIZE],
+               SMARTCAR_SCHEDULER_PROBE_TEXT,
+               SMARTCAR_SCHEDULER_PROBE_TEXT_LENGTH);
+
+  /* Preserve the quiet pre-sync USART2 policy.  Before CMD_SYNC_REQ, the
+   * probe uses the independent USART1 raw marker and is not a failed SRP TX;
+   * once synchronized it exercises the normal SRP LOG route. */
+  if (s3_service_is_synced() == 0U) {
+#if SMARTCAR_RAW_DIAGNOSTICS
+    cm7_raw_diag_once("RTOS_PROBE_PRE_SYNC");
+#endif
+    return HAL_OK;
+  }
+  result = s3_service_send_log(s_scheduler_probe_payload,
+                               (uint8_t)sizeof(s_scheduler_probe_payload));
+  if (result != 0) {
+    ++s_scheduler_probe_send_failures;
+    return UART_TX_FAIL;
+  }
+  ++s_scheduler_probe_send_count;
+  return HAL_OK;
+}
+
+static void scheduler_probe_log_runtime(uint32_t first_run)
+{
+  char line[SMARTCAR_LOG_MAX_PAYLOAD + 1U];
+
+  if (first_run != 0U) {
+    (void)snprintf(line, sizeof(line),
+                   "RTOS_PROBE first ipsr=%lu sched=%ld basepri=%lu "
+                   "heap=%lu tasks=%u%u%u%u%u%u",
+                   (unsigned long)__get_IPSR(),
+                   (long)xTaskGetSchedulerState(),
+                   (unsigned long)__get_BASEPRI(),
+                   (unsigned long)xPortGetFreeHeapSize(),
+                   (unsigned)scheduler_task_present("scheduler_probe"),
+                   (unsigned)scheduler_task_present("logger"),
+                   (unsigned)scheduler_task_present("srp_uart"),
+                   (unsigned)scheduler_task_present("s3_service"),
+                   (unsigned)scheduler_task_present("imu_task"),
+                   (unsigned)scheduler_task_present("attitude_gate"));
+#if SMARTCAR_RAW_DIAGNOSTICS
+    cm7_raw_diag_marker("RTOS_PROBE_FIRST");
+    cm7_raw_diag_value("PROBE_SYSTICK", g_cm7_systick_count);
+    cm7_raw_diag_value("PROBE_PENDSV", g_cm7_pendsv_count);
+    cm7_raw_diag_value("PROBE_SVC", g_cm7_svc_count);
+#endif
+  } else {
+    (void)snprintf(line, sizeof(line),
+                   "RTOS_PROBE alive=%lu fail=%lu heap=%lu",
+                   (unsigned long)s_scheduler_probe_send_count,
+                   (unsigned long)s_scheduler_probe_send_failures,
+                   (unsigned long)xPortGetFreeHeapSize());
+#if SMARTCAR_RAW_DIAGNOSTICS
+    cm7_raw_diag_value("PROBE_SYSTICK", g_cm7_systick_count);
+    cm7_raw_diag_value("PROBE_PENDSV", g_cm7_pendsv_count);
+#endif
+  }
+  LOG_INFO(line);
+}
+
+static void scheduler_probe_task(void *argument)
+{
+  uint32_t first_run = 1U;
+  uint32_t last_log_ms = HAL_GetTick();
+
+  (void)argument;
+#if SMARTCAR_RAW_DIAGNOSTICS
+  cm7_raw_diag_task_enter("scheduler_probe");
+#endif
+  for (;;) {
+    (void)scheduler_probe_send_once();
+    if (first_run != 0U) {
+      scheduler_probe_log_runtime(1U);
+      first_run = 0U;
+      last_log_ms = HAL_GetTick();
+    } else if ((uint32_t)(HAL_GetTick() - last_log_ms) >=
+               SMARTCAR_SCHEDULER_PROBE_LOG_PERIOD_MS) {
+      last_log_ms = HAL_GetTick();
+      scheduler_probe_log_runtime(0U);
+    }
+#if SMARTCAR_RAW_DIAGNOSTICS
+    cm7_raw_diag_once("SCHEDULER_PROBE_BEFORE_DELAY");
+#endif
+    vTaskDelay(pdMS_TO_TICKS(SMARTCAR_SCHEDULER_PROBE_PERIOD_MS));
+#if SMARTCAR_RAW_DIAGNOSTICS
+    cm7_raw_diag_once("SCHEDULER_PROBE_AFTER_DELAY");
+#endif
+  }
+}
+
+static void scheduler_probe_start(void)
+{
+  BaseType_t status;
+
+  s_scheduler_probe_task = NULL;
+  s_scheduler_probe_send_count = 0U;
+  s_scheduler_probe_send_failures = 0U;
+  status = xTaskCreate(scheduler_probe_task, "scheduler_probe",
+                       SMARTCAR_SCHEDULER_PROBE_STACK_WORDS, NULL,
+                       configMAX_PRIORITIES - 1U, &s_scheduler_probe_task);
+  if (status != pdPASS) {
+    s_scheduler_probe_task = NULL;
+#if SMARTCAR_RAW_DIAGNOSTICS
+    cm7_raw_diag_marker("RTOS_PROBE_CREATE_FAIL");
+    cm7_raw_diag_value("PROBE_CREATE_HEAP",
+                       (uint32_t)xPortGetFreeHeapSize());
+#endif
+    LOG_ERROR("RTOS_PROBE task create failed");
+    boot_log("RTOS_PROBE", "CREATE_FAIL");
+  } else {
+#if SMARTCAR_RAW_DIAGNOSTICS
+    cm7_raw_diag_marker("RTOS_PROBE_CREATE_OK");
+    cm7_raw_diag_value("PROBE_CREATE_HEAP",
+                       (uint32_t)xPortGetFreeHeapSize());
+#endif
+    LOG_INFO("RTOS_PROBE task create OK priority=max-1");
+    boot_log("RTOS_PROBE", "CREATE_OK");
+  }
+}
+#endif
 
 /* USER CODE END 0 */
 
@@ -187,6 +391,18 @@ int main(void)
   boot_log("GPIO", "OK");
   /* USART1 owns PA9/PA10 for the CH340 debug adapter. */
   MX_USART1_UART_Init();
+#if SMARTCAR_RAW_DIAGNOSTICS
+  cm7_raw_diag_marker("USART1_READY");
+#endif
+  /* USART2 is owned by uart_link.c rather than a CubeMX global huart2. */
+  uart_link_init();
+#if SMARTCAR_RAW_DIAGNOSTICS
+  cm7_raw_diag_marker(uart_link_is_ready() != 0U
+                          ? "UART2_RX_ARM_OK"
+                          : "UART2_RX_ARM_FAIL");
+  cm7_raw_diag_value("UART2_RX_ARM_PRIMASK", __get_PRIMASK());
+  cm7_raw_diag_value("UART2_RX_ARM_BASEPRI", __get_BASEPRI());
+#endif
 #if !SMARTCAR_MOTOR_BOARD_ONLY
   MX_I2C4_Init();
   MX_TIM1_Init();
@@ -197,7 +413,6 @@ int main(void)
   /* USART6 is initialized after all timer/PWM setup so no later peripheral
    * initialization can rewrite PC6/PC7. */
   MX_USART6_UART_Init();
-  uart_link_init();
   MB_Transport_Init();
   MB_Protocol_Init();
   /* Establish the physical zero-PWM gate before any RTOS task can accept a
@@ -224,12 +439,33 @@ int main(void)
   boot_log("SYSTEM", "READY");
   uart_link_task_start();
   s3_service_start();
+#if !SMARTCAR_MOTOR_BOARD_ONLY
+  chassis_task_start();
+#endif
 #if SMARTCAR_MOTOR_BOARD_ONLY
   motor_board_task_start();
 #else
   attitude_startup_coordinator_start();
 #endif
+  scheduler_log_task_admission();
+#if SMARTCAR_SCHEDULER_PROBE
+  scheduler_probe_start();
+#endif
+  boot_log("RTOS", "SCHEDULER_START");
+#if SMARTCAR_RAW_DIAGNOSTICS
+  cm7_raw_diag_marker("SCHEDULER_START");
+#endif
   vTaskStartScheduler();
+  /* Reaching here means the portable scheduler returned instead of entering
+   * the first task. Keep the marker for a retained/early-log diagnosis. */
+#if SMARTCAR_RAW_DIAGNOSTICS
+  cm7_raw_diag_marker("[ERROR] Scheduler returned! Heap exhausted?");
+  cm7_raw_diag_value("SCHEDULER_RETURNED_HEAP", (uint32_t)xPortGetFreeHeapSize());
+  for (;;) {
+    __asm volatile("wfi");
+  }
+#endif
+  boot_log("RTOS", "SCHEDULER_RETURNED");
 
   /* USER CODE END 2 */
 

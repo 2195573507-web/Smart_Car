@@ -31,6 +31,10 @@ The project is in infrastructure initialization. The authorized deliverables are
 | IOS_APP | [IOS_ARCHITECTURE.md](IOS_APP/IOS_ARCHITECTURE.md) | Mobile responsibility boundary |
 | System | [SMART_CAR_SYSTEM_ARCHITECTURE.md](SMART_CAR_SYSTEM_ARCHITECTURE.md) | IOS_APP/S3 L1-L3 system ownership and data flows |
 | Protocol | [SMART_CAR_PROTOCOL.md](SMART_CAR_PROTOCOL.md) | APP-S3 and S3-STM32 versioned frame target |
+| Protocol | [app-ble-protocol-v2.md](protocol/app-ble-protocol-v2.md) | Canonical App-BLE V1/V2 GATT, session, ACK, and safety boundary |
+| Protocol | [SRP_v4_Spec.md](SRP_v4_Spec.md) | Active STM32-S3 SRP v4 wire contract |
+| Protocol | [UART_Config_Guide.md](UART_Config_Guide.md) | UART2 DMA/IDLE, queue isolation and baud changes |
+| Protocol | [Integration_Manual.md](Integration_Manual.md) | SRP message extension and verification procedure |
 | IOS_APP | [IOS_APP_ARCHITECTURE.md](IOS_APP/IOS_APP_ARCHITECTURE.md) | SwiftUI, BLE/Wi-Fi, control modes, and L3 boundary |
 | IOS_APP | [IOS_CODE_STRUCTURE.md](IOS_CODE_STRUCTURE.md) | Implemented Swift Package source tree and dependency boundaries |
 | IOS_APP | [IOS_DEVELOPMENT_LOG.md](IOS_DEVELOPMENT_LOG.md) | L1 scaffold delivery record and verification limits |
@@ -101,11 +105,13 @@ The project is in infrastructure initialization. The authorized deliverables are
 
 ## Source-of-Truth Rules
 
-### 2026-07-30: iOS L1 architecture scaffold
+### 2026-07-30: iOS L1 architecture scaffold (historical)
 
-- Initialized the `IOS_APP/` Swift Package source tree with SwiftUI/MVVM
-  surfaces, a CoreBluetooth transport adapter, protocol packet models, and
-  vehicle status state.
+- Initialized the historical `IOS_APP/` Swift Package source tree with
+  SwiftUI/MVVM surfaces, a CoreBluetooth transport adapter, protocol packet
+  models, and vehicle status state. That tree was removed on 2026-08-23.
+- The current iOS implementation lives under `IOS-APP/`; its command, mode,
+  telemetry, and build evidence is recorded in `.planning/ios-app/`.
 - The implementation remains a software scaffold. BLE UUIDs, S3 admission,
   telemetry decoding, hardware stop behavior, and vehicle movement are not
   verified. Automatic navigation, SLAM, radar display, ROS2, and AI-agent

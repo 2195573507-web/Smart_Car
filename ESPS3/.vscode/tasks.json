@@ -4,13 +4,13 @@
     {
       "label": "ESP-IDF Clean stale OpenOCD",
       "type": "shell",
-      "command": "pkill -f openocd || true; for p in 3333 4444 6666; do PIDS=$(lsof -tiTCP:$p 2>/dev/null); [ -n \"$PIDS\" ] && kill -9 $PIDS || true; done; pkill -f riscv32-esp || true",
+      "command": "pkill -f openocd || true; for p in 3333 4444 6666; do PIDS=$(lsof -tiTCP:$p 2>/dev/null); [ -n \"$PIDS\" ] && kill -9 $PIDS || true; done; pkill -f xtensa-esp || true",
       "problemMatcher": []
     },
     {
-      "label": "ESP-IDF Build ESP32-C5",
+      "label": "ESP-IDF Build ESP32-S3",
       "type": "shell",
-      "command": "cd \"${workspaceFolder}\" && . /Users/zhiqin/.espressif/v5.5.4/esp-idf/export.sh && export PATH=\"/opt/homebrew/bin:/opt/homebrew/sbin:$PATH\" && idf.py set-target esp32c5 && idf.py build",
+      "command": "cd \"${workspaceFolder}\" && . /Users/zhiqin/.espressif/v5.5.4/esp-idf/export.sh && export PATH=\"/opt/homebrew/bin:/opt/homebrew/sbin:$PATH\" && idf.py set-target esp32s3 && idf.py build",
       "group": {
         "kind": "build",
         "isDefault": true
@@ -18,33 +18,33 @@
       "problemMatcher": []
     },
     {
-      "label": "ESP-IDF Clean Build ESP32-C5",
+      "label": "ESP-IDF Clean Build ESP32-S3",
       "type": "shell",
-      "command": "cd \"${workspaceFolder}\" && . /Users/zhiqin/.espressif/v5.5.4/esp-idf/export.sh && export PATH=\"/opt/homebrew/bin:/opt/homebrew/sbin:$PATH\" && rm -rf build && idf.py set-target esp32c5 && idf.py build",
+      "command": "cd \"${workspaceFolder}\" && . /Users/zhiqin/.espressif/v5.5.4/esp-idf/export.sh && export PATH=\"/opt/homebrew/bin:/opt/homebrew/sbin:$PATH\" && rm -rf build && idf.py set-target esp32s3 && idf.py build",
       "problemMatcher": []
     },
     {
-      "label": "ESP-IDF Flash ESP32-C5",
+      "label": "ESP-IDF Flash ESP32-S3",
       "type": "shell",
       "dependsOn": [
         "ESP-IDF Clean stale OpenOCD"
       ],
-      "command": "cd \"${workspaceFolder}\" && . /Users/zhiqin/.espressif/v5.5.4/esp-idf/export.sh && export PATH=\"/opt/homebrew/bin:/opt/homebrew/sbin:$PATH\" && PORT=$(ls /dev/cu.usbmodem* 2>/dev/null | head -n 1) && [ -n \"$PORT\" ] && idf.py -p \"$PORT\" flash",
+      "command": "cd \"${workspaceFolder}\" && . /Users/zhiqin/.espressif/v5.5.4/esp-idf/export.sh && export PATH=\"/opt/homebrew/bin:/opt/homebrew/sbin:$PATH\" && idf.py -p /dev/cu.usbmodem5B901601171 flash",
       "problemMatcher": []
     },
     {
-      "label": "ESP-IDF Monitor ESP32-C5",
+      "label": "ESP-IDF Monitor ESP32-S3",
       "type": "shell",
-      "command": "cd \"${workspaceFolder}\" && . /Users/zhiqin/.espressif/v5.5.4/esp-idf/export.sh && export PATH=\"/opt/homebrew/bin:/opt/homebrew/sbin:$PATH\" && PORT=$(ls /dev/cu.usbmodem* 2>/dev/null | head -n 1) && [ -n \"$PORT\" ] && idf.py -p \"$PORT\" monitor",
+      "command": "cd \"${workspaceFolder}\" && . /Users/zhiqin/.espressif/v5.5.4/esp-idf/export.sh && export PATH=\"/opt/homebrew/bin:/opt/homebrew/sbin:$PATH\" && idf.py -p /dev/cu.usbmodem143101 monitor",
       "problemMatcher": []
     },
     {
-      "label": "ESP-IDF Flash Monitor ESP32-C5",
+      "label": "ESP-IDF Flash Monitor ESP32-S3",
       "type": "shell",
       "dependsOn": [
         "ESP-IDF Clean stale OpenOCD"
       ],
-      "command": "cd \"${workspaceFolder}\" && . /Users/zhiqin/.espressif/v5.5.4/esp-idf/export.sh && export PATH=\"/opt/homebrew/bin:/opt/homebrew/sbin:$PATH\" && PORT=$(ls /dev/cu.usbmodem* 2>/dev/null | head -n 1) && [ -n \"$PORT\" ] && idf.py -p \"$PORT\" flash monitor",
+      "command": "cd \"${workspaceFolder}\" && . /Users/zhiqin/.espressif/v5.5.4/esp-idf/export.sh && export PATH=\"/opt/homebrew/bin:/opt/homebrew/sbin:$PATH\" && idf.py -p /dev/cu.usbmodem5B901601171 flash && idf.py -p /dev/cu.usbmodem143101 monitor",
       "problemMatcher": []
     }
   ]

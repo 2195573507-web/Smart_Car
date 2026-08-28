@@ -23,11 +23,14 @@ typedef struct {
     float previous_filtered_feedback;
     float feedback_alpha;
     float output;
+    /* Equivalent feedback LPF time constant in seconds. */
+    float feedback_tau_seconds;
     unsigned char initialized;
 } pid_controller_t;
 
 typedef pid_controller_t PID_Controller_t;
 
+/* dt_seconds is the elapsed time since the previous feedback frame (s). */
 float Ramp_Update(Ramp_Profile_t *ramp, float final_target, float dt_seconds);
 void Ramp_Update_Max_Accel(Ramp_Profile_t *ramp, float max_accel);
 void pid_controller_init(pid_controller_t *pid, float kp, float ki, float kd,
@@ -37,6 +40,7 @@ void pid_controller_reset(pid_controller_t *pid);
 float pid_controller_step_with_feedforward(pid_controller_t *pid,
                                             float target, float actual,
                                             float dt_seconds);
+/* The non-feedforward entry point uses the same dynamic dt contract. */
 float pid_controller_step(pid_controller_t *pid, float target, float actual,
                           float dt_seconds);
 

@@ -9,11 +9,13 @@
 
 #include "bsp_uart.h"
 #include "rtos_health.h"
+#include "s3_service.h"
 
 #define LOG_SERVICE_QUEUE_DEPTH UINT32_C(24)
-#define LOG_SERVICE_TASK_STACK_WORDS UINT32_C(384)
+#define LOG_SERVICE_TASK_STACK_WORDS UINT32_C(512)
 #define LOG_SERVICE_TASK_PRIORITY (tskIDLE_PRIORITY + 1U)
 #define LOG_SERVICE_HEALTH_PERIOD_MS UINT32_C(5000)
+#define LOG_SERVICE_LINK_BACKLOG_DEPTH UINT32_C(16)
 
 #ifndef SMARTCAR_BMI323_DEBUG_ONLY
 #define SMARTCAR_BMI323_DEBUG_ONLY 0
@@ -27,6 +29,40 @@ typedef struct {
 static QueueHandle_t s_log_queue;
 static TaskHandle_t s_log_task;
 static volatile uint32_t s_log_drop_count;
+static log_item_t s_link_backlog[LOG_SERVICE_LINK_BACKLOG_DEPTH];
+static uint8_t s_link_backlog_head;
+static uint8_t s_link_backlog_tail;
+static uint8_t s_link_backlog_count;
+
+static void log_service_backlog_push(const log_item_t *item)
+{
+    if (item == NULL) {
+        return;
+    }
+    if (s_link_backlog_count >= LOG_SERVICE_LINK_BACKLOG_DEPTH) {
+        ++s_log_drop_count;
+        return;
+    }
+    s_link_backlog[s_link_backlog_head] = *item;
+    s_link_backlog_head = (uint8_t)((s_link_backlog_head + 1U) %
+                                    LOG_SERVICE_LINK_BACKLOG_DEPTH);
+    ++s_link_backlog_count;
+}
+
+static void log_service_flush_link_backlog(void)
+{
+    while (s_link_backlog_count != 0U && s3_service_is_synced() != 0U) {
+        const log_item_t *item = &s_link_backlog[s_link_backlog_tail];
+
+        if (bsp_uart_log_write_link_level(item->level, item->text) !=
+            BSP_STATUS_OK) {
+            return;
+        }
+        s_link_backlog_tail = (uint8_t)((s_link_backlog_tail + 1U) %
+                                         LOG_SERVICE_LINK_BACKLOG_DEPTH);
+        --s_link_backlog_count;
+    }
+}
 
 static void log_copy_text(char *destination, size_t capacity, const char *source)
 {
@@ -54,8 +90,17 @@ static void log_service_task(void *argument)
 
     (void)argument;
     for (;;) {
+        log_service_flush_link_backlog();
         if (xQueueReceive(s_log_queue, &item, pdMS_TO_TICKS(250U)) == pdTRUE) {
-            (void)bsp_uart_log_write_link_level(item.level, item.text);
+            /* This task owns the blocking USART1 write. ISR producers only
+             * enqueue text and never contend for the debug UART mutex. */
+            (void)bsp_uart_log_write_level(item.level, item.text, 100U);
+            if (s3_service_is_synced() == 0U) {
+                /* The normal write already attempted USART2 and was gated by
+                 * SRP sync. Keep one bounded copy so startup diagnostics reach
+                 * FFE3 immediately after the session opens. */
+                log_service_backlog_push(&item);
+            }
         }
 
         if ((xTaskGetTickCount() - last_health_tick) >=
@@ -117,6 +162,10 @@ void log_service_init(void)
     s_log_drop_count = 0U;
     s_log_task = NULL;
     s_log_queue = xQueueCreate(LOG_SERVICE_QUEUE_DEPTH, sizeof(log_item_t));
+    (void)memset(s_link_backlog, 0, sizeof(s_link_backlog));
+    s_link_backlog_head = 0U;
+    s_link_backlog_tail = 0U;
+    s_link_backlog_count = 0U;
 }
 
 void log_service_start(void)

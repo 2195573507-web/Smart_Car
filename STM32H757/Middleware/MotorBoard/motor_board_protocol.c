@@ -39,6 +39,7 @@ static uint8_t s_rx_line_overflow;
 static uint8_t s_raw_diagnostic[MB_PROTOCOL_RAW_DIAGNOSTIC_SIZE];
 static uint16_t s_raw_diagnostic_length;
 static uint8_t s_read_flash_active;
+static mb_flash_config_t s_flash_config;
 static mb_protocol_stats_t s_stats;
 
 static char ascii_lower(char value)
@@ -202,6 +203,136 @@ static bool parse_battery(const char *text, float *voltage)
     return true;
 }
 
+static bool parse_uint16_field(const char *text, uint32_t maximum,
+                               uint16_t *value)
+{
+    const char *cursor = skip_spaces(text);
+    char *end = NULL;
+    unsigned long parsed;
+
+    if (cursor == NULL || value == NULL || *cursor == '\0') {
+        return false;
+    }
+    errno = 0;
+    parsed = strtoul(cursor, &end, 10);
+    if (end == cursor || errno == ERANGE || parsed > maximum ||
+        *skip_spaces(end) != '\0') {
+        return false;
+    }
+    *value = (uint16_t)parsed;
+    return true;
+}
+
+static bool parse_float_field(const char *text, float *value)
+{
+    const char *cursor = skip_spaces(text);
+    char *end = NULL;
+    float parsed;
+
+    if (cursor == NULL || value == NULL || *cursor == '\0') {
+        return false;
+    }
+    errno = 0;
+    parsed = strtof(cursor, &end);
+    if (end == cursor || errno == ERANGE || !isfinite(parsed) ||
+        *skip_spaces(end) != '\0') {
+        return false;
+    }
+    *value = parsed;
+    return true;
+}
+
+static bool flash_field_prefix(const char *text, const char *name,
+                               const char **value_text)
+{
+    const size_t name_length = name == NULL ? 0U : strlen(name);
+
+    if (text == NULL || name == NULL || value_text == NULL ||
+        name_length == 0U || !text_starts_with_ci(text, name) ||
+        text[name_length] != ':') {
+        return false;
+    }
+    *value_text = text + name_length + 1U;
+    return true;
+}
+
+static bool protocol_parse_flash_line(const char *text)
+{
+    const char *value_text = NULL;
+    uint32_t field;
+    uint16_t parsed_uint16;
+
+    if (text == NULL) {
+        return false;
+    }
+    if (flash_field_prefix(text, "Motor_type", &value_text)) {
+        field = MB_FLASH_FIELD_MOTOR_TYPE;
+        if ((s_flash_config.fields_present & field) != 0U ||
+            !parse_uint16_field(value_text, 4U, &parsed_uint16) ||
+            parsed_uint16 == 0U) {
+            s_flash_config.invalid = true;
+        } else {
+            s_flash_config.motor_type = (uint8_t)parsed_uint16;
+            s_flash_config.fields_present |= field;
+        }
+        return true;
+    }
+    if (flash_field_prefix(text, "Dead_Zone", &value_text)) {
+        field = MB_FLASH_FIELD_DEAD_ZONE;
+        if ((s_flash_config.fields_present & field) != 0U ||
+            !parse_uint16_field(value_text, 3600U,
+                                &s_flash_config.dead_zone)) {
+            s_flash_config.invalid = true;
+        } else {
+            s_flash_config.fields_present |= field;
+        }
+        return true;
+    }
+    if (flash_field_prefix(text, "Pulse_Line", &value_text)) {
+        field = MB_FLASH_FIELD_PULSE_LINE;
+        if ((s_flash_config.fields_present & field) != 0U ||
+            !parse_uint16_field(value_text, UINT16_MAX,
+                                &s_flash_config.pulse_line) ||
+            s_flash_config.pulse_line == 0U) {
+            s_flash_config.invalid = true;
+        } else {
+            s_flash_config.fields_present |= field;
+        }
+        return true;
+    }
+    if (flash_field_prefix(text, "Pulse_Phase", &value_text)) {
+        field = MB_FLASH_FIELD_PULSE_PHASE;
+        if ((s_flash_config.fields_present & field) != 0U ||
+            !parse_uint16_field(value_text, UINT16_MAX,
+                                &s_flash_config.pulse_phase) ||
+            s_flash_config.pulse_phase == 0U) {
+            s_flash_config.invalid = true;
+        } else {
+            s_flash_config.fields_present |= field;
+        }
+        return true;
+    }
+    if (flash_field_prefix(text, "wheel_diameter", &value_text)) {
+        field = MB_FLASH_FIELD_WHEEL_DIAMETER;
+        if ((s_flash_config.fields_present & field) != 0U ||
+            !parse_float_field(value_text, &s_flash_config.wheel_diameter) ||
+            s_flash_config.wheel_diameter <= 0.0f ||
+            s_flash_config.wheel_diameter > 1000.0f) {
+            s_flash_config.invalid = true;
+        } else {
+            s_flash_config.fields_present |= field;
+        }
+        return true;
+    }
+    if (text_starts_with_ci(text, "read_flash:") ||
+        text_starts_with_ci(text, "Motor_Version:") ||
+        text_starts_with_ci(text, "P:") ||
+        text_starts_with_ci(text, "P ")) {
+        return true;
+    }
+    return false;
+}
+
 static void protocol_format_raw(char *destination, size_t capacity,
                                 const uint8_t *bytes, uint16_t length)
 {
@@ -337,6 +468,10 @@ static mb_frame_type_t decode_payload(const char *payload,
         }
         return MB_FRAME_INVALID;
     }
+    if (line_mode && s_read_flash_active != 0U &&
+        protocol_parse_flash_line(payload)) {
+        return MB_FRAME_FLASH_RAW;
+    }
     if (text_contains_ci(payload, "NACK") ||
         text_contains_ci(payload, "NOK") ||
         text_contains_ci(payload, "ERROR") ||
@@ -348,7 +483,6 @@ static mb_frame_type_t decode_payload(const char *payload,
         text_contains_ci(payload, "ACK") ||
         text_contains_ci(payload, "Set ")) {
         protocol_set_response_status(frame, payload);
-        s_read_flash_active = 0U;
         return MB_FRAME_OK_ACK;
     }
     if (line_mode && s_read_flash_active != 0U) {
@@ -406,6 +540,7 @@ void MB_Protocol_ResetRx(void)
     s_rx_line_overflow = 0U;
     s_raw_diagnostic_length = 0U;
     s_read_flash_active = 0U;
+    (void)memset(&s_flash_config, 0, sizeof(s_flash_config));
     (void)memset(s_rx_payload, 0, sizeof(s_rx_payload));
     (void)memset(s_rx_line, 0, sizeof(s_rx_line));
     (void)memset(s_raw_diagnostic, 0, sizeof(s_raw_diagnostic));
@@ -546,6 +681,11 @@ bool MB_Protocol_SendMotorType(uint8_t motor_type)
     return MB_Protocol_SendUnsigned("mtype", motor_type);
 }
 
+bool MB_Protocol_SendDeadzone(uint16_t dead_zone)
+{
+    return dead_zone <= 3600U && MB_Protocol_SendUnsigned("deadzone", dead_zone);
+}
+
 bool MB_Protocol_SendMagneticLine(uint16_t magnetic_line_count)
 {
     return magnetic_line_count != 0U &&
@@ -574,9 +714,32 @@ bool MB_Protocol_SendReadFlash(void)
     const bool queued = MB_Protocol_SendText("$read_flash#");
 
     if (queued) {
+        (void)memset(&s_flash_config, 0, sizeof(s_flash_config));
         s_read_flash_active = 1U;
     }
     return queued;
+}
+
+void MB_Protocol_EndReadFlash(void)
+{
+    s_read_flash_active = 0U;
+    s_flash_config.complete =
+        !s_flash_config.invalid &&
+        (s_flash_config.fields_present & MB_FLASH_FIELD_REQUIRED_MASK) ==
+            MB_FLASH_FIELD_REQUIRED_MASK;
+}
+
+bool MB_Protocol_GetFlashConfig(mb_flash_config_t *config)
+{
+    if (config == NULL) {
+        return false;
+    }
+    *config = s_flash_config;
+    config->complete =
+        !config->invalid &&
+        (config->fields_present & MB_FLASH_FIELD_REQUIRED_MASK) ==
+            MB_FLASH_FIELD_REQUIRED_MASK;
+    return config->complete;
 }
 
 bool MB_Protocol_SendUpload(bool all_encoder, bool ten_ms_encoder, bool speed)

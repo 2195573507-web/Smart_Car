@@ -1,38 +1,44 @@
-# macOS Control App Module
+# SmartCar Control Apps
 
 ## Function
 
 Provide operator control, BLE connection management, telemetry presentation,
-calibration/radar views, and a secondary developer/logging surface.
+calibration/radar views, and a secondary developer/logging surface on iOS and
+macOS. Both targets use the same App-BLE command behavior and telemetry model.
 
 ## Source Location
 
-`IOS_APP/SmartCar_Control_MAC/Sources/SmartCar_Control_MAC/`
+- iOS: `IOS-APP/Sources/SmartCarIOS/`
+- macOS: `SmartCar_Control_MAC/Sources/SmartCar_Control_MAC/`
 
 ## Entry Files
 
-- `main.swift`: SwiftUI application entry.
-- `BLE/BLEManager.swift`: CoreBluetooth central, GATT discovery, receive
+- `SmartCarIOSApp.swift` / `main.swift`: platform SwiftUI application entries.
+- `Core/BLE/BLEManager.swift` / `BLE/BLEManager.swift`: CoreBluetooth central, GATT discovery, receive
   pipelines, and outbound frame calls.
-- `Model/SmartCarProtocol.swift`: App frame encoding/parsing.
-- `ViewModels/SmartCarViewModel.swift`: UI-facing command/status state.
-- `Stores/TelemetryStore.swift`: MainActor telemetry state.
+- `Core/Model/SmartCarProtocol.swift` / `Model/SmartCarProtocol.swift`: App frame encoding/parsing.
+- `Core/ViewModels/SmartCarViewModel.swift` / `ViewModels/SmartCarViewModel.swift`: UI-facing command/status state.
+- `Core/Stores/TelemetryStore.swift` / `Stores/TelemetryStore.swift`: MainActor telemetry state.
 
 ## Inputs
 
 BLE discovery/connection events, FFE1 writes/FFE2 notifications, FFE3 log
-notifications, and user commands from control/developer views.
+notifications, and user commands from control/developer views. Motion commands
+include independent-wheel `0x15`/`0x2A`, MasterScale `0x2B`, and chassis-diff
+`0x2D` with adjustable base speed.
 
 ## Outputs
 
-BLE writes for ping, control, speed, radar speed, and radar calibration query;
-published SwiftUI state; bounded decoded-message and device-log stores.
+BLE writes for ping, control, speed, radar speed, independent-wheel commands,
+MasterScale, chassis speed, and emergency zeroing; published SwiftUI state;
+bounded decoded-message and device-log stores.
 
 ## Public Interfaces
 
 `BLEManager.startScanning/connectToDevice/disconnect`, `sendPing`,
-`sendControl`, `sendSpeed`, `sendRadarSpeed`; `SmartCarProtocol.encode` and
-`Parser.feed`; `TelemetryStore.ingest`.
+`sendControl`, `sendSpeed`, `sendRadarSpeed`, `sendWheelSpeeds`,
+`sendSingleWheelSpeed`, `sendMasterSpeedScale`, and `sendChassisSpeed`;
+`SmartCarProtocol.encode` and `Parser.feed`; `TelemetryStore.ingest`.
 
 ## Dependencies
 
@@ -41,9 +47,9 @@ CoreBluetooth, SwiftUI/Combine, `SmartCarProtocol`, `BLEPacket` decoded models,
 
 ## Current Status
 
-Source-established macOS UI and parser. BLE UUIDs and queue boundaries are
-defined. App-to-device behavior is unverified; S3 callback registration and
-telemetry relay are not proven in the current S3 source.
+Source-established iOS and macOS UI/parser implementations. BLE UUIDs and
+queue boundaries are defined. App-to-device behavior is unverified; host and
+simulator builds do not prove BLE delivery or vehicle behavior.
 
 ## Known Issues
 

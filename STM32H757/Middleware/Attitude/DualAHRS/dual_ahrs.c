@@ -59,6 +59,7 @@ typedef struct
     uint8_t primary_zero_pending;
     uint8_t redundant_zero_pending;
     uint8_t bias_valid;
+    float primary_gyro_z_rad_s;
     uint32_t sample_sequence;
     dual_ahrs_output_t output;
     dual_ahrs_state_t state;
@@ -106,6 +107,7 @@ static void reset_runtime_state(void)
     s_dual.redundant_yaw_offset_valid = 0U;
     s_dual.primary_zero_pending = 1U;
     s_dual.redundant_zero_pending = 1U;
+    s_dual.primary_gyro_z_rad_s = 0.0f;
     s_dual.sample_sequence = 0U;
     (void)memset(&s_dual.output, 0, sizeof(s_dual.output));
     s_dual.output.schema = DUAL_AHRS_SCHEMA;
@@ -847,6 +849,7 @@ void dual_ahrs_update(const dual_ahrs_input_t *input)
         /* The BMI323 stream is 200 Hz: filter and integrate every sample. */
         filtered_accel = filter_vector(input->bmi_accel, s_dual.accel_lpf);
         filtered_gyro = filter_vector(input->gyro, s_dual.gyro_lpf);
+        s_dual.primary_gyro_z_rad_s = filtered_gyro.z;
         update_primary(input, filtered_accel, filtered_gyro);
     }
     capture_ready_yaw_offsets();
@@ -936,6 +939,19 @@ void dual_ahrs_get_output(dual_ahrs_output_t *output)
     if (output != NULL) {
         *output = s_dual.output;
     }
+}
+
+uint8_t dual_ahrs_get_heading_state(float *yaw_rad, float *gyro_z_rad_s)
+{
+    if (yaw_rad == NULL || gyro_z_rad_s == NULL ||
+        s_dual.output.primary.valid == 0U ||
+        !isfinite(s_dual.output.primary.yaw) ||
+        !isfinite(s_dual.primary_gyro_z_rad_s)) {
+        return 0U;
+    }
+    *yaw_rad = s_dual.output.primary.yaw;
+    *gyro_z_rad_s = s_dual.primary_gyro_z_rad_s;
+    return 1U;
 }
 
 static void put_u16_le(uint8_t *destination, uint16_t value)

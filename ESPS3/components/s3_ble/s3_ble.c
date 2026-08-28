@@ -9,14 +9,33 @@
 #include "esp_gatt_common_api.h"
 #include "esp_gatts_api.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "freertos/task.h"
+#include "freertos/timers.h"
 
 #include "smartcar_log.h"
 
 #define S3_BLE_DEVICE_NAME "SmartCar_S3"
 #define S3_BLE_MAX_RX_LEN 1032U
+#define S3_BLE_LOCAL_ATT_MTU 247U
 #define S3_BLE_ADV_CONFIG_FLAG BIT0
 #define S3_BLE_SCAN_RSP_CONFIG_FLAG BIT1
+
+/* Apple-compatible preferred connection parameters. Intervals use 1.25 ms
+ * units and supervision timeout uses 10 ms units. */
+#define S3_BLE_CONN_MIN_INTERVAL 12U
+#define S3_BLE_CONN_MAX_INTERVAL 24U
+#define S3_BLE_CONN_LATENCY 0U
+#define S3_BLE_CONN_TIMEOUT 600U
+#define S3_BLE_CONN_PARAM_DELAY_MS 1500U
+#define S3_BLE_CONN_PARAM_DELAY_US UINT64_C(1500000)
+
+#define S3_BLE_LOG_FLUSH_TASK_STACK 2048U
+#define S3_BLE_LOG_FLUSH_TASK_PRIORITY (tskIDLE_PRIORITY + 1U)
+#define S3_BLE_LOG_FLUSH_BATCH_SIZE 4U
+#define S3_BLE_NOTIFY_LOCK_TIMEOUT_MS 10U
 
 /* UUID bytes use the little-endian representation required by Bluedroid. */
 static const uint8_t s_service_uuid[ESP_UUID_LEN_128] = {
@@ -40,7 +59,10 @@ static const char *TAG = "S3_BLE";
 static const uint16_t s_primary_service_uuid = ESP_GATT_UUID_PRI_SERVICE;
 static const uint16_t s_character_declaration_uuid = ESP_GATT_UUID_CHAR_DECLARE;
 static const uint16_t s_client_config_uuid = ESP_GATT_UUID_CHAR_CLIENT_CONFIG;
-static const uint8_t s_rx_property = ESP_GATT_CHAR_PROP_BIT_WRITE;
+/* FFE1 accepts acknowledged writes for legacy commands and Write Without
+ * Response for the high-rate Target Yaw command (App-BLE 0x2E). */
+static const uint8_t s_rx_property = ESP_GATT_CHAR_PROP_BIT_WRITE |
+                                     ESP_GATT_CHAR_PROP_BIT_WRITE_NR;
 static const uint8_t s_tx_property = ESP_GATT_CHAR_PROP_BIT_NOTIFY;
 static const uint8_t s_log_property = ESP_GATT_CHAR_PROP_BIT_NOTIFY;
 static const uint8_t s_ccc_initial_value[2] = {0x00, 0x00};
@@ -76,6 +98,12 @@ static bool s_service_ready;
 static bool s_adv_start_requested;
 static uint16_t s_att_mtu = 23U;
 static volatile uint32_t s_ble_notify_fail_count;
+static SemaphoreHandle_t s_notify_mutex;
+static TaskHandle_t s_log_flush_task;
+static TimerHandle_t s_conn_params_timer;
+static esp_bd_addr_t s_conn_remote_bda;
+static uint64_t s_conn_started_us;
+static portMUX_TYPE s_conn_params_lock = portMUX_INITIALIZER_UNLOCKED;
 static s3_ble_rx_callback_t s_rx_callback;
 static void *s_rx_callback_context;
 static portMUX_TYPE s_rx_callback_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -99,6 +127,46 @@ static uint8_t s_pending_log_tail;
 static uint8_t s_pending_log_count;
 static portMUX_TYPE s_pending_log_lock = portMUX_INITIALIZER_UNLOCKED;
 
+static bool s3_ble_has_pending_logs(void)
+{
+    bool has_pending;
+
+    portENTER_CRITICAL(&s_pending_log_lock);
+    has_pending = s_pending_log_count != 0U;
+    portEXIT_CRITICAL(&s_pending_log_lock);
+    return has_pending;
+}
+
+static esp_err_t s3_ble_queue_pending_log(smartcar_log_level_t level,
+                                          const char *text, size_t text_length)
+{
+    esp_err_t result = ESP_OK;
+
+    portENTER_CRITICAL(&s_pending_log_lock);
+    if (s_pending_log_count >= S3_LOG_PENDING_CAPACITY) {
+        result = ESP_ERR_NO_MEM;
+    } else {
+        s3_pending_log_t *pending = &s_pending_logs[s_pending_log_head];
+        pending->level = level;
+        pending->timestamp_ms = (uint32_t)esp_log_timestamp();
+        pending->length = (uint8_t)text_length;
+        memcpy(pending->text, text, text_length);
+        pending->text[text_length] = '\0';
+        s_pending_log_head = (uint8_t)((s_pending_log_head + 1U) %
+                                       S3_LOG_PENDING_CAPACITY);
+        ++s_pending_log_count;
+    }
+    portEXIT_CRITICAL(&s_pending_log_lock);
+    return result;
+}
+
+static void s3_ble_request_log_flush(void)
+{
+    if (s_log_flush_task != NULL) {
+        (void)xTaskNotifyGive(s_log_flush_task);
+    }
+}
+
 static esp_err_t s3_ble_log_send_text(smartcar_log_level_t level,
                                       uint32_t timestamp_ms,
                                       const char *text, uint8_t text_length)
@@ -115,18 +183,20 @@ static esp_err_t s3_ble_log_send_text(smartcar_log_level_t level,
     return s3_ble_log_notify_send(frame, (uint16_t)frame_length);
 }
 
-static void s3_ble_log_flush_pending(void)
+static bool s3_ble_log_flush_pending_batch(void)
 {
-    for (;;) {
+    uint8_t sent = 0U;
+
+    while (sent < S3_BLE_LOG_FLUSH_BATCH_SIZE) {
         s3_pending_log_t pending;
 
         if (!s_ble_state.connected || !s_ble_state.log_notify_enabled) {
-            return;
+            return false;
         }
         portENTER_CRITICAL(&s_pending_log_lock);
         if (s_pending_log_count == 0U) {
             portEXIT_CRITICAL(&s_pending_log_lock);
-            return;
+            return false;
         }
         pending = s_pending_logs[s_pending_log_tail];
         portEXIT_CRITICAL(&s_pending_log_lock);
@@ -134,13 +204,28 @@ static void s3_ble_log_flush_pending(void)
         if (s3_ble_log_send_text(pending.level, pending.timestamp_ms,
                                  pending.text,
                                  pending.length) != ESP_OK) {
-            return;
+            return false;
         }
         portENTER_CRITICAL(&s_pending_log_lock);
         s_pending_log_tail = (uint8_t)((s_pending_log_tail + 1U) %
                                        S3_LOG_PENDING_CAPACITY);
         --s_pending_log_count;
         portEXIT_CRITICAL(&s_pending_log_lock);
+        ++sent;
+    }
+
+    return s3_ble_has_pending_logs();
+}
+
+static void s3_ble_log_flush_task(void *context)
+{
+    (void)context;
+    for (;;) {
+        (void)ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        while (s3_ble_log_flush_pending_batch()) {
+            /* Do not let boot-log replay monopolize a CPU while BLE is active. */
+            vTaskDelay(1U);
+        }
     }
 }
 
@@ -283,6 +368,90 @@ static void start_advertising_if_ready(void)
     }
 }
 
+static void request_connection_parameters(const esp_bd_addr_t remote_bda)
+{
+    esp_ble_conn_update_params_t params = {
+        .min_int = S3_BLE_CONN_MIN_INTERVAL,
+        .max_int = S3_BLE_CONN_MAX_INTERVAL,
+        .latency = S3_BLE_CONN_LATENCY,
+        .timeout = S3_BLE_CONN_TIMEOUT,
+    };
+    esp_err_t ret;
+
+    memcpy(params.bda, remote_bda, sizeof(params.bda));
+    ret = esp_ble_gap_update_conn_params(&params);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG,
+                 "[S3_BLE] CONN PARAM REQUEST FAILED rc=%s min=15ms max=30ms latency=0 timeout=6s",
+                 esp_err_to_name(ret));
+        return;
+    }
+    ESP_LOGI(TAG,
+             "[S3_BLE] CONN PARAM REQUEST min=15ms max=30ms latency=0 timeout=6s");
+}
+
+static void s3_ble_conn_params_timer_callback(TimerHandle_t timer)
+{
+    const uint64_t now_us = (uint64_t)esp_timer_get_time();
+    esp_bd_addr_t remote_bda;
+    uint64_t conn_started_us;
+
+    (void)timer;
+    if (!s_ble_state.connected) {
+        ESP_LOGI(TAG, "[S3_BLE] CONN PARAM REQUEST SKIPPED (client disconnected)");
+        return;
+    }
+
+    /* xTimerStop() and a new connection can cross timer-task/GATT-task
+     * boundaries. Keep the delay measured from the current connection so a
+     * stale expiry cannot issue an early request after reconnect. */
+    portENTER_CRITICAL(&s_conn_params_lock);
+    memcpy(remote_bda, s_conn_remote_bda, sizeof(remote_bda));
+    conn_started_us = s_conn_started_us;
+    portEXIT_CRITICAL(&s_conn_params_lock);
+
+    if (now_us - conn_started_us < S3_BLE_CONN_PARAM_DELAY_US) {
+        const uint64_t remaining_us = S3_BLE_CONN_PARAM_DELAY_US -
+                                      (now_us - conn_started_us);
+        const uint32_t remaining_ms =
+            (uint32_t)((remaining_us + UINT64_C(999)) / UINT64_C(1000));
+        TickType_t remaining_ticks =
+            pdMS_TO_TICKS(remaining_ms == 0U ? 1U : remaining_ms);
+
+        if (remaining_ticks == 0U) {
+            remaining_ticks = 1U;
+        }
+
+        if (xTimerChangePeriod(s_conn_params_timer,
+                               remaining_ticks,
+                               0U) != pdPASS) {
+            ESP_LOGW(TAG, "[S3_BLE] CONN PARAM TIMER RESCHEDULE FAILED");
+        }
+        return;
+    }
+
+    request_connection_parameters(remote_bda);
+}
+
+static void schedule_connection_parameters(const esp_bd_addr_t remote_bda)
+{
+    if (s_conn_params_timer == NULL) {
+        ESP_LOGW(TAG, "[S3_BLE] CONN PARAM TIMER UNAVAILABLE");
+        return;
+    }
+
+    portENTER_CRITICAL(&s_conn_params_lock);
+    memcpy(s_conn_remote_bda, remote_bda, sizeof(s_conn_remote_bda));
+    s_conn_started_us = (uint64_t)esp_timer_get_time();
+    portEXIT_CRITICAL(&s_conn_params_lock);
+    if (xTimerReset(s_conn_params_timer, 0U) != pdPASS) {
+        ESP_LOGW(TAG, "[S3_BLE] CONN PARAM TIMER START FAILED");
+        return;
+    }
+    ESP_LOGI(TAG, "[S3_BLE] CONN PARAM REQUEST SCHEDULED delay=%ums",
+             (unsigned)S3_BLE_CONN_PARAM_DELAY_MS);
+}
+
 static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param)
 {
     switch (event) {
@@ -302,6 +471,27 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param
             ESP_LOGI(TAG, "[S3_BLE] ADV STARTED");
         }
         break;
+    case ESP_GAP_BLE_UPDATE_CONN_PARAMS_EVT: {
+        const uint32_t interval_centi_ms =
+            (uint32_t)param->update_conn_params.conn_int * 125U;
+        const uint32_t min_centi_ms =
+            (uint32_t)param->update_conn_params.min_int * 125U;
+        const uint32_t max_centi_ms =
+            (uint32_t)param->update_conn_params.max_int * 125U;
+
+        ESP_LOGI(TAG,
+                 "[S3_BLE] CONN PARAM RESULT status=0x%02X conn_interval=%u.%02ums latency=%u timeout=%ums min=%u.%02ums max=%u.%02ums",
+                 (unsigned)param->update_conn_params.status,
+                 (unsigned)(interval_centi_ms / 100U),
+                 (unsigned)(interval_centi_ms % 100U),
+                 (unsigned)param->update_conn_params.latency,
+                 (unsigned)param->update_conn_params.timeout * 10U,
+                 (unsigned)(min_centi_ms / 100U),
+                 (unsigned)(min_centi_ms % 100U),
+                 (unsigned)(max_centi_ms / 100U),
+                 (unsigned)(max_centi_ms % 100U));
+        break;
+    }
     default:
         break;
     }
@@ -345,24 +535,37 @@ static void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_
         s_ble_state.log_notify_enabled = false;
         update_ready_state();
         s_att_mtu = 23U;
+        s_ble_notify_fail_count = 0U;
         s_conn_id = param->connect.conn_id;
         ESP_LOGI(TAG, "[S3_BLE] CLIENT CONNECTED");
         ESP_LOGI(TAG, "conn_id=%u", (unsigned)param->connect.conn_id);
         ESP_LOGI(TAG, "addr=" ESP_BD_ADDR_STR,
                  ESP_BD_ADDR_HEX(param->connect.remote_bda));
+        schedule_connection_parameters(param->connect.remote_bda);
         break;
     case ESP_GATTS_DISCONNECT_EVT:
+        {
+        const uint16_t disconnected_conn_id = s_conn_id;
+        const uint16_t disconnected_mtu = s_att_mtu;
+        const uint32_t notify_fail_count = s_ble_notify_fail_count;
+
         s_ble_state.connected = false;
         s_ble_state.notify_enabled = false;
         s_ble_state.log_notify_enabled = false;
+        if (s_conn_params_timer != NULL) {
+            (void)xTimerStop(s_conn_params_timer, 0U);
+        }
         update_ready_state();
         if (s_disconnect_callback != NULL) {
             s_disconnect_callback(s_disconnect_callback_context);
         }
         s_adv_start_requested = false;
-        ESP_LOGI(TAG, "[S3_BLE] CLIENT DISCONNECTED");
-        ESP_LOGI(TAG, "reason=0x%02x", (unsigned)param->disconnect.reason);
+        ESP_LOGW(TAG,
+                 "[S3_BLE] CLIENT DISCONNECTED conn_id=%u reason=0x%02X mtu=%u notify_failures=%lu",
+                 (unsigned)disconnected_conn_id, (unsigned)param->disconnect.reason,
+                 (unsigned)disconnected_mtu, (unsigned long)notify_fail_count);
         start_advertising_if_ready();
+        }
         break;
     case ESP_GATTS_WRITE_EVT:
         if (!param->write.is_prep && param->write.handle == s_handles[IDX_RX_VALUE]) {
@@ -379,18 +582,22 @@ static void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_
                                  ((uint16_t)param->write.value[1] << 8);
             s_ble_state.log_notify_enabled = (ccc & 0x0001U) != 0U;
             if (s_ble_state.log_notify_enabled) {
-                (void)s3_ble_log_emit(SMARTCAR_LOG_LEVEL_INFO, "BOOT");
+                (void)s3_ble_queue_pending_log(SMARTCAR_LOG_LEVEL_INFO, "BOOT",
+                                               sizeof("BOOT") - 1U);
                 if (s_ble_state.connected) {
-                    (void)s3_ble_log_emit(SMARTCAR_LOG_LEVEL_INFO,
-                                          "BLE_CONNECTED");
+                    (void)s3_ble_queue_pending_log(SMARTCAR_LOG_LEVEL_INFO,
+                                                   "BLE_CONNECTED",
+                                                   sizeof("BLE_CONNECTED") - 1U);
                 }
-                s3_ble_log_flush_pending();
+                s3_ble_request_log_flush();
             }
         }
         break;
     case ESP_GATTS_MTU_EVT:
         if (param->mtu.mtu >= 23U) {
             s_att_mtu = param->mtu.mtu;
+            ESP_LOGI(TAG, "[S3_BLE] MTU NEGOTIATED mtu=%u notify_payload=%u",
+                     (unsigned)s_att_mtu, (unsigned)(s_att_mtu - 3U));
         }
         break;
     default:
@@ -418,6 +625,16 @@ esp_err_t s3_ble_init(void)
     if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
         return ret;
     }
+    ret = esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_DEFAULT, ESP_PWR_LVL_P9);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "BLE default TX power P9 setup failed: %s",
+                 esp_err_to_name(ret));
+    }
+    ret = esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_ADV, ESP_PWR_LVL_P9);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "BLE advertising TX power P9 setup failed: %s",
+                 esp_err_to_name(ret));
+    }
     ret = esp_bluedroid_init();
     if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
         return ret;
@@ -425,6 +642,33 @@ esp_err_t s3_ble_init(void)
     ret = esp_bluedroid_enable();
     if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
         return ret;
+    }
+    ret = esp_ble_gatt_set_local_mtu(S3_BLE_LOCAL_ATT_MTU);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+    s_conn_params_timer = xTimerCreate("ble_conn_params",
+                                       pdMS_TO_TICKS(S3_BLE_CONN_PARAM_DELAY_MS),
+                                       pdFALSE, NULL,
+                                       s3_ble_conn_params_timer_callback);
+    if (s_conn_params_timer == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+    s_notify_mutex = xSemaphoreCreateMutex();
+    if (s_notify_mutex == NULL) {
+        (void)xTimerDelete(s_conn_params_timer, 0U);
+        s_conn_params_timer = NULL;
+        return ESP_ERR_NO_MEM;
+    }
+    if (xTaskCreate(s3_ble_log_flush_task, "ble_log_flush",
+                    S3_BLE_LOG_FLUSH_TASK_STACK, NULL,
+                    S3_BLE_LOG_FLUSH_TASK_PRIORITY,
+                    &s_log_flush_task) != pdPASS) {
+        vSemaphoreDelete(s_notify_mutex);
+        s_notify_mutex = NULL;
+        (void)xTimerDelete(s_conn_params_timer, 0U);
+        s_conn_params_timer = NULL;
+        return ESP_ERR_NO_MEM;
     }
     ret = esp_ble_gap_register_callback(gap_event_handler);
     if (ret != ESP_OK) {
@@ -441,6 +685,8 @@ esp_err_t s3_ble_init(void)
     s_initialized = true;
     ESP_LOGI(TAG, "BLE INIT OK");
     ESP_LOGI(TAG, "BLE DEVICE NAME: %s", S3_BLE_DEVICE_NAME);
+    ESP_LOGI(TAG, "[S3_BLE] LOCAL MTU=%u TX_POWER=P9(9dBm)",
+             (unsigned)S3_BLE_LOCAL_ATT_MTU);
     return ESP_OK;
 }
 
@@ -451,6 +697,12 @@ esp_err_t s3_ble_notify_send(const uint8_t *data, uint16_t len)
     }
     if (!s_initialized || !s_ble_state.ready) {
         return ESP_ERR_INVALID_STATE;
+    }
+    if (s_notify_mutex == NULL ||
+        xSemaphoreTake(s_notify_mutex,
+                       pdMS_TO_TICKS(S3_BLE_NOTIFY_LOCK_TIMEOUT_MS)) != pdTRUE) {
+        ++s_ble_notify_fail_count;
+        return ESP_ERR_TIMEOUT;
     }
     const uint16_t max_payload = s_att_mtu > 3U ? (uint16_t)(s_att_mtu - 3U) : 20U;
     uint16_t offset = 0U;
@@ -467,10 +719,12 @@ esp_err_t s3_ble_notify_send(const uint8_t *data, uint16_t len)
                                                     false);
         if (ret != ESP_OK) {
             ++s_ble_notify_fail_count;
+            (void)xSemaphoreGive(s_notify_mutex);
             return ret;
         }
         offset = (uint16_t)(offset + chunk_len);
     }
+    (void)xSemaphoreGive(s_notify_mutex);
     return ESP_OK;
 }
 
@@ -482,6 +736,12 @@ esp_err_t s3_ble_log_notify_send(const uint8_t *data, uint16_t len)
     if (!s_initialized || !s_ble_state.connected ||
         !s_ble_state.log_notify_enabled) {
         return ESP_ERR_INVALID_STATE;
+    }
+    if (s_notify_mutex == NULL ||
+        xSemaphoreTake(s_notify_mutex,
+                       pdMS_TO_TICKS(S3_BLE_NOTIFY_LOCK_TIMEOUT_MS)) != pdTRUE) {
+        ++s_ble_notify_fail_count;
+        return ESP_ERR_TIMEOUT;
     }
 
     const uint16_t max_payload = s_att_mtu > 3U ? (uint16_t)(s_att_mtu - 3U) : 20U;
@@ -499,10 +759,12 @@ esp_err_t s3_ble_log_notify_send(const uint8_t *data, uint16_t len)
                                                             false);
         if (ret != ESP_OK) {
             ++s_ble_notify_fail_count;
+            (void)xSemaphoreGive(s_notify_mutex);
             return ret;
         }
         offset = (uint16_t)(offset + chunk_len);
     }
+    (void)xSemaphoreGive(s_notify_mutex);
     return ESP_OK;
 }
 
@@ -524,24 +786,13 @@ esp_err_t s3_ble_log_emit(smartcar_log_level_t level, const char *text)
     }
 
     if (!s_initialized || !s_ble_state.connected ||
-        !s_ble_state.log_notify_enabled) {
-        esp_err_t result = ESP_OK;
+        !s_ble_state.log_notify_enabled || s3_ble_has_pending_logs()) {
+        const esp_err_t result = s3_ble_queue_pending_log(level, text, text_length);
 
-        portENTER_CRITICAL(&s_pending_log_lock);
-        if (s_pending_log_count >= S3_LOG_PENDING_CAPACITY) {
-            result = ESP_ERR_NO_MEM;
-        } else {
-            s3_pending_log_t *pending = &s_pending_logs[s_pending_log_head];
-            pending->level = level;
-            pending->timestamp_ms = (uint32_t)esp_log_timestamp();
-            pending->length = (uint8_t)text_length;
-            memcpy(pending->text, text, text_length);
-            pending->text[text_length] = '\0';
-            s_pending_log_head = (uint8_t)((s_pending_log_head + 1U) %
-                                           S3_LOG_PENDING_CAPACITY);
-            ++s_pending_log_count;
+        if (result == ESP_OK && s_initialized && s_ble_state.connected &&
+            s_ble_state.log_notify_enabled) {
+            s3_ble_request_log_flush();
         }
-        portEXIT_CRITICAL(&s_pending_log_lock);
         return result;
     }
     return s3_ble_log_send_text(level, (uint32_t)esp_log_timestamp(),

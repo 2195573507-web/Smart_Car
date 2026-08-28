@@ -29,6 +29,7 @@ and handling guidance, is the [File List in the document audit](DOCUMENT_AUDIT_R
 | IMU | [pipeline](docs/imu/imu-pipeline.md), [LSM303](docs/imu/lsm303.md), [BMI323](docs/imu/bmi323.md), [calibration](docs/imu/calibration.md), [attitude](docs/imu/attitude.md), [filter](docs/imu/filter.md) |
 | Radar/motion | [radar](docs/radar/radar.md), [motor](docs/motor/motor.md), [encoder](docs/motor/encoder.md) |
 | Motor board | [four-way motor-board guide](docs/motor/FOUR_WAY_MOTOR_BOARD_SMARTCAR_GUIDE.md) |
+| Chassis control study | [YAW dynamic error suppression guide](DOCS/YAW_DYNAMIC_ERROR_SUPPRESSION_GUIDE.md) |
 | App/tools | [macOS App](docs/app/mac-control-app.md), [logger](docs/debug/logger.md) |
 | ROS2 | [ROS2](docs/ros2/ros2.md) |
 | Mapping | [code map](docs/code_map.md) |

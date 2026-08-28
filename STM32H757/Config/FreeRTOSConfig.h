@@ -6,6 +6,9 @@
 
 extern uint32_t SystemCoreClock;
 
+void cm7_rtos_assert_failed(const char *file, uint32_t line)
+    __attribute__((noreturn));
+
 #define configUSE_PREEMPTION                    1
 #define configUSE_IDLE_HOOK                     0
 #define configUSE_TICK_HOOK                     0
@@ -13,7 +16,7 @@ extern uint32_t SystemCoreClock;
 #define configTICK_RATE_HZ                     ((TickType_t)1000)
 #define configMAX_PRIORITIES                    7
 #define configMINIMAL_STACK_SIZE               ((uint16_t)256)
-#define configTOTAL_HEAP_SIZE                  ((size_t)(32U * 1024U))
+#define configTOTAL_HEAP_SIZE                  ((size_t)(48U * 1024U))
 #define configMAX_TASK_NAME_LEN                 16
 #define configUSE_16_BIT_TICKS                  0
 #define configIDLE_SHOULD_YIELD                 1
@@ -65,8 +68,7 @@ extern uint32_t SystemCoreClock;
 #define configASSERT(condition) \
     do { \
         if ((condition) == 0) { \
-            __asm volatile ("cpsid i" ::: "memory"); \
-            for (;;) { } \
+            cm7_rtos_assert_failed(__FILE__, (uint32_t)__LINE__); \
         } \
     } while (0)
 

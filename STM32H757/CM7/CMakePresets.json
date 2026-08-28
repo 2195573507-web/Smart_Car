@@ -7,7 +7,9 @@
             "binaryDir": "${sourceDir}/build/Debug",
             "toolchainFile": "${sourceDir}/../gcc-arm-none-eabi.cmake",
             "cacheVariables": {
-                "CMAKE_BUILD_TYPE": "Debug"
+                "CMAKE_BUILD_TYPE": "Debug",
+                "SMARTCAR_SCHEDULER_PROBE": "OFF",
+                "SMARTCAR_RAW_DIAGNOSTICS": "OFF"
             }
         }
     ],

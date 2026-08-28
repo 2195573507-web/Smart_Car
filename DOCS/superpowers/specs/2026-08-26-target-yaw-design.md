@@ -30,7 +30,7 @@ Target yaw is normalized to the estimator's `[-180, 180)` degree convention.
 The heading target is stored separately from the existing direct `v/omega`
 target. While active, the 10 ms task reads the latest DualAHRS primary yaw and
 the last filtered, bias-corrected, body-frame gyro Z. It computes the shortest
-angle error, then applies `w_corr = clamp(0.06 * error_rad - 0.002 * gyro_z,
+angle error in degrees, then applies `w_corr = clamp(0.06 * error_deg - 0.002 * gyro_z,
 -2, 2)`. The resulting linear speed and angular correction are passed through
 the existing kinematics and safety gate. If attitude data is invalid, the
 output is zero and the target is cleared by the existing gate-revocation path.

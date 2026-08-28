@@ -8,6 +8,10 @@ SwiftUI/MVVM boundaries for BLE discovery, protocol serialization, manual input,
 emergency-stop intent, and status presentation. It does not claim vehicle
 connectivity, command delivery, motor movement, or hardware safety behavior.
 
+The original `IOS_APP/` scaffold described below was removed on 2026-08-23.
+The current implementation is the verified iOS target under `IOS-APP/`; see
+`.planning/ios-app/deliverable.md` for its source map and build evidence.
+
 ## Source Tree
 
 ```text

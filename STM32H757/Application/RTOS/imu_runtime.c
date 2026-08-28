@@ -19,7 +19,7 @@
 #include "mag_filter.h"
 #include "log_service.h"
 #include "s3_service.h"
-#include "scbp_protocol_defs.h"
+#include "srp_registry.h"
 
 #define IMU_RUNTIME_LOG_TIMEOUT_MS UINT32_C(100)
 #define IMU_DATA_PERIOD_MS         UINT32_C(100)
@@ -29,7 +29,7 @@
 #define IMU_TELEMETRY_ATTITUDE_PERIOD_MS UINT32_C(50)
 #define IMU_DUAL_AHRS_LOG_PERIOD_MS  UINT32_C(1000)
 #define IMU_STACK_MONITOR_PERIOD_MS UINT32_C(5000)
-#define IMU_DATA_STACK_WORDS       UINT16_C(512)
+#define IMU_DATA_STACK_WORDS       UINT16_C(1024)
 #define IMU_DATA_PRIORITY          (tskIDLE_PRIORITY + 1U)
 #define IMU_SAMPLE_PRIORITY        (tskIDLE_PRIORITY + 2U)
 #define IMU_RUNTIME_PI             3.14159265358979323846f
@@ -76,15 +76,15 @@ static void imu_send_telemetry(uint32_t now_ms, uint32_t *last_imu_ms,
         *last_imu_ms = now_ms;
 
         if (imu_manager_get_snapshot(&snapshot) == BSP_STATUS_OK) {
-            lsm_payload[0] = SCBP_IMU_SENSOR_LSM303;
+            lsm_payload[0] = SRP_IMU_SENSOR_LSM303;
             lsm_payload[1] = (uint8_t)(
                 (snapshot.lsm_accel_valid != 0U
-                     ? SCBP_IMU_TELEMETRY_FLAG_ACCEL_VALID
+                     ? SRP_IMU_TELEMETRY_FLAG_ACCEL_VALID
                      : 0U) |
                 (snapshot.lsm_mag_valid != 0U
-                     ? SCBP_IMU_TELEMETRY_FLAG_GYRO_OR_MAG_VALID
+                     ? SRP_IMU_TELEMETRY_FLAG_GYRO_OR_MAG_VALID
                      : 0U) |
-                (snapshot.online != 0U ? SCBP_IMU_TELEMETRY_FLAG_ONLINE : 0U));
+                (snapshot.online != 0U ? SRP_IMU_TELEMETRY_FLAG_ONLINE : 0U));
             put_u32_le(&lsm_payload[2], snapshot.lsm_timestamp);
             put_float_le(&lsm_payload[6], snapshot.lsm_ax);
             put_float_le(&lsm_payload[10], snapshot.lsm_ay);
@@ -94,15 +94,15 @@ static void imu_send_telemetry(uint32_t now_ms, uint32_t *last_imu_ms,
             put_float_le(&lsm_payload[26], snapshot.lsm_mz);
             s3_service_send_imu_telemetry(lsm_payload, (uint8_t)sizeof(lsm_payload));
 
-            bmi_payload[0] = SCBP_IMU_SENSOR_BMI323;
+            bmi_payload[0] = SRP_IMU_SENSOR_BMI323;
             bmi_payload[1] = (uint8_t)(
                 (snapshot.bmi_accel_valid != 0U
-                     ? SCBP_IMU_TELEMETRY_FLAG_ACCEL_VALID
+                     ? SRP_IMU_TELEMETRY_FLAG_ACCEL_VALID
                      : 0U) |
                 (snapshot.bmi_gyro_valid != 0U
-                     ? SCBP_IMU_TELEMETRY_FLAG_GYRO_OR_MAG_VALID
+                     ? SRP_IMU_TELEMETRY_FLAG_GYRO_OR_MAG_VALID
                      : 0U) |
-                (bmi323_is_online() != 0U ? SCBP_IMU_TELEMETRY_FLAG_ONLINE : 0U));
+                (bmi323_is_online() != 0U ? SRP_IMU_TELEMETRY_FLAG_ONLINE : 0U));
             put_u32_le(&bmi_payload[2], snapshot.bmi_timestamp);
             put_float_le(&bmi_payload[6], snapshot.bmi_ax);
             put_float_le(&bmi_payload[10], snapshot.bmi_ay);

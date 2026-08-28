@@ -100,7 +100,7 @@ void radar_calibration_manager_step(void)
 bool radar_calibration_manager_on_boot_ready(const uint8_t *payload, uint8_t length)
 {
     if (!s_initialized || payload == NULL ||
-        length != SCBP_PAYLOAD_BOOT_READY_SIZE ||
+        length != SRP_PAYLOAD_BOOT_READY_SIZE ||
         payload[0] != STM_BOOT_STATE_WAIT_RADAR_ZERO || payload[1] != 0U) {
         return false;
     }
@@ -121,8 +121,8 @@ bool radar_calibration_manager_on_boot_ready(const uint8_t *payload, uint8_t len
 bool radar_calibration_manager_on_cal_event(const uint8_t *payload, uint8_t length)
 {
     if (!s_initialized || payload == NULL ||
-        length != SCBP_PAYLOAD_CAL_EVENT_SIZE ||
-        payload[0] != SCBP_CAL_EVENT_STATIC_DONE) {
+        length != SRP_PAYLOAD_CAL_EVENT_SIZE ||
+        payload[0] != SRP_CAL_EVENT_STATIC_DONE) {
         return false;
     }
     if (s_done) {
@@ -143,13 +143,13 @@ bool radar_calibration_manager_on_cal_event(const uint8_t *payload, uint8_t leng
     return true;
 }
 
-void radar_calibration_manager_on_ready_response(scbp_link_tx_result_t result,
+void radar_calibration_manager_on_ready_response(srp_link_tx_result_t result,
                                                  uint8_t status_code)
 {
     if (!s_initialized || s_state != RADAR_WAIT_ACK) {
         return;
     }
-    if (result == SCBP_LINK_TX_OK && status_code == SCBP_FAST_RESP_OK) {
+    if (result == SRP_LINK_TX_OK && status_code == SRP_FAST_RESP_OK) {
         s_state = RADAR_WAIT_STATIC_EVENT;
         (void)s3_log_info("RADAR_PWM_READY ACK; WAIT STATIC_CAL_DONE");
         return;

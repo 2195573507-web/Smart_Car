@@ -103,6 +103,9 @@ void dual_ahrs_set_local_gravity(float gravity_mps2);
 void dual_ahrs_update(const dual_ahrs_input_t *input);
 void dual_ahrs_get_output(dual_ahrs_output_t *output);
 
+/* Returns the latest primary yaw and transformed/filtered body Z rate. */
+uint8_t dual_ahrs_get_heading_state(float *yaw_rad, float *gyro_z_rad_s);
+
 /* Serializes the schema=2 SCBP-CAN DualAHRS payload. */
 int dual_ahrs_pack_payload(uint8_t *payload, size_t capacity);
 
