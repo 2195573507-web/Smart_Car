@@ -1,0 +1,31 @@
+services:
+  ros2-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    working_dir: /ws
+    volumes:
+      - ../src:/ws/src:rw
+      - ../config:/ws/config:ro
+      - ../test:/ws/test:ro
+      - ../testdata:/ws/testdata:ro
+      - ../docs:/ws/docs:ro
+      - ros2_build:/ws/build
+      - ros2_install:/ws/install
+      - ros2_log:/ws/log
+    environment:
+      RCUTILS_COLORIZED_OUTPUT: "1"
+      # Use WSLg variables when launched from WSL; otherwise target a Windows
+      # X11 server such as VcXsrv through Docker Desktop's host gateway.
+      DISPLAY: "${DISPLAY:-host.docker.internal:0.0}"
+      WAYLAND_DISPLAY: "${WAYLAND_DISPLAY:-}"
+      XDG_RUNTIME_DIR: "${XDG_RUNTIME_DIR:-}"
+      QT_X11_NO_MITSHM: "1"
+      LIBGL_ALWAYS_SOFTWARE: "1"
+    ports:
+      - "8765:8765"
+
+volumes:
+  ros2_build:
+  ros2_install:
+  ros2_log:

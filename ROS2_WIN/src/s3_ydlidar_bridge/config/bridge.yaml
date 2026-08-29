@@ -1,0 +1,34 @@
+s3_ydlidar_bridge:
+  ros__parameters:
+    # Live S3 framing is intentionally unavailable until its wire contract is frozen.
+    transport: unconfigured
+    replay_file: ""
+    scan_topic: /scan
+    diagnostics_topic: /diagnostics
+    tcp_listen_address: 0.0.0.0
+    tcp_listen_port: 8765
+    tcp_max_buffer_bytes: 262144
+    tcp_max_ready_frames: 64
+    s3_expected_version: 1
+    s3_expected_message_type: 1
+    s3_allowed_flags_mask: 1
+    s3_expected_device_id: 1
+    s3_expected_stream_id: 1
+    s3_min_payload_bytes: 10
+    s3_max_payload_bytes: 65535
+    frame_id: laser_frame
+    angle_min: -3.1415927
+    angle_max: 3.1415927
+    range_min: 0.10
+    range_max: 8.0
+    samples: 360
+    scan_frequency_hz: 10.0
+    # Invalid rays are +inf by default; set false to publish NaN instead.
+    invalid_range_is_inf: true
+    # Publish the YDLIDAR raw per-sample sync_quality byte (0..255), not a
+    # calibrated physical intensity. It requires the matching parser layout.
+    publish_intensities: false
+    # Select the official driver's 3-byte quality+distance sample layout.
+    ydlidar_intensities: false
+    stale_after_ms: 500
+    zero_packet_timeout_ms: 1000

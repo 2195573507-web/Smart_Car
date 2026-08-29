@@ -1,0 +1,17 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/LaserScan
+      Name: LaserScan
+      Topic:
+        Depth: 5
+        Reliability Policy: Best Effort
+        Value: /scan
+      Size (m): 0.02
+      Style: Points
+  Global Options:
+    Fixed Frame: laser_frame
+  Name: root
