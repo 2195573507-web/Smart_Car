@@ -5,7 +5,9 @@
 This image is a minimal ESP-IDF 5.5.4 test for receiving raw bytes from a
 YDLIDAR X3PRO over UART. The first phase proves stable byte reception and
 preserves the input stream for protocol work. It does not implement a complete
-point cloud, target tracking, networking, or ROS integration.
+point cloud, target tracking, or ROS integration. The optional TCP uplink only
+forwards checksum-valid raw frames to the experimental Windows bridge; point
+cloud assembly remains a Windows-side responsibility.
 
 The project remains an ESP32-S3 image. Existing flash, PSRAM, partition, and
 console settings are retained; this document does not authorize changing
@@ -87,6 +89,8 @@ X3PRO TX output
   -> frame-header search and length-derived boundary
   -> optional checksum callback
   -> raw-frame callback
+  -> bounded valid-frame FIFO (8 complete frames)
+  -> optional S3RD/TCP uplink sender
 ```
 
 `radar_parser.c` provides the framing boundary only:
@@ -135,6 +139,18 @@ quality=<decoded value or unavailable>
 unconfirmed. It is preferable to an invented value because this phase is a
 UART/protocol capture test, not a completed point-cloud decoder.
 
+When the optional experimental uplink is enabled, each checksum-valid complete
+frame is copied into a fixed eight-entry FIFO with its sequence and parser
+timestamp. The low-priority TCP task consumes entries oldest-first and keeps
+one encoded packet for retry if a connection fails during `send()`. If the FIFO
+is full, only the oldest radar frame is discarded; the event is reported as
+`fifo_drop_oldest` in `RADAR_PARSER_STATS`. This queue is bounded and never
+performs network I/O from the UART/parser task. The UART callback uses only a
+bounded one-tick mutex wait to avoid losing frames to transient consumer
+contention. The low-priority sender polls
+every 5 ms so normal packet bursts are drained without the old 20 ms pacing
+being an artificial source of FIFO overflow.
+
 ## Source Layout
 
 ```text
@@ -145,6 +161,12 @@ UART/protocol capture test, not a completed point-cloud decoder.
       radar_uart.h
       radar_parser.c
       radar_parser.h
+      radar_frame_fifo.c
+      radar_frame_fifo.h
+      radar_uplink.c
+      radar_uplink.h
+      radar_uplink_protocol.c
+      radar_uplink_protocol.h
 ```
 
 `radar_uart.c` owns UART1, the 4096-byte driver buffer, continuous reads, raw

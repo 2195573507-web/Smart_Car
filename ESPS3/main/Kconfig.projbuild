@@ -2,4 +2,34 @@ menu "YDLIDAR X3PRO radar test configuration"
 
 comment "UART1 RX GPIO44 and M_CTR PWM GPIO4 are fixed in main/radar/radar_uart.h; STM UART2 uses GPIO17/18"
 
+config SMARTCAR_RADAR_UPLINK_ENABLED
+    bool "Enable S3 radar Wi-Fi uplink"
+    default n
+    help
+        Enable the optional low-priority TCP uplink of checksum-valid radar
+        frames. Keep disabled until the gateway packet contract and network
+        topology are approved.
+
+if SMARTCAR_RADAR_UPLINK_ENABLED
+
+comment "Wi-Fi SSID/password list: edit main/radar/radar_wifi_credentials.h"
+
+config SMARTCAR_RADAR_UPLINK_HOST
+    string "Windows bridge host"
+    default ""
+
+config SMARTCAR_RADAR_UPLINK_PORT_STRING
+    string "Windows bridge TCP port"
+    default ""
+
+config SMARTCAR_RADAR_UPLINK_DEVICE_ID
+    int "Radar device ID"
+    default 1
+
+config SMARTCAR_RADAR_UPLINK_STREAM_ID
+    int "Radar stream ID"
+    default 1
+
+endif
+
 endmenu

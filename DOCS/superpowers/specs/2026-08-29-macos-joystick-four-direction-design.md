@@ -2,7 +2,8 @@
 
 ## 状态
 
-设计已获用户确认，代码尚未修改。本文只覆盖当前
+实现已完成：macOS SwiftPM 构建与打包 bundle 启动验证通过；BLE、UART、
+STM32 应用和车辆行为仍为 `UNVERIFIED`。本文只覆盖当前
 `IOS_APP/SmartCar_Control_MAC` 可执行目标中的现有圆形摇杆。
 
 ## 背景与现状

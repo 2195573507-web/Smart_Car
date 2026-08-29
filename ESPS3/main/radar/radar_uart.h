@@ -9,6 +9,8 @@
 #include "driver/gpio.h"
 #include "driver/uart.h"
 #include "esp_err.h"
+#include "freertos/task.h"
+#include "radar_parser.h"
 
 /* 雷达使用 UART1 控制器。 */
 #define RADAR_UART_PORT UART_NUM_1
@@ -20,8 +22,14 @@
 #define RADAR_UART_DRIVER_BUFFER_SIZE 4096U
 /* 单次 UART 读取缓冲区大小，单位为字节。 */
 #define RADAR_UART_READ_BUFFER_SIZE 512U
-/* UART 读取超时时间，单位为毫秒。 */
-#define RADAR_UART_READ_TIMEOUT_MS 100U
+/* UART 驱动事件队列深度。 */
+#define RADAR_UART_EVENT_QUEUE_SIZE 32U
+/* RX FIFO 达到该字节数时唤醒接收任务。 */
+#define RADAR_UART_RX_FULL_THRESHOLD 120U
+/* RX 线空闲达到该符号数时唤醒接收任务。 */
+#define RADAR_UART_RX_TIMEOUT_SYMBOLS 10U
+/* 空闲时的事件队列等待上限，单位为毫秒。 */
+#define RADAR_UART_EVENT_WAIT_MS 100U
 /* 雷达 UART 接收任务的栈大小，单位为字节。 */
 #define RADAR_UART_TASK_STACK_SIZE 4096U
 /* 雷达 UART 接收任务优先级。 */
@@ -46,6 +54,17 @@
 /* Starts the UART driver and its continuous receive/parser task. */
 esp_err_t radar_uart_init(void);
 bool radar_uart_is_running(void);
+
+/* Wake the optional uplink task after a validated frame enters the FIFO. */
+void radar_uart_set_frame_notification_task(TaskHandle_t task);
+
+/* Consume the oldest checksum-valid raw frame from the bounded uplink FIFO. */
+bool radar_uart_pop_frame(uint8_t *buffer,
+                          size_t capacity,
+                          size_t *length,
+                          uint32_t *sequence,
+                          uint32_t *timestamp_ms,
+                          uint32_t *age_ms);
 
 /* Starts the X3PRO M_CTR motor output at the required duty and frequency. */
 esp_err_t radar_pwm_init(void);

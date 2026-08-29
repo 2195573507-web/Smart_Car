@@ -1,0 +1,7 @@
+# colcon output is kept in Docker named volumes, but ignore local fallback builds.
+/build/
+/install/
+/log/
+**/build/
+**/install/
+**/log/

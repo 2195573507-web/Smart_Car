@@ -5,7 +5,7 @@
   "idf.pythonInstallPath": "/Users/zhiqin/.espressif/tools/python/v5.5.4/venv/bin/python",
   "idf.adapterTargetName": "esp32c5",
   "idf.currentSetup": "/Users/zhiqin/.espressif/v5.5.4/esp-idf",
-  "idf.port": "/dev/tty.usbmodem5B901601171",
+  "idf.port": "/dev/tty.usbmodem142101",
   "idf.customExtraVars": {},
   "idf.customExtraPaths": [
     "/opt/homebrew/bin",

@@ -6,6 +6,7 @@
 #include "freertos/task.h"
 
 #include "radar/radar_uart.h"
+#include "radar/radar_uplink.h"
 #include "radar_control.h"
 #include "s3_ble.h"
 #include "smartcar_service.h"
@@ -67,6 +68,12 @@ void app_main(void)
         s3_log_info("RADAR INIT OK");
     } else {
         s3_log_error("RADAR INIT FAILED");
+    }
+
+    esp_err_t radar_uplink_ret = radar_uplink_init();
+    if (radar_uplink_ret != ESP_OK) {
+        ESP_LOGE(TAG, "Radar uplink init failed: %s",
+                 esp_err_to_name(radar_uplink_ret));
     }
 #endif
 

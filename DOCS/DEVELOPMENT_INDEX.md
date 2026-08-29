@@ -28,6 +28,8 @@ The project is in infrastructure initialization. The authorized deliverables are
 | ROS2_WIN | [RADAR_DRIVER_PORTING.md](ROS2_WIN_Radar/RADAR_DRIVER_PORTING.md) | ROS1-to-ROS2 driver porting preparation |
 | ROS2_WIN | [YDLIDAR_X3_ROS2_PORTING.md](ROS2_WIN_Radar/YDLIDAR_X3_ROS2_PORTING.md) | X3/X3 Pro SDK, driver, and integration preparation |
 | ROS2_WIN | [DOCKER_ROS2_SETUP.md](ROS2_WIN_Radar/DOCKER_ROS2_SETUP.md) | Windows Docker Desktop ROS2 deployment preparation |
+| Integration | [S3_ROS2_STM_BUILD_AUDIT_PLAN.md](ROS2_WIN_Radar/S3_ROS2_STM_BUILD_AUDIT_PLAN.md) | S3 radar gateway, Windows ROS2 bridge, and STM32 safety-boundary staged build/audit plan |
+| Integration | [S3_WIN_RADAR_PROTOCOL_PLAN.md](ROS2_WIN_Radar/S3_WIN_RADAR_PROTOCOL_PLAN.md) | S3-to-Windows radar gateway protocol freeze, implementation order, replay, and end-to-end acceptance plan |
 | IOS_APP | [IOS_ARCHITECTURE.md](IOS_APP/IOS_ARCHITECTURE.md) | Mobile responsibility boundary |
 | System | [SMART_CAR_SYSTEM_ARCHITECTURE.md](SMART_CAR_SYSTEM_ARCHITECTURE.md) | IOS_APP/S3 L1-L3 system ownership and data flows |
 | Protocol | [SMART_CAR_PROTOCOL.md](SMART_CAR_PROTOCOL.md) | APP-S3 and S3-STM32 versioned frame target |
@@ -86,6 +88,13 @@ The project is in infrastructure initialization. The authorized deliverables are
 - Recorded the current ownership boundary: the project baseline assigns lidar acquisition/parsing to ESP32-S3 and ROS2_WIN receives gateway-provided information through Wi-Fi. Windows Docker direct-driver work is a separate, not-yet-authorized route.
 - Recorded Windows Docker Desktop risks: `COMx` is not automatically a container `/dev/tty*` device; WSL2 USB transfer, device permissions/replug, DDS discovery, TF, odometry, and vehicle safety interfaces each require future validation.
 - Evidence in this entry is static documentation and archive-listing review only. Docker, ROS2, SDK/driver, SLAM Toolbox, Nav2, hardware, USB/UART, network, map, navigation, and vehicle-control behavior remain unverified.
+
+### 2026-08-28: S3-ROS2-STM32 build audit plan
+
+- Added a staged implementation and audit plan for the current `YDLIDAR -> S3 -> Wi-Fi -> ROS2_WIN` direction.
+- It reserves raw radar packages for S3-to-ROS2 only, keeps the active STM32-S3 SCBP-CAN control link unchanged, and requires a separate safety decision before Nav2 can affect motion.
+- The plan identifies the current S3 source/documentation drift around PWM and GPIO observation as a pre-implementation audit gate.
+- This entry is documentation-only. No firmware, ROS2 workspace, network transport, build, flash, device, SLAM, navigation, or vehicle test was performed.
 
 ## Standalone Tools Record
 

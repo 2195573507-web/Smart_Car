@@ -11,6 +11,7 @@ enum DeveloperPage: Equatable {
 @MainActor
 final class SmartCarViewModel: ObservableObject {
     private static let angleUnitDefaultsKey = "smartcar.angleUnit"
+    private static let joystickMaximumSpeed: Float = 800.0
 
     let bleManager: BLEManager
     let telemetryStore: TelemetryStore
@@ -43,6 +44,7 @@ final class SmartCarViewModel: ObservableObject {
     private var wheelCommandTimer: Timer?
     private var wheelHeartbeatTimer: Timer?
     private var lifecycleObservers: [NSObjectProtocol] = []
+    private var activeJoystickCommand: SmartCarProtocol.ControlCommand?
 
     var decodedMessages: [DecodedMessageRecord] { bleManager.decodedMessages }
     var stmLogStore: DeviceLogStore { bleManager.stmLogStore }
@@ -73,6 +75,7 @@ final class SmartCarViewModel: ObservableObject {
             if status != .connected {
                 self.stopWheelHeartbeat()
                 self.wheelTargets = Array(repeating: 0, count: 4)
+                self.activeJoystickCommand = nil
                 self.pidTuning.applyStatus = .unavailable
             }
         }
@@ -123,11 +126,13 @@ final class SmartCarViewModel: ObservableObject {
     func disconnect() {
         stopWheelHeartbeat()
         wheelTargets = Array(repeating: 0, count: 4)
+        activeJoystickCommand = nil
         bleManager.disconnect()
     }
 
     func setWheelTarget(index: Int, value: Double) {
         guard wheelTargets.indices.contains(index) else { return }
+        activeJoystickCommand = nil
         wheelTargets[index] = Float(max(-800, min(800, value)))
         if wheelTargets.allSatisfy({ $0 == 0.0 }) {
             sendZeroWheelSpeeds()
@@ -137,6 +142,7 @@ final class SmartCarViewModel: ObservableObject {
     }
 
     func setAllWheelTargets(_ value: Double) {
+        activeJoystickCommand = nil
         let clamped = Float(max(-800, min(800, value)))
         wheelTargets = Array(repeating: clamped, count: 4)
         if clamped == 0.0 {
@@ -171,10 +177,43 @@ final class SmartCarViewModel: ObservableObject {
 
     func sendZeroWheelSpeeds() {
         stopWheelHeartbeat()
+        activeJoystickCommand = nil
         wheelTargets = Array(repeating: 0, count: 4)
         guard status == .connected else { return }
         transmittedFrameCount += 1
         bleManager.sendWheelSpeeds(wheelTargets)
+    }
+
+    func setJoystickCommand(_ command: SmartCarProtocol.ControlCommand?) {
+        guard status == .connected else { return }
+        guard let command else {
+            sendZeroWheelSpeeds()
+            return
+        }
+
+        let speed = joystickSpeed
+        let targets: [Float]
+        switch command {
+        case .moveForward:
+            targets = [speed, speed, speed, speed]
+        case .moveBack:
+            targets = [-speed, -speed, -speed, -speed]
+        case .turnLeft:
+            targets = [speed, speed, -speed, -speed]
+        case .turnRight:
+            targets = [-speed, -speed, speed, speed]
+        case .stop, .speedControl:
+            sendZeroWheelSpeeds()
+            return
+        }
+
+        activeJoystickCommand = command
+        wheelTargets = targets
+        if targets.allSatisfy({ $0 == 0.0 }) {
+            sendZeroWheelSpeeds()
+        } else {
+            scheduleWheelCommand()
+        }
     }
 
     func ping() {
@@ -193,9 +232,8 @@ final class SmartCarViewModel: ObservableObject {
     func emergencyStop() { send(.stop) }
 
     func updateSpeed() {
-        guard status == .connected else { return }
-        transmittedFrameCount += 1
-        bleManager.sendSpeed(UInt8(speed.rounded()))
+        guard let activeJoystickCommand else { return }
+        setJoystickCommand(activeJoystickCommand)
     }
 
     func updateRadarSpeed() {
@@ -256,6 +294,11 @@ final class SmartCarViewModel: ObservableObject {
         wheelCommandTimer = nil
         wheelHeartbeatTimer?.invalidate()
         wheelHeartbeatTimer = nil
+    }
+
+    private var joystickSpeed: Float {
+        let percent = min(max(speed, 0.0), 100.0)
+        return Float(percent / 100.0) * Self.joystickMaximumSpeed
     }
 
     func refreshLogs() {

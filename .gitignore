@@ -27,6 +27,10 @@
 **/.build/
 **/xcuserdata/
 *.xcuserstate
+**/.swiftpm/
+
+# Local radar Wi-Fi credentials
+ESPS3/main/radar/radar_wifi_credentials.h
 
 # ROS2 generated workspaces
 **/install/

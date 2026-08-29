@@ -301,13 +301,15 @@ private struct VirtualJoystick: View {
                         let command = command(for: value.translation)
                         if command != activeCommand {
                             activeCommand = command
-                            command.map(viewModel.send)
+                            viewModel.setJoystickCommand(command)
                         }
                     }
                     .onEnded { _ in
                         translation = .zero
-                        activeCommand = nil
-                        viewModel.stop()
+                        if activeCommand != nil {
+                            activeCommand = nil
+                            viewModel.setJoystickCommand(nil)
+                        }
                     }
             )
         }
