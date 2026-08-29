@@ -154,6 +154,21 @@ ESP32-S3 TCP client
 | 保持 16 字节 `0x210`，只在新 MSPD 到达时发送，并增加独立 stale diagnostics | 较高 | 仅在实测证明发送间隔等价于采样年龄后 | 需协议评审批准 |
 | ROS 仅按 TCP 收包时间判定新鲜 | 无固件改动 | 不可以 | 明确禁止 |
 
+实施硬门：轮速 FIFO 只接受单调（允许定义过的回绕）且 `valid=true` 的源样本。FIFO overflow、outer wheel-stream sequence gap、源时间倒退或超过 stale timeout 后，必须停止积分并锁存 `odom_invalid`；只有显式结束并重新开始建图会话、收到新的同步样本后才能恢复。不能用“取最新一帧”掩盖丢失的中间路程。
+
+### 5.2 时间与序号语义
+
+必须在协议评审中把以下字段分开记录，禁止混用：
+
+| 层 | 来源 | 用途 |
+| --- | --- | --- |
+| outer S3RD sequence | S3 网关 | 按 `(device_id, stream_id, message_type)` 统计该流的重复/丢失/回绕 |
+| inner SCBP sequence | STM32 链路 | 全链路共享的 8 位序号；只能结合所有转发帧解释，不能按 `0x210` 单独判断连续 |
+| DualAHRS `sample_sequence` | `0x201` payload | 姿态采样连续性 |
+| wheel `sample_seq`/`sample_tick` | 新版 wheel-status 合同 | 轮速采样新鲜度和积分顺序 |
+
+SCBP header 本身没有通用 timestamp。STM32 payload 计时、S3 uptime 毫秒和 Windows/ROS 主机时钟属于三个时钟域；各自记录 reboot epoch、32 位回绕和 source-to-host age。live 初版以 ROS 主机接收时刻作为消息 header，源时间只用于 diagnostics，直到时钟偏移误差有实测上限。
+
 ### 潜在影响
 
 新增 telemetry 会占用 S3 Wi-Fi、RAM、CPU 和 ROS 网络带宽；错误的队列策略可能阻塞雷达或 STM32 控制链。轮速使用固定容量 FIFO（记录 overflow/drop 并触发 `odom_invalid`），姿态等纯观察流才可 latest-only；禁止可靠无限队列，并记录每类丢弃数。
@@ -193,14 +208,14 @@ ROS2_WIN/src/s3_ydlidar_bridge/src/transport.cpp
 ### 修改内容
 
 - 复用并泛化 `s3_ydlidar_bridge` 的 transport/reassembly；先将 envelope/parser/dispatcher 提取为同一 ROS package 的 `s3_gateway_protocol` library，禁止复制 socket 和拆包代码。
-- `TcpChunkAssembler` 必须执行 `max_ready_frames` 上限；明确满队列丢弃 oldest（雷达）或 latest-only（状态）的策略，并发布 dropped-ready 计数。
+- `TcpChunkAssembler` 必须执行 `max_ready_frames` 上限；雷达 ready 队列满时丢弃 oldest 并计数，轮速样本进入独立 FIFO，不能在 assembler 层用 latest-only 替代；姿态观察槽才可覆盖旧值。所有 dropped-ready/overflow 都进入 diagnostics。
 - 解析后优先只发布标准消息：`nav_msgs/msg/Odometry`、`diagnostic_msgs/msg/DiagnosticArray`；原始四轮值放入 diagnostics，避免为内部数组创建不必要的自定义 ROS message。
 - 可选发布 `sensor_msgs/msg/JointState` 作为只读车轮观测（速度换算为 rad/s，明确关节名和无 position 语义）。
-- 姿态首版使用 `geometry_msgs/msg/QuaternionStamped` 供观察；确认 REP-103、协方差、时间基准和重力补偿后再发布 `/imu/data_raw`。
-- `0x207` 的 LSM303 vector 映射为 `sensor_msgs/msg/MagneticField`，BMI323 vector 映射为 gyro；只有单位、轴向、协方差和时间确认后才发布 `sensor_msgs/msg/Imu`。
+- 姿态首版可发布只读 `geometry_msgs/msg/QuaternionStamped`，但只有在检查 schema、primary-valid/fault/stale、四元数有限性、范数和 wire `w,x,y,z` 到 ROS `x,y,z,w` 重排后才发布；未满足条件只发布 diagnostics。确认 REP-103、协方差、时间基准和重力补偿后，再分别映射标准 `sensor_msgs/msg/Imu` 或 `MagneticField`，不要把融合姿态伪装成 `/imu/data_raw`。
+- `0x207` 的 LSM303 vector 映射为 `sensor_msgs/msg/MagneticField`，BMI323 vector 仅在单位/轴向/协方差/时间确认后映射为 `sensor_msgs/msg/Imu` 的 angular velocity；不能把两者混成一个 `/imu/data_raw`。
 - 每个状态流使用 `diagnostic_updater::Updater`：最后一帧年龄、有效/丢弃/CRC/长度/序号计数、source timestamp/epoch、S3 与主机时钟差；不复制 diagnostics 源码。
-- stale 或身份不匹配时停止发布新状态；不发布零速度伪造运动已经停止，除非协议明确给出安全状态。
-- 轮速未具备源 `sample_tick/sample_seq/valid`（或批准的等价合同）时，节点只能发布实验诊断，不得发布作为 SLAM 输入的 live `/odom`。
+- stale 或身份不匹配时停止发布新状态；轮速进入锁存无效并停止 `odom -> base_link` 更新，不发布零速度伪造运动已经停止，除非协议明确给出安全状态。姿态观察流可继续发布明确标记 stale 的 diagnostics，但不能用于融合。
+- 轮速未具备源 `sample_tick/sample_seq/valid`（或批准的等价合同）时，节点只能发布实验诊断，不得发布作为 SLAM 输入的 live `/odom`；旧 `0x210` 只能离线回放。
 
 ### 潜在影响
 
@@ -236,10 +251,10 @@ ROS2_WIN/src/smartcar_state_bridge/
 - STM32 已将 `ENCODER_DIR_SIGN={+1,-1,+1,+1}` 应用于 raw feedback；ROS2 wire 默认倍率固定为 `[+1,+1,+1,+1]`。最终“前进为正”仍由 P1-0 实测确认，不能静默再次反相 RF。
 - 对右侧和左侧取平均，计算 `v` 与 `omega`；单位从 mm/s 转 m/s。
 - 直接链接 Humble `diff_drive_controller::Odometry`（2.54.0，commit `eb4ca17d610eb4315f7241c0134de1bdfc5748ea`），先在 wrapper 中验证 `dt`、finite、freshness 和重连重锚，再调用其 exact integration。Humble `updateFromVelocity()` 参数实际是每周期左右轮位移，不是 m/s；传入 `v_left*dt`、`v_right*dt`，并用编译探针锁定 API。
-- `dt<=0`、`dt` 过小、超过 stale timeout、NaN/Inf、source sequence 回退时跳过积分并进入 diagnostics；不要让 `robot_localization` 在 stale 后继续外推。
+- `dt<=0`、`dt` 过小、超过 stale timeout、NaN/Inf、source sequence 回退或 wheel FIFO overflow 时跳过积分并锁存 invalid，停止发布新的 odom TF，等待显式会话重开；不要让 `robot_localization` 在 stale 后继续外推。
 - 发布 `nav_msgs/msg/Odometry`，设置合理但保守的 twist covariance；未标定前不要给出虚假的高精度 pose covariance。
 - 独占发布 `odom -> base_link` TF。若后续启用 `robot_localization`，由 EKF 接管 odom TF，原始 odom 节点关闭 TF 发布。
-- 以参数控制 `publish_tf`、`wheel_radius_m`/`wheel_diameter_m`、`track_width_m`、`timeout_ms`、`wheel_speed_sign[4]`、`frame_id`、`child_frame_id`；`wheel_diameter_m` 不参与已是 mm/s 的线速度换算，只用于可选 JointState rad/s。
+- 以参数控制 `publish_tf`、`track_width_m`、`timeout_ms`、`wheel_speed_sign[4]`、`wheel_fifo_depth`、`frame_id`、`child_frame_id`；wire 默认 `wheel_speed_sign=[1,1,1,1]`。`0x210` 已是 mm/s，`wheel_diameter_m` 不参与线速度换算，仅在可选 `JointState` rad/s 输出中使用。
 - P1 默认不启动 EKF；若批准启用 `robot_localization`，显式 `use_control:false`、`two_d_mode:true`、`world_frame: odom`，并增加 stale supervisor/重置策略。
 
 ### 潜在影响
@@ -290,7 +305,7 @@ Compose 还必须增加仓库共享协议的只读挂载，例如：
 - ../../Common/SCBP_CAN:/ws/Common/SCBP_CAN:ro
 ```
 
-容器内 CMake 通过该路径编译/链接 `scbp_parser.c`、`scbp_crc.c`、`scbp_wire.c`（或一个已安装的共享 package），禁止复制一份 `scbp_protocol_defs.h`。地图、bag 和 evidence 使用明确的 named volume 或 Windows 主机目录，避免写入源码树。
+容器内 CMake 通过该路径编译/链接 `scbp_parser.c`、`scbp_crc.c`、`scbp_wire.c`（或一个已安装的共享 package），禁止复制一份 `scbp_protocol_defs.h`。Compose 还要把 `maps/`、`bags/`、`evidence/` 映射到 Windows 主机目录或独立 named volume；不能只依赖 `docker compose run --rm` 的可写层，否则地图、posegraph 和 rosbag 会随容器删除。
 
 ### 修改内容
 
@@ -341,6 +356,7 @@ Windows Docker 运行 live gateway 时必须使用 `docker compose run --service
 | `minimum_travel_distance`/`minimum_travel_heading` | 结合 X3 扫描频率、车辆最低可控速度和场地调参 |
 | `scan_buffer_size`/`scan_queue_size` | 有界；出现积压时先降速或丢弃过期扫描 |
 | `use_map_saver`/服务 | 优先使用官方 `slam_toolbox/save_map`、`serialize_map`；`nav2_map_server map_saver_cli` 作为独立备份，不另写地图导出器 |
+| `max_laser_range`/`minimum_time_interval`/`transform_timeout` | 依据 X3 实测量程、扫描频率和 TF 延迟设定；不得照搬模板默认值，任何超时/丢弃进入 diagnostics |
 
 ### 潜在影响
 
@@ -356,26 +372,26 @@ ros2 topic echo /map --once
 ros2 run tf2_tools view_frames
 ```
 
-先用 rosbag replay 验证，再做低速人工驾驶；地图优先通过官方 `slam_toolbox/save_map`/`serialize_map` 服务保存。需要独立 YAML/PGM 备份时使用 `nav2_map_server` 的 `map_saver_cli`，固定 `/map`、格式和持久化路径：
+先用 rosbag replay 验证，再做低速人工驾驶。replay 模式必须用 `ros2 bag play --clock`，所有参与节点（包括 slam_toolbox、TF/bridge）显式 `use_sim_time: true`；live 模式禁止 `/clock` 并显式 `use_sim_time: false`，两种模式不能混用。地图优先通过官方 `slam_toolbox/save_map`/`serialize_map` 服务保存 posegraph；需要独立 YAML/PGM 备份时使用 `nav2_map_server` 的 `map_saver_cli`，固定 `/map`、格式和持久化路径：
 
 ```bash
 ros2 run nav2_map_server map_saver_cli -t /map -f /ws/maps/p1_site_YYYYMMDD \
   --fmt pgm --mode trinary
 ```
 
-保存前确认机器人停止、最后一圈扫描已处理、地图无明显重影；建图期间不要启动 `nav2_map_server map_server` 发布第二个 `/map`。随后在单独的加载阶段用保存的 YAML/PGM 启动官方 `map_server`，验证 topic、分辨率、原点和坐标系一致。官方 map-saver launch 的 `use_sim_time` 默认不能原样用于真实车辆，项目 launch 必须显式传 `false`。
+保存前确认机器人停止、最后一圈扫描已处理、地图无明显重影；建图期间不要启动 `nav2_map_server map_server` 发布第二个 `/map`。随后在单独的加载阶段用保存的 YAML/PGM 启动官方 `map_server`，并用保存的 posegraph 启动 slam_toolbox localization/继续建图，分别验证 topic、分辨率、原点、坐标系和序列化文件可读。官方 map-saver launch 的 `use_sim_time` 默认不能原样用于真实车辆，项目 launch 必须显式传 `false`。
 
 ## 10. 阶段 P1-6：分层验证矩阵
 
 | 层级 | 输入 | 必须看到 | 不能据此声称 |
 | --- | --- | --- | --- |
 | H0 静态/单元 | golden YDLIDAR/telemetry bytes | 通用 envelope、SCBP decoder、序号、CRC、单位和 bounded queue 测试通过 | 真实无线或车辆可用 |
-| H1 离线 ROS | rosbag `/scan` + synthetic wheel telemetry（含 source age/valid） | `/scan`、`/odom`、TF、`/map` 正常 | S3 现场链路通过 |
+| H1 离线 ROS | rosbag `/scan` + synthetic wheel telemetry（含 source age/valid） | live/replay 时钟配置正确；`/scan`、`/odom`、TF、`/map` 正常 | S3 现场链路通过 |
 | H2 真实雷达 | S3 与 ROS2 同 LAN | 唯一 gateway 的实时 `/scan`、序号/年龄 diagnostics、过期 FIFO 丢弃 | 里程计或 SLAM 通过 |
 | H3 真实遥测 | STM32 wheel-status（含 freshness）-> S3 -> 唯一 gateway | `/odom` 方向、频率、时间单调；RF 不二次反相；反馈中断时停止积分 | 地图质量通过 |
 | H4 TF/时钟 | `/scan` + `/odom` + URDF + 三时钟记录 | 只有 `map -> odom -> base_link -> laser_frame`，无 message-filter/TF extrapolation 持续错误 | 车辆安全自动驾驶 |
 | H5 传感器闭环 | `/scan` + `/odom` + TF rosbag replay | `slam_toolbox` 地图稳定，官方 save/load 通过 | 真实现场链路通过 |
-| H6 低速人工驾驶 | 人工 `/App` 控制，物理急停在场 | 地图闭环、保存、重载；断 Wi-Fi/S3/雷达/反馈只降级 | ROS2 能控车 |
+| H6 低速人工驾驶 | 人工 `/App` 控制，物理急停在场 | 地图闭环、YAML/PGM 与 posegraph 分别保存/重载；断 Wi-Fi/S3/雷达/反馈只降级 | ROS2 能控车 |
 
 每层都记录：固件/ELF hash、ROS 镜像 digest、Git commit、apt 包版本、配置、命令、原始日志、原始 capture、bag、地图文件和结论。任何一层未通过都不得把下一层结果写成“完成”。
 
