@@ -13,8 +13,8 @@
 #include "motor_board_protocol.h"
 #include "motor_board_transport_uart.h"
 #include "pid_controller.h"
-#include "scbp_protocol_defs.h"
-#include "scbp_wire.h"
+#include "srp_registry.h"
+#include "srp_wire.h"
 #include "s3_service.h"
 #include "wheel_control_params.h"
 
@@ -463,10 +463,10 @@ bool motor_board_update_pid_params(float kp, float ki, float kd,
                                    float max_accel)
 {
     if (!isfinite(kp) || !isfinite(ki) || !isfinite(kd) ||
-        !isfinite(max_accel) || kp < SCBP_PID_KP_MIN || kp > SCBP_PID_KP_MAX ||
-        ki < SCBP_PID_KI_MIN || ki > SCBP_PID_KI_MAX ||
-        kd < SCBP_PID_KD_MIN || kd > SCBP_PID_KD_MAX ||
-        max_accel < SCBP_PID_ACCEL_MIN || max_accel > SCBP_PID_ACCEL_MAX) {
+        !isfinite(max_accel) || kp < SRP_PID_KP_MIN || kp > SRP_PID_KP_MAX ||
+        ki < SRP_PID_KI_MIN || ki > SRP_PID_KI_MAX ||
+        kd < SRP_PID_KD_MIN || kd > SRP_PID_KD_MAX ||
+        max_accel < SRP_PID_ACCEL_MIN || max_accel > SRP_PID_ACCEL_MAX) {
         return false;
     }
 
@@ -564,27 +564,27 @@ static void motor_board_update_pid(const mb_protocol_frame_t *frame)
 
 static void motor_board_send_wheel_status(void)
 {
-    uint8_t payload[SCBP_PAYLOAD_WHEEL_SPEED_STATUS_SIZE];
+    uint8_t payload[SRP_PAYLOAD_WHEEL_SPEED_STATUS_SIZE];
 
-    scbp_wire_write_f32_array_le(payload, s_actual_wheel_speed, MB_WHEEL_COUNT);
-    (void)s3_service_send_message(SCBP_CAN_PRIORITY_NORMAL,
-                                  SCBP_MSG_ID_WHEEL_SPEED_STATUS,
-                                  SCBP_CAN_FLAG_STREAM_DATA, payload,
+    srp_wire_write_f32_array_le(payload, s_actual_wheel_speed, MB_WHEEL_COUNT);
+    (void)s3_service_send_message(SRP_PRIORITY_TELEMETRY,
+                                  SRP_MSG_ID_WHEEL_SPEED_STATUS,
+                                  SRP_FLAG_STREAM_DATA, payload,
                                   sizeof(payload));
 }
 
 static void motor_board_send_power_status(void)
 {
     float voltage;
-    uint8_t payload[SCBP_PAYLOAD_POWER_STATUS_SIZE];
+    uint8_t payload[SRP_PAYLOAD_POWER_STATUS_SIZE];
 
     if (!motor_board_get_battery_voltage(&voltage)) {
         return;
     }
-    scbp_wire_write_f32_le(payload, voltage);
-    (void)s3_service_send_message(SCBP_CAN_PRIORITY_NORMAL,
-                                  SCBP_MSG_ID_POWER_STATUS,
-                                  SCBP_CAN_FLAG_STREAM_DATA, payload,
+    srp_wire_write_f32_le(payload, voltage);
+    (void)s3_service_send_message(SRP_PRIORITY_TELEMETRY,
+                                  SRP_MSG_ID_POWER_STATUS,
+                                  SRP_FLAG_STREAM_DATA, payload,
                                   sizeof(payload));
 }
 

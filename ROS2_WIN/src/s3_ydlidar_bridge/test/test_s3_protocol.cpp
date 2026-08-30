@@ -108,6 +108,21 @@ TEST(S3Protocol, AcceptsCompleteNoIntensityAndIntensityPayloads) {
   EXPECT_EQ(extractor.counters().accepted_frames, 2U);
 }
 
+TEST(S3Protocol, AcceptsExperimentalTelemetryEnvelopeWithoutRadarChecks) {
+  s3_ydlidar_bridge::S3FrameExtractor extractor;
+  const std::vector<uint8_t> telemetry(16U, 0x5AU);
+  const auto packet = makeS3Frame(telemetry, 9U, 1U, 2U, 0x8000U);
+  size_t consumed = 0U;
+  s3_ydlidar_bridge::ReceivedFrame decoded;
+  ASSERT_EQ(extractor.extract(packet, consumed, decoded),
+            s3_ydlidar_bridge::ExtractStatus::kFrameReady);
+  EXPECT_EQ(consumed, packet.size());
+  EXPECT_EQ(decoded.message_type, 2U);
+  EXPECT_EQ(decoded.flags, 0x8000U);
+  EXPECT_FALSE(decoded.zero_packet);
+  EXPECT_EQ(decoded.payload, telemetry);
+}
+
 TEST(S3Protocol, AcceptsNormalAndZeroPositionFlagsWhenCtMatches) {
   s3_ydlidar_bridge::S3FrameExtractor extractor;
   const auto normal = makeS3Frame(minimalYdlidarPayload(false, 0U), 10U, 1U,
@@ -190,7 +205,7 @@ TEST(S3Protocol, HandlesSplitAndStickyTcpChunksWithoutDroppingFrames) {
   EXPECT_EQ(assembler.bufferedBytes(), 0U);
 }
 
-TEST(S3Protocol, PreservesAllStickyFramesPastTheLegacyReadyLimit) {
+TEST(S3Protocol, BoundsStickyReadyFramesAndCountsDrops) {
   auto extractor = std::make_shared<s3_ydlidar_bridge::S3FrameExtractor>();
   s3_ydlidar_bridge::TcpChunkAssembler assembler(extractor, 4096U, 1U);
   const auto first = makeS3Frame(minimalYdlidarPayload(false), 21U);
@@ -202,10 +217,9 @@ TEST(S3Protocol, PreservesAllStickyFramesPastTheLegacyReadyLimit) {
 
   ASSERT_TRUE(assembler.feed(sticky.data(), sticky.size()));
   const auto frames = assembler.takeAll();
-  ASSERT_EQ(frames.size(), 3U);
+  ASSERT_EQ(frames.size(), 1U);
   EXPECT_EQ(frames[0].sequence, 21U);
-  EXPECT_EQ(frames[1].sequence, 22U);
-  EXPECT_EQ(frames[2].sequence, 23U);
+  EXPECT_EQ(assembler.droppedReadyFrames(), 2U);
 }
 
 TEST(S3Protocol, GoldenS3rdReplayPublishesOnlyAtTheNextZeroPacket) {

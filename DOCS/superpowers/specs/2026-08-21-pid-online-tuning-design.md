@@ -8,13 +8,13 @@ Date: 2026-08-21
 
 This change adds one runtime configuration transaction and a macOS operator
 surface. It does not change GPIO, UART ownership, motor-board protocol bytes,
-the SCBP frame envelope, or the existing wheel-speed command semantics.
+the SRPv4 frame envelope, or the existing wheel-speed command semantics.
 
 Implementation file boundary:
 
 | Area | Files in scope |
 | --- | --- |
-| Shared protocol | `Common/SCBP_CAN/include/scbp_protocol_defs.h`, `Common/SCBP_CAN/scbp_wire.c`, `Common/SCBP_CAN/tests/test_scbp_can.c` |
+| Shared protocol | `Common/SRP/include/srp_registry.h`, `Common/SRP/srp_wire.c`, `Common/SRP/tests/test_srp_codec.c` |
 | CM7 PID/API | `STM32H757/CM7/Core/Inc/pid_controller.h`, `STM32H757/CM7/Core/Src/pid_controller.c`, `STM32H757/Middleware/MotorBoard/motor_board_task.h`, `STM32H757/Middleware/MotorBoard/motor_board_task.c`, `STM32H757/Middleware/Communication/Services/s3_service.c` |
 | S3 bridge | `ESPS3/components/smartcar_protocol/include/app_parser.h`, `ESPS3/components/smartcar_service/command_bridge.c` |
 | macOS App | `IOS_APP/SmartCar_Control_MAC/Sources/SmartCar_Control_MAC/Model/SmartCarProtocol.swift`, `BLE/BLEManager.swift`, `ViewModels/SmartCarViewModel.swift`, `UI/WheelSpeedControlCard.swift`, new `UI/PIDTuningCard.swift`, and focused state/model tests if the package test target is introduced |
@@ -25,26 +25,26 @@ Ownership remains layered:
 | Layer | Responsibility |
 | --- | --- |
 | macOS App | Validate/edit parameters, display four-wheel telemetry, send App BLE `TYPE 0x1D` on Apply |
-| ESP32-S3 | Validate App frame, translate it into SCBP-CAN `0x111`, correlate ACK, return App ACK |
-| STM32H757 S3 service | Validate SCBP source/destination/length/values, invoke MotorBoard update, send fast ACK |
+| ESP32-S3 | Validate App frame, translate it into SRPv4 `0x03`, correlate ACK, return App ACK |
+| STM32H757 S3 service | Validate SRPv4 destination/length/values, invoke MotorBoard update, send fast ACK |
 | MotorBoard task | Own the four PID/Ramp instances and apply one coherent runtime update |
-| Shared SCBP layer | Define ID/length and explicit float32 little-endian wire helpers |
+| Shared SRP layer | Define type/length and explicit float32 little-endian wire helpers |
 
 The PID configuration is global: one tuple is applied to all M1 through M4.
 
 ## 2. Protocol Design
 
-### 2.1 SCBP-CAN command
+### 2.1 SRPv4 command
 
 Add:
 
 ```c
-#define SCBP_MSG_ID_PID_PARAMS_CMD UINT16_C(0x111)
-#define SCBP_PAYLOAD_PID_PARAMS_SIZE UINT16_C(16)
+#define SRP_MSG_ID_PID_PARAMS_CMD UINT8_C(0x03)
+#define SRP_PAYLOAD_PID_PARAMS_SIZE UINT16_C(16)
 ```
 
 Direction is S3 to STM32H757. The frame uses realtime priority and
-`SCBP_CAN_FLAG_ACK_REQUIRED`. Payload fields are fixed and have no padding:
+`SRP_FLAG_ACK_REQUIRED`. Payload fields are fixed and have no padding:
 
 | Offset | Field | Encoding | Units |
 | ---: | --- | --- | --- |
@@ -53,7 +53,7 @@ Direction is S3 to STM32H757. The frame uses realtime priority and
 | 8 | `kd` | f32 LE | controller gain |
 | 12 | `max_accel` | f32 LE | mm/s^2 |
 
-The existing `scbp_wire_write/read_f32_le` helpers and four-element array
+The existing `srp_wire_write/read_f32_le` helpers and four-element array
 helpers remain the only serialization path. No packed C struct is used for
 the command payload.
 
@@ -61,11 +61,11 @@ the command payload.
 
 Add App frame type `0x1D` named `PID_PARAMS_CMD`, with the same 16-byte payload
 and field order. The App frame remains `AA 01 TYPE LEN payload CRC 55`; S3
-re-envelopes the validated payload into a new SCBP-CAN frame.
+re-envelopes the validated payload into a new SRPv4 frame.
 
 The App ACK remains type `0x06` with `{acknowledged_type_u8, result_u8}`.
 `Apply` reports success only after the S3 receives an STM ACK with status
-`SCBP_FAST_RESP_OK`. Invalid App data or an STM rejection maps to the existing
+`SRP_FAST_RESP_OK`. Invalid App data or an STM rejection maps to the existing
 rejected result.
 
 ## 3. Firmware Design
@@ -102,7 +102,7 @@ control cycle without a motion discontinuity.
 
 ### 3.3 STM service dispatch
 
-Add a `SCBP_MSG_ID_PID_PARAMS_CMD` branch in `s3_service_on_frame()`:
+Add a `SRP_MSG_ID_PID_PARAMS_CMD` branch in `s3_service_on_frame()`:
 
 1. Require a non-null payload and exact length 16.
 2. Decode four explicit f32 LE values.
@@ -120,17 +120,17 @@ correlation behavior.
 In `command_bridge.c`, extend the App parser dispatch for type `0x1D`:
 
 1. Require exactly 16 bytes.
-2. Decode with `scbp_wire_read_f32_array_le`-equivalent scalar checks and
+2. Decode with `srp_wire_read_f32_array_le`-equivalent scalar checks and
    enforce the shared ranges before enqueueing a transaction.
-3. Call `scbp_link_send()` with realtime priority, STM destination, message
-   `SCBP_MSG_ID_PID_PARAMS_CMD`, `ACK_REQUIRED`, and the unchanged 16-byte
+3. Call `srp_link_send()` with command priority, STM destination, message
+   `SRP_MSG_ID_PID_PARAMS_CMD`, `ACK_REQUIRED`, and the unchanged 16-byte
    payload.
 4. Use a callback context identifying App type `0x1D`; return App ACK only
-   after the SCBP transaction completes.
+   after the SRPv4 transaction completes.
 
-The bridge remains bounded by the existing service task and four pending SCBP
+The bridge remains bounded by the existing service task and four pending SRPv4
 transaction slots. It does not allocate per Apply request and does not retry
-the App frame independently of the SCBP link manager.
+the App frame independently of the SRPv4 link manager.
 
 ## 5. macOS App Design
 
@@ -187,7 +187,7 @@ standard SwiftUI controls and no additional dependency.
 - Invalid lengths, non-finite floats, and out-of-range values are rejected at
   App, S3, and STM boundaries.
 - A failed validation is atomic: no subset of wheels changes.
-- SCBP ACK timeout/retry behavior remains the existing 500 ms and three retry
+- SRPv4 ACK timeout/retry behavior remains the existing 500 ms and three retry
   policy; App receives rejected status after exhaustion.
 - BLE disconnect and existing wheel watchdog behavior are unchanged. PID
   parameters are runtime-only and revert to compile-time defaults on reboot.
@@ -198,7 +198,7 @@ standard SwiftUI controls and no additional dependency.
 ### Host protocol tests
 
 Add golden-byte tests for PID payload encoding/decoding, exact 16-byte length,
-non-finite/range rejection, and SCBP `0x111` ACK correlation. Preserve all
+non-finite/range rejection, and SRPv4 `0x03` ACK correlation. Preserve all
 existing parser, CRC, retry, and bus-off tests.
 
 ### CM7 tests/build
@@ -210,7 +210,7 @@ existing parser, CRC, retry, and bus-off tests.
 
 ### S3 build
 
-- Build the ESP-IDF S3 bridge with the shared SCBP component and verify the App
+- Build the ESP-IDF S3 bridge with the shared SRP component and verify the App
   `0x1D` path compiles with no warnings.
 - Exercise the App parser and bridge callback with valid, malformed, and
   out-of-range 16-byte payloads using host doubles where available.

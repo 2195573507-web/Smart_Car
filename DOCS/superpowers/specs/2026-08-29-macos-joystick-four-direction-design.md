@@ -14,7 +14,7 @@ STM32 应用和车辆行为仍为 `UNVERIFIED`。本文只覆盖当前
 当前摇杆的方向命令不能沿已实现的 S3 -> STM32 轮速路径得到确认。
 
 现有轮速路径保持不变：App 发送四个 little-endian `float32` 轮速，S3
-转发为 SCBP `WHEEL_SPEED_CMD(0x110)`，STM32 接收顺序为
+转发为 SRPv4 `WHEEL_SPEED_CMD(0x02)`，STM32 接收顺序为
 `[M1:RR, M2:RF, M3:LR, M4:LF]`。
 
 ## 目标
@@ -69,7 +69,7 @@ VirtualJoystick
   -> BLEManager.sendWheelSpeeds()
   -> App BLE 0x15 (4 x f32 LE)
   -> S3 command_bridge
-  -> SCBP 0x110
+  -> SRPv4 0x02
   -> STM32 wheel targets / MotorBoard
 ```
 

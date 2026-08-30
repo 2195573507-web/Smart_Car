@@ -65,8 +65,12 @@ See `config/bridge.yaml`. Important fields are `frame_id`, `angle_min/max`
 (radians), `range_min/max` (metres), `samples`, `scan_frequency_hz`, and
 `stale_after_ms`. TCP fields include `tcp_listen_address`, `tcp_listen_port`,
 bounded buffer/frame limits, and expected S3 version/type, allowed flags mask,
-and device/stream IDs. The inner payload minimum is 10 bytes, the YDLIDAR
-packet header length. The experimental flags mask defaults to `0x0001`:
+and device/stream IDs. The shared extractor accepts the experimental telemetry
+message type `2` with its separate SRPv4 payload bounds, while applying the
+10-byte YDLIDAR header check only to `RAW_YDLIDAR_FRAME`. Telemetry is decoded
+for diagnostics using the canonical `Common/SRP` wire helpers; legacy
+`0x210` remains marked as missing source freshness and is not published as
+`/odom`. The experimental flags mask defaults to `0x0001`:
 flags `0x0000` and `0x0001` are accepted only when bit 0 matches the YDLIDAR
 payload CT bit. A zero-position packet is a revolution boundary: the first
 starts accumulation, and the next publishes the preceding complete revolution
@@ -101,7 +105,9 @@ docker compose run --rm --service-ports ros2-dev rqt
 
 ## Evidence boundary
 
-`S3RD` is an experimental candidate based on the task-provided fields because
-`ESPS3/main/radar/radar_uplink_protocol.c` is absent from this repository. This
-workspace provides an opt-in LAN TCP PoC; it does not claim a real S3 Wi-Fi
-connection, real-device `/scan`, timing accuracy, SLAM, or vehicle operation.
+`S3RD` is an experimental candidate. The source
+`ESPS3/main/radar/radar_uplink_protocol.c` now exists in the working tree, but
+the uplink remains opt-in/default-disabled and no frozen compatibility contract
+or current end-to-end S3 capture has been accepted. This workspace provides a
+LAN TCP PoC and historical live `/scan` evidence only; it does not claim the
+current S3 firmware chain, timing accuracy, SLAM, or vehicle operation.

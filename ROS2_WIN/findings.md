@@ -23,7 +23,7 @@
   SDK's triangle path is the adopted source of the exact q2 distance scale
   and second-level angle correction.
 - Existing project audit states radar input is ESP32-S3 UART1/GPIO44 and ROS2
-  must not access the radar UART or alter STM32 UART2/SCBP-CAN/PWM/BLE paths.
+  must not access the radar UART or alter STM32 UART2/SRPv4/PWM/BLE paths.
 - The inspected YDLIDAR SDK and ROS2 driver archives and the radar-material
   directory contain no binary/raw scan capture suitable for an official sample
   replay. Offline fixtures are therefore deterministic SDK-format test bytes,
@@ -31,7 +31,7 @@
 - Cross-project protocol audit: `ESPS3/docs/S3_YDLIDAR_X3PRO_TEST.md` is limited
   to UART1/GPIO44 raw capture, while `DOCS/architecture/data_flow.md` and
   `DOCS/ESP32/S3_ARCHITECTURE.md` mark the Wi-Fi radar bridge contract as
-  future work. The existing STM-S3 `AA 55` SCBP frame is a separate control/
+  future work. The existing STM-S3 `AA 55` SRPv4 frame is a separate control/
   status envelope and is not reused for radar data.
 
 ## Windows bridge startup diagnostic (2026-08-29)

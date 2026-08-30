@@ -13,17 +13,21 @@
 #include <unistd.h>
 
 #include "esp_event.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "lwip/inet.h"
 #include "radar_uplink_protocol.h"
 #include "radar_uplink_tx.h"
+#include "radar_telemetry_queue.h"
 #include "radar_uart.h"
 #include "s3_ble.h"
+#include "smartcar_service.h"
 
 #include "sdkconfig.h"
 #if CONFIG_SMARTCAR_RADAR_UPLINK_ENABLED
@@ -34,7 +38,7 @@ static const char *TAG = "RADAR_UPLINK";
 
 #define RADAR_UPLINK_WIFI_CONNECTED BIT0
 #define RADAR_UPLINK_WIFI_ROTATE BIT1
-#define RADAR_UPLINK_TASK_STACK_SIZE 4096U
+#define RADAR_UPLINK_TASK_STACK_SIZE 6144U
 #define RADAR_UPLINK_TASK_PRIORITY 4U
 /* Notifications wake the sender; this timeout still services Wi-Fi state. */
 #define RADAR_UPLINK_WAIT_MS 100U
@@ -47,6 +51,11 @@ static const char *TAG = "RADAR_UPLINK";
 #define RADAR_UPLINK_RETRY_YIELD_TICKS 1U
 #define RADAR_UPLINK_WIFI_SSID_MAX_LEN 32U
 #define RADAR_UPLINK_WIFI_PASSWORD_MAX_LEN 64U
+#define RADAR_UPLINK_TELEMETRY_WHEEL_FIFO_DEPTH 32U
+/* Candidate operational limits; tune only after a real capture. */
+#define RADAR_UPLINK_MAX_RADAR_DEQUEUE_AGE_MS 500U
+#define RADAR_UPLINK_MAX_TELEMETRY_AGE_MS 1000U
+#define RADAR_UPLINK_TELEMETRY_MUTEX_WAIT_TICKS 0U
 
 #if CONFIG_SMARTCAR_RADAR_UPLINK_ENABLED
 static void radar_uplink_ble_log(smartcar_log_level_t level,
@@ -91,6 +100,14 @@ static bool s_initialized;
 static bool s_wifi_started;
 static int s_socket = -1;
 static size_t s_wifi_credential_index;
+static radar_telemetry_queue_t s_telemetry_queue;
+static radar_telemetry_entry_t *s_telemetry_wheel_entries;
+static radar_telemetry_entry_t s_telemetry_attitude_entry;
+static radar_telemetry_entry_t s_telemetry_imu_entries[RADAR_TELEMETRY_QUEUE_IMU_SLOT_COUNT];
+static SemaphoreHandle_t s_telemetry_mutex;
+static StaticSemaphore_t s_telemetry_mutex_storage;
+static bool s_telemetry_queue_ready;
+static volatile uint32_t s_telemetry_lock_drops;
 typedef struct {
     uint32_t successful_frames;
     uint64_t successful_bytes;
@@ -102,6 +119,14 @@ typedef struct {
     uint32_t reconnects;
     uint32_t resync_discarded_frames;
     uint32_t encode_failures;
+    uint32_t radar_stale_drops;
+    uint32_t radar_sequence_gaps;
+    uint32_t telemetry_stale_drops;
+    uint32_t telemetry_encode_failures;
+    uint32_t telemetry_sent_frames;
+    uint64_t telemetry_sent_bytes;
+    uint32_t last_telemetry_sequence;
+    uint32_t telemetry_lock_drops;
     uint32_t last_sent_sequence;
     uint32_t max_dequeue_age_ms;
     uint32_t last_report_ms;
@@ -113,6 +138,118 @@ static void notify_uplink_task(void)
     if (s_uplink_task != NULL) {
         xTaskNotifyGive(s_uplink_task);
     }
+}
+
+static void telemetry_queue_release(void)
+{
+    /* The service setter is only legal before service init, which is the
+     * only lifecycle in which this rollback helper is called. */
+    (void)smartcar_service_set_telemetry_sink(NULL, NULL);
+    s_telemetry_queue_ready = false;
+    s_telemetry_mutex = NULL;
+    if (s_telemetry_wheel_entries != NULL) {
+        heap_caps_free(s_telemetry_wheel_entries);
+        s_telemetry_wheel_entries = NULL;
+    }
+}
+
+static esp_err_t telemetry_queue_prepare(void)
+{
+    const size_t storage_bytes = RADAR_UPLINK_TELEMETRY_WHEEL_FIFO_DEPTH *
+                                 sizeof(*s_telemetry_wheel_entries);
+    const radar_telemetry_queue_storage_t storage = {
+        .wheel_entries = NULL,
+        .wheel_capacity = RADAR_UPLINK_TELEMETRY_WHEEL_FIFO_DEPTH,
+        .attitude_entry = &s_telemetry_attitude_entry,
+        .imu_entries = s_telemetry_imu_entries,
+    };
+
+    s_telemetry_wheel_entries = heap_caps_calloc(
+        RADAR_UPLINK_TELEMETRY_WHEEL_FIFO_DEPTH,
+        sizeof(*s_telemetry_wheel_entries),
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (s_telemetry_wheel_entries == NULL) {
+        ESP_LOGE(TAG, "TELEMETRY FIFO PSRAM ALLOC FAILED entries=%u bytes=%u",
+                 (unsigned)RADAR_UPLINK_TELEMETRY_WHEEL_FIFO_DEPTH,
+                 (unsigned)storage_bytes);
+        return ESP_ERR_NO_MEM;
+    }
+
+    radar_telemetry_queue_storage_t mutable_storage = storage;
+    mutable_storage.wheel_entries = s_telemetry_wheel_entries;
+    if (!radar_telemetry_queue_init(&s_telemetry_queue, &mutable_storage)) {
+        telemetry_queue_release();
+        return ESP_ERR_INVALID_STATE;
+    }
+    s_telemetry_mutex = xSemaphoreCreateMutexStatic(&s_telemetry_mutex_storage);
+    if (s_telemetry_mutex == NULL) {
+        telemetry_queue_release();
+        return ESP_ERR_NO_MEM;
+    }
+    s_telemetry_queue_ready = true;
+    ESP_LOGI(TAG, "TELEMETRY FIFO READY entries=%u bytes=%u",
+             (unsigned)RADAR_UPLINK_TELEMETRY_WHEEL_FIFO_DEPTH,
+             (unsigned)storage_bytes);
+    return ESP_OK;
+}
+
+static bool radar_uplink_telemetry_sink(uint16_t message_id,
+                                        const uint8_t *encoded_frame,
+                                        uint16_t encoded_length,
+                                        uint32_t ingress_timestamp_ms,
+                                        void *context)
+{
+    bool queued = false;
+
+    if (context != &s_telemetry_queue || !s_telemetry_queue_ready ||
+        s_telemetry_mutex == NULL ||
+        xSemaphoreTake(s_telemetry_mutex,
+                       RADAR_UPLINK_TELEMETRY_MUTEX_WAIT_TICKS) != pdTRUE) {
+        ++s_telemetry_lock_drops;
+        return false;
+    }
+    queued = radar_telemetry_queue_push(&s_telemetry_queue,
+                                        message_id,
+                                        encoded_frame,
+                                        encoded_length,
+                                        ingress_timestamp_ms);
+    (void)xSemaphoreGive(s_telemetry_mutex);
+    if (queued) {
+        notify_uplink_task();
+    }
+    return queued;
+}
+
+static bool radar_uplink_pop_telemetry(radar_telemetry_entry_t *entry)
+{
+    bool popped = false;
+
+    if (entry == NULL || !s_telemetry_queue_ready || s_telemetry_mutex == NULL ||
+        xSemaphoreTake(s_telemetry_mutex,
+                       RADAR_UPLINK_TELEMETRY_MUTEX_WAIT_TICKS) != pdTRUE) {
+        ++s_telemetry_lock_drops;
+        return false;
+    }
+    popped = radar_telemetry_queue_pop(&s_telemetry_queue, entry);
+    (void)xSemaphoreGive(s_telemetry_mutex);
+    return popped;
+}
+
+static void radar_uplink_get_telemetry_stats(
+    radar_telemetry_queue_stats_t *stats)
+{
+    if (stats == NULL) {
+        return;
+    }
+    (void)memset(stats, 0, sizeof(*stats));
+    if (!s_telemetry_queue_ready || s_telemetry_mutex == NULL ||
+        xSemaphoreTake(s_telemetry_mutex,
+                       RADAR_UPLINK_TELEMETRY_MUTEX_WAIT_TICKS) != pdTRUE) {
+        ++s_telemetry_lock_drops;
+        return;
+    }
+    radar_telemetry_queue_get_stats(&s_telemetry_queue, stats);
+    (void)xSemaphoreGive(s_telemetry_mutex);
 }
 
 static const radar_wifi_credential_t *current_wifi_credential(void)
@@ -303,6 +440,9 @@ static void radar_uplink_reset_after_disconnect(
 static void radar_uplink_log_stats(radar_uplink_stats_t *stats)
 {
     const uint32_t now_ms = (uint32_t)esp_log_timestamp();
+    radar_telemetry_queue_stats_t telemetry_stats;
+    const UBaseType_t stack_hwm = uxTaskGetStackHighWaterMark(NULL);
+
     if (stats == NULL ||
         (stats->report_timestamp_valid &&
          (uint32_t)(now_ms - stats->last_report_ms) < RADAR_UPLINK_STATS_INTERVAL_MS)) {
@@ -311,13 +451,20 @@ static void radar_uplink_log_stats(radar_uplink_stats_t *stats)
 
     stats->last_report_ms = now_ms;
     stats->report_timestamp_valid = true;
+    stats->telemetry_lock_drops = s_telemetry_lock_drops;
+    radar_uplink_get_telemetry_stats(&telemetry_stats);
     ESP_LOGI(TAG,
              "RADAR_UPLINK_STATS sent=%" PRIu32 " bytes=%" PRIu64
              " send_fail=%" PRIu32 " send_timeout=%" PRIu32
              " partial=%" PRIu32 " pending_retry=%" PRIu32
              " connect_fail=%" PRIu32 " reconnect=%" PRIu32
              " sync_drop=%" PRIu32 " encode_fail=%" PRIu32
-             " last_seq=%" PRIu32 " max_age_ms=%" PRIu32,
+             " stale_drop=%" PRIu32 " seq_gap=%" PRIu32
+             " telem_sent=%" PRIu32 " telem_bytes=%" PRIu64
+             " telem_stale=%" PRIu32 " telem_encode=%" PRIu32
+             " telem_q=%u telem_q_drop=%" PRIu32 " telem_q_reject=%" PRIu32
+             " last_seq=%" PRIu32 " telem_seq=%" PRIu32
+             " max_age_ms=%" PRIu32 " stack_hwm=%u",
              stats->successful_frames,
              stats->successful_bytes,
              stats->send_failures,
@@ -328,14 +475,27 @@ static void radar_uplink_log_stats(radar_uplink_stats_t *stats)
              stats->reconnects,
              stats->resync_discarded_frames,
              stats->encode_failures,
+             stats->radar_stale_drops,
+             stats->radar_sequence_gaps,
+             stats->telemetry_sent_frames,
+             stats->telemetry_sent_bytes,
+             stats->telemetry_stale_drops,
+             stats->telemetry_encode_failures,
+             (unsigned)telemetry_stats.depth,
+             telemetry_stats.wheel.dropped,
+             telemetry_stats.rejected,
              stats->last_sent_sequence,
-             stats->max_dequeue_age_ms);
+             stats->last_telemetry_sequence,
+             stats->max_dequeue_age_ms,
+             (unsigned)stack_hwm);
 
     radar_uplink_ble_log(SMARTCAR_LOG_LEVEL_INFO,
                          "UPLINK_STATS sent=%" PRIu32 " fail=%" PRIu32
                          " timeout=%" PRIu32 " conn_fail=%" PRIu32
                          " reconn=%" PRIu32 " seq=%" PRIu32
-                         " age=%" PRIu32 " sync=%" PRIu32,
+                         " age=%" PRIu32 " sync=%" PRIu32
+                         " t_sent=%" PRIu32 " t_stale=%" PRIu32
+                         " t_q=%u",
                          stats->successful_frames,
                          stats->send_failures,
                          stats->send_timeouts,
@@ -343,8 +503,156 @@ static void radar_uplink_log_stats(radar_uplink_stats_t *stats)
                          stats->reconnects,
                          stats->last_sent_sequence,
                          stats->max_dequeue_age_ms,
-                         stats->resync_discarded_frames);
+                         stats->resync_discarded_frames,
+                         stats->telemetry_sent_frames,
+                         stats->telemetry_stale_drops,
+                         (unsigned)telemetry_stats.depth);
     stats->max_dequeue_age_ms = 0U;
+}
+
+typedef enum {
+    RADAR_UPLINK_PENDING_NONE = 0,
+    RADAR_UPLINK_PENDING_RADAR,
+    RADAR_UPLINK_PENDING_TELEMETRY,
+} radar_uplink_pending_kind_t;
+
+static bool radar_uplink_prepare_telemetry_packet(
+    radar_telemetry_entry_t *entry,
+    uint8_t *packet,
+    size_t packet_capacity,
+    size_t *packet_length,
+    uint32_t *uplink_sequence,
+    radar_uplink_stats_t *stats)
+{
+    if (entry == NULL || packet == NULL || packet_length == NULL ||
+        uplink_sequence == NULL || stats == NULL) {
+        return false;
+    }
+
+    for (;;) {
+        if (!radar_uplink_pop_telemetry(entry)) {
+            return false;
+        }
+
+        const uint32_t now_ms = (uint32_t)esp_log_timestamp();
+        const uint32_t age_ms = (uint32_t)(now_ms - entry->ingress_timestamp_ms);
+        if (age_ms > RADAR_UPLINK_MAX_TELEMETRY_AGE_MS) {
+            ++stats->telemetry_stale_drops;
+            continue;
+        }
+
+        uint32_t sequence = *uplink_sequence + 1U;
+        if (sequence == 0U) {
+            sequence = 1U;
+        }
+        const radar_uplink_status_t status = radar_uplink_encode_envelope(
+            entry->data,
+            entry->length,
+            RADAR_UPLINK_MESSAGE_SRP_TELEMETRY_EXPERIMENTAL,
+            0U,
+            (uint32_t)CONFIG_SMARTCAR_RADAR_UPLINK_DEVICE_ID,
+            (uint32_t)CONFIG_SMARTCAR_RADAR_UPLINK_STREAM_ID,
+            sequence,
+            entry->ingress_timestamp_ms,
+            packet,
+            packet_capacity,
+            packet_length);
+        if (status != RADAR_UPLINK_OK) {
+            ++stats->telemetry_encode_failures;
+            continue;
+        }
+
+        *uplink_sequence = sequence;
+        return true;
+    }
+}
+
+static bool radar_uplink_prepare_radar_packet(
+    uint8_t *frame,
+    size_t frame_capacity,
+    size_t *frame_length,
+    uint32_t *frame_sequence,
+    uint32_t *frame_timestamp_ms,
+    uint32_t *dequeue_age_ms,
+    uint8_t *packet,
+    size_t packet_capacity,
+    size_t *packet_length,
+    bool *waiting_for_zero_packet,
+    bool *radar_sequence_valid,
+    uint32_t *last_radar_sequence,
+    bool *zero_packet,
+    uint32_t *uplink_sequence,
+    radar_uplink_stats_t *stats)
+{
+    if (frame == NULL || frame_length == NULL || frame_sequence == NULL ||
+        frame_timestamp_ms == NULL || dequeue_age_ms == NULL || packet == NULL ||
+        packet_length == NULL || waiting_for_zero_packet == NULL ||
+        radar_sequence_valid == NULL || last_radar_sequence == NULL ||
+        zero_packet == NULL || uplink_sequence == NULL || stats == NULL) {
+        return false;
+    }
+
+    while (radar_uart_pop_frame(frame,
+                                frame_capacity,
+                                frame_length,
+                                frame_sequence,
+                                frame_timestamp_ms,
+                                dequeue_age_ms)) {
+        if (*frame_sequence == 0U) {
+            ++stats->encode_failures;
+            *waiting_for_zero_packet = true;
+            *radar_sequence_valid = false;
+            continue;
+        }
+        if (*dequeue_age_ms > RADAR_UPLINK_MAX_RADAR_DEQUEUE_AGE_MS) {
+            ++stats->radar_stale_drops;
+            *waiting_for_zero_packet = true;
+            *radar_sequence_valid = false;
+            continue;
+        }
+
+        const bool is_zero = radar_uplink_frame_is_zero_packet(frame,
+                                                                *frame_length);
+        if (!*waiting_for_zero_packet && *radar_sequence_valid &&
+            *frame_sequence != *last_radar_sequence + 1U) {
+            ++stats->radar_sequence_gaps;
+            *waiting_for_zero_packet = true;
+            *radar_sequence_valid = false;
+            if (!is_zero) {
+                ++stats->resync_discarded_frames;
+                continue;
+            }
+        }
+        if (*waiting_for_zero_packet && !is_zero) {
+            ++stats->resync_discarded_frames;
+            continue;
+        }
+
+        uint32_t packet_sequence = *uplink_sequence + 1U;
+        if (packet_sequence == 0U) {
+            packet_sequence = 1U;
+        }
+        if (radar_uplink_encode_frame(
+                frame,
+                *frame_length,
+                (uint32_t)CONFIG_SMARTCAR_RADAR_UPLINK_DEVICE_ID,
+                (uint32_t)CONFIG_SMARTCAR_RADAR_UPLINK_STREAM_ID,
+                packet_sequence,
+                *frame_timestamp_ms,
+                packet,
+                packet_capacity,
+                packet_length) != RADAR_UPLINK_OK) {
+            ++stats->encode_failures;
+            *waiting_for_zero_packet = true;
+            *radar_sequence_valid = false;
+            continue;
+        }
+
+        *uplink_sequence = packet_sequence;
+        *zero_packet = is_zero;
+        return true;
+    }
+    return false;
 }
 
 static void radar_uplink_task(void *context)
@@ -354,23 +662,34 @@ static void radar_uplink_task(void *context)
     uint8_t packet[RADAR_UPLINK_MAX_PACKET_SIZE];
     size_t frame_length = 0U;
     size_t packet_length = 0U;
-    uint32_t sequence = 0U;
+    uint32_t radar_frame_sequence = 0U;
+    uint32_t uplink_sequence = 0U;
     uint32_t timestamp_ms = 0U;
+    uint32_t pending_sequence = 0U;
+    uint32_t pending_radar_frame_sequence = 0U;
     uint32_t retry_ms = RADAR_UPLINK_RETRY_INITIAL_MS;
     uint32_t wifi_retry_ms = RADAR_UPLINK_RETRY_INITIAL_MS;
     bool wifi_connected_logged = false;
     bool pending_packet = false;
     bool pending_zero_packet = false;
     bool waiting_for_zero_packet = true;
+    bool radar_sequence_valid = false;
+    uint32_t last_radar_sequence = 0U;
+    bool telemetry_turn = false;
+    bool credential_rotated = false;
+    radar_uplink_pending_kind_t pending_kind = RADAR_UPLINK_PENDING_NONE;
+    radar_telemetry_entry_t telemetry_entry;
     radar_uplink_tx_state_t tx_state = {0};
     radar_uplink_stats_t stats = {0};
 
     for (;;) {
         (void)ulTaskNotifyTake(pdFALSE, pdMS_TO_TICKS(RADAR_UPLINK_WAIT_MS));
+        credential_rotated = false;
         EventBits_t bits = xEventGroupGetBits(s_wifi_events);
         if ((xEventGroupClearBits(s_wifi_events, RADAR_UPLINK_WIFI_ROTATE) &
              RADAR_UPLINK_WIFI_ROTATE) != 0U) {
             advance_wifi_credential();
+            credential_rotated = true;
             ESP_LOGW(TAG,
                      "WIFI DISCONNECTED; NEXT SSID=%s",
                      current_wifi_credential()->ssid);
@@ -386,20 +705,25 @@ static void radar_uplink_task(void *context)
                                                 &waiting_for_zero_packet,
                                                 &stats);
             pending_zero_packet = false;
+            pending_kind = RADAR_UPLINK_PENDING_NONE;
+            radar_sequence_valid = false;
+            telemetry_turn = false;
             if (s_wifi_started) {
-                esp_err_t config_ret = apply_wifi_credential(s_wifi_credential_index);
-                if (config_ret != ESP_OK) {
-                    ESP_LOGW(TAG,
-                             "WIFI CONFIG FAILED SSID=%s err=%s",
-                             current_wifi_credential()->ssid,
-                             esp_err_to_name(config_ret));
-                    radar_uplink_ble_log(SMARTCAR_LOG_LEVEL_WARN,
-                                         "WIFI CONFIG FAILED SSID=%s err=%s",
-                                         current_wifi_credential()->ssid,
-                                         esp_err_to_name(config_ret));
-                    advance_wifi_credential();
-                    vTaskDelay(pdMS_TO_TICKS(wifi_retry_ms));
-                    continue;
+                if (credential_rotated) {
+                    esp_err_t config_ret = apply_wifi_credential(s_wifi_credential_index);
+                    if (config_ret != ESP_OK) {
+                        ESP_LOGW(TAG,
+                                 "WIFI CONFIG FAILED SSID=%s err=%s",
+                                 current_wifi_credential()->ssid,
+                                 esp_err_to_name(config_ret));
+                        radar_uplink_ble_log(SMARTCAR_LOG_LEVEL_WARN,
+                                             "WIFI CONFIG FAILED SSID=%s err=%s",
+                                             current_wifi_credential()->ssid,
+                                             esp_err_to_name(config_ret));
+                        advance_wifi_credential();
+                        vTaskDelay(pdMS_TO_TICKS(wifi_retry_ms));
+                        continue;
+                    }
                 }
                 (void)esp_wifi_connect();
                 vTaskDelay(pdMS_TO_TICKS(wifi_retry_ms));
@@ -432,6 +756,8 @@ static void radar_uplink_task(void *context)
             retry_ms = RADAR_UPLINK_RETRY_INITIAL_MS;
             ++stats.reconnects;
             waiting_for_zero_packet = true;
+            radar_sequence_valid = false;
+            telemetry_turn = false;
             ESP_LOGI(TAG, "TCP CONNECTED");
             radar_uplink_ble_log(SMARTCAR_LOG_LEVEL_INFO, "TCP CONNECTED");
         }
@@ -442,50 +768,68 @@ static void radar_uplink_task(void *context)
              ++sent_in_burst) {
             uint32_t dequeue_age_ms = 0U;
             if (!pending_packet) {
-                bool frame_ready = false;
-                while (!frame_ready) {
-                    if (!radar_uart_pop_frame(frame,
-                                              sizeof(frame),
-                                              &frame_length,
-                                              &sequence,
-                                              &timestamp_ms,
-                                              &dequeue_age_ms)) {
-                        break;
-                    }
-                    if (sequence == 0U) {
-                        ++stats.encode_failures;
-                        continue;
-                    }
-                    if (waiting_for_zero_packet &&
-                        !radar_uplink_frame_is_zero_packet(frame, frame_length)) {
-                        ++stats.resync_discarded_frames;
-                        continue;
-                    }
-                    if (radar_uplink_encode_frame(
-                            frame,
-                            frame_length,
-                            (uint32_t)CONFIG_SMARTCAR_RADAR_UPLINK_DEVICE_ID,
-                            (uint32_t)CONFIG_SMARTCAR_RADAR_UPLINK_STREAM_ID,
-                            sequence,
-                            timestamp_ms,
-                            packet,
-                            sizeof(packet),
-                            &packet_length) != RADAR_UPLINK_OK) {
-                        ++stats.encode_failures;
-                        continue;
-                    }
-                    pending_zero_packet = radar_uplink_frame_is_zero_packet(frame,
-                                                                              frame_length);
-                    radar_uplink_tx_reset(&tx_state);
-                    pending_packet = true;
-                    frame_ready = true;
-                    if (dequeue_age_ms > stats.max_dequeue_age_ms) {
-                        stats.max_dequeue_age_ms = dequeue_age_ms;
+                bool packet_ready = false;
+                /* A reconnect must establish the radar ring boundary first;
+                 * once synchronized, alternate classes to avoid starvation. */
+                const bool prefer_telemetry = telemetry_turn &&
+                                               !waiting_for_zero_packet;
+                if (prefer_telemetry) {
+                    packet_ready = radar_uplink_prepare_telemetry_packet(
+                        &telemetry_entry,
+                        packet,
+                        sizeof(packet),
+                        &packet_length,
+                        &uplink_sequence,
+                        &stats);
+                    if (packet_ready) {
+                        pending_kind = RADAR_UPLINK_PENDING_TELEMETRY;
+                        pending_sequence = uplink_sequence;
                     }
                 }
-                if (!frame_ready) {
+                if (!packet_ready) {
+                    packet_ready = radar_uplink_prepare_radar_packet(
+                        frame,
+                        sizeof(frame),
+                        &frame_length,
+                        &radar_frame_sequence,
+                        &timestamp_ms,
+                        &dequeue_age_ms,
+                        packet,
+                        sizeof(packet),
+                        &packet_length,
+                        &waiting_for_zero_packet,
+                        &radar_sequence_valid,
+                        &last_radar_sequence,
+                        &pending_zero_packet,
+                        &uplink_sequence,
+                        &stats);
+                    if (packet_ready) {
+                        pending_kind = RADAR_UPLINK_PENDING_RADAR;
+                        pending_sequence = uplink_sequence;
+                        pending_radar_frame_sequence = radar_frame_sequence;
+                        if (dequeue_age_ms > stats.max_dequeue_age_ms) {
+                            stats.max_dequeue_age_ms = dequeue_age_ms;
+                        }
+                    }
+                }
+                if (!packet_ready && !prefer_telemetry) {
+                    packet_ready = radar_uplink_prepare_telemetry_packet(
+                        &telemetry_entry,
+                        packet,
+                        sizeof(packet),
+                        &packet_length,
+                        &uplink_sequence,
+                        &stats);
+                    if (packet_ready) {
+                        pending_kind = RADAR_UPLINK_PENDING_TELEMETRY;
+                        pending_sequence = uplink_sequence;
+                    }
+                }
+                if (!packet_ready) {
                     break;
                 }
+                radar_uplink_tx_reset(&tx_state);
+                pending_packet = true;
             }
 
             const radar_uplink_tx_result_t send_result =
@@ -515,6 +859,9 @@ static void radar_uplink_task(void *context)
                                                     &waiting_for_zero_packet,
                                                     &stats);
                 pending_zero_packet = false;
+                pending_kind = RADAR_UPLINK_PENDING_NONE;
+                radar_sequence_valid = false;
+                telemetry_turn = false;
                 break;
             }
 
@@ -522,11 +869,22 @@ static void radar_uplink_task(void *context)
             radar_uplink_tx_reset(&tx_state);
             ++stats.successful_frames;
             stats.successful_bytes += packet_length;
-            stats.last_sent_sequence = sequence;
-            if (pending_zero_packet) {
-                waiting_for_zero_packet = false;
+            if (pending_kind == RADAR_UPLINK_PENDING_RADAR) {
+                stats.last_sent_sequence = pending_sequence;
+                last_radar_sequence = pending_radar_frame_sequence;
+                radar_sequence_valid = true;
+                if (pending_zero_packet) {
+                    waiting_for_zero_packet = false;
+                }
+                telemetry_turn = true;
+            } else if (pending_kind == RADAR_UPLINK_PENDING_TELEMETRY) {
+                ++stats.telemetry_sent_frames;
+                stats.telemetry_sent_bytes += packet_length;
+                stats.last_telemetry_sequence = pending_sequence;
+                telemetry_turn = false;
             }
             pending_zero_packet = false;
+            pending_kind = RADAR_UPLINK_PENDING_NONE;
         }
         radar_uplink_log_stats(&stats);
         if (send_waited) {
@@ -617,6 +975,22 @@ esp_err_t radar_uplink_init(void)
                              "WIFI CONNECT START DEFERRED: %s", esp_err_to_name(ret));
     }
 
+    s_telemetry_lock_drops = 0U;
+    ret = telemetry_queue_prepare();
+    if (ret != ESP_OK) {
+        radar_uplink_ble_log(SMARTCAR_LOG_LEVEL_ERROR,
+                             "TELEMETRY FIFO INIT FAILED err=%s",
+                             esp_err_to_name(ret));
+        return ret;
+    }
+    ret = smartcar_service_set_telemetry_sink(radar_uplink_telemetry_sink,
+                                               &s_telemetry_queue);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "TELEMETRY SINK REGISTER FAILED: %s", esp_err_to_name(ret));
+        telemetry_queue_release();
+        return ret;
+    }
+
     if (xTaskCreate(radar_uplink_task,
                    "radar_uplink",
                    RADAR_UPLINK_TASK_STACK_SIZE,
@@ -624,6 +998,7 @@ esp_err_t radar_uplink_init(void)
                    RADAR_UPLINK_TASK_PRIORITY,
                    &s_uplink_task) != pdPASS) {
         radar_uplink_ble_log(SMARTCAR_LOG_LEVEL_ERROR, "UPLINK TASK CREATE FAILED");
+        telemetry_queue_release();
         return ESP_ERR_NO_MEM;
     }
     radar_uart_set_frame_notification_task(s_uplink_task);

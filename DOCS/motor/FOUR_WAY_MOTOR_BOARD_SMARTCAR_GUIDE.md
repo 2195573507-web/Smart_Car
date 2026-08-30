@@ -491,7 +491,7 @@ PC 验证结果必须保存为带时间戳的原始串口日志，不能只保�
 | --- | --- |
 | 修改位置 | `STM32H757/Middleware/MotorBoard/`、经批准的 IOC/生成初始化文件、CM7 CMake 源列表 |
 | 修改原因 | 为板卡提供独立 UART 资源、流式协议解析和有限超时 |
-| 修改内容 | 新增 transport/protocol/config/driver 四层；不修改 App BLE、STM-S3 SCBP-V3 和雷达链路 |
+| 修改内容 | 新增 transport/protocol/config/driver 四层；不修改 App BLE、STM-S3 SRPv4 和雷达链路 |
 | 潜在影响 | USART6/PC6/PC7 与 TIM3 冲突；UART 任务、DMA、日志和电机命令可能增加 RAM/CPU 占用；错误处理不当会阻塞 RTOS |
 | 验证方法 | 静态检查、CM7 编译、桌面协议单元测试、逻辑分析仪 115200 波形和 RX/TX 抓包；硬件动作另行验收 |
 
@@ -599,7 +599,7 @@ wheel_index -> board_channel -> motor_direction_sign -> encoder_sign -> geometry
 | CMake 源列表 | 新增 MotorBoard 源文件确实进入 CM7 目标 | `CONFIRMED（构建配置）` |
 | 协议单元测试 | 所有命令边界、负数、溢出、非法字段、反馈分帧通过 | `CONFIRMED（主机测试）` |
 | 固件编译 | CM7 目标 `0 Errors, 0 Warnings` | `CONFIRMED（构建）` |
-| 代码范围 | 不改 SCBP-V3、BLE envelope、雷达 UART1、STM-S3 USART2 现有合同 | `CONFIRMED（差异）` |
+| 代码范围 | 不改 SRPv4、BLE envelope、雷达 UART1、STM-S3 USART2 现有合同 | `CONFIRMED（差异）` |
 
 ### 11.2 台架和仪器验证
 
@@ -620,7 +620,7 @@ wheel_index -> board_channel -> motor_direction_sign -> encoder_sign -> geometry
 必须分别验证：
 
 1. STM32 本地安全命令 -> 电机板 -> 编码器反馈。
-2. STM32 -> ESP32-S3 的既有 SCBP-V3 链路没有被电机板改动破坏。
+2. STM32 -> ESP32-S3 的既有 SRPv4 链路没有被电机板改动破坏。
 3. App/S3 的控制意图经过 STM32 安全准入后才能变成电机板命令。
 4. BLE 断开、S3 重启、STM-S3 UART 断线、电机板断电和编码器异常均进入本地停止/降级状态。
 5. 以上均通过真实硬件抓包和带轮测试后，才能称为车辆验收；源码、主机测试和固件构建不能替代这些证据。

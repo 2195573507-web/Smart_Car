@@ -38,7 +38,7 @@ bsp_status_t bsp_uart_receive_dma(bsp_uart_port_t port, uint8_t *data, size_t si
 bsp_status_t bsp_uart_log_write(const char *text, uint32_t timeout_ms);
 bsp_status_t bsp_uart_log_write_level(uint8_t level, const char *text,
                                       uint32_t timeout_ms);
-/* Sends an SCBP-CAN LOG frame through USART2 only. */
+/* Sends an SRPv4 LOG frame through USART2 only. */
 bsp_status_t bsp_uart_log_write_link_level(uint8_t level, const char *text);
 bsp_status_t bsp_uart_get_log_stats(bsp_uart_log_stats_t *stats);
 

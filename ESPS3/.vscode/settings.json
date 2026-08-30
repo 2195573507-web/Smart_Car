@@ -24,5 +24,6 @@
   "idf.flashType": "JTAG",
   "idf.openOcdConfigs": [
     "board/esp32c5-builtin.cfg"
-  ]
+  ],
+  "python.analysis.stubPath": "/Users/zhiqin/.kendryte/k230_canmv_pylance/4b1febbaf6f39690/typings"
 }

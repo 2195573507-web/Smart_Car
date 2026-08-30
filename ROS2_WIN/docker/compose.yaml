@@ -6,6 +6,7 @@ services:
     working_dir: /ws
     volumes:
       - ../src:/ws/src:rw
+      - ../../Common:/ws/Common:ro
       - ../config:/ws/config:ro
       - ../test:/ws/test:ro
       - ../testdata:/ws/testdata:ro

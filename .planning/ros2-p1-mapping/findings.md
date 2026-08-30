@@ -8,7 +8,7 @@
 - [`bridge_node.cpp`](/Users/zhiqin/Projects/Smart_Car/ROS2_WIN/src/s3_ydlidar_bridge/src/bridge_node.cpp) 创建 `/scan` 和 `/diagnostics`，支持 `unconfigured`、`replay`、实验性 `tcp` 三种 transport；当前没有 `/odom`、TF、姿态或 `/cmd_vel`。
 - [`scan_mapper.cpp`](/Users/zhiqin/Projects/Smart_Car/ROS2_WIN/src/s3_ydlidar_bridge/src/scan_mapper.cpp) 负责官方 YDLIDAR node 到 `sensor_msgs/msg/LaserScan` 的距离/角度映射和零位包分圈。
 - 当前 `frame_id` 默认是 `laser_frame`，QoS 使用 `rclcpp::SensorDataQoS()`。
-- 已有 Docker/colcon 证据：25 tests、0 failures；这只证明 host-side bridge 的构建和离线测试。
+- 已有 Docker/colcon 证据：25 tests、0 failures；这只证明 host-side bridge 的构建和离线测试。仓库还保留过 Windows TCP bridge 的历史 live `/scan` 记录，但当前 full-revolution 版本与 S3 固件链路尚未重新端到端验证，不能把历史记录当作当前完成证据。
 
 ### 1.2 S3 雷达侧
 
@@ -19,14 +19,14 @@
 
 ### 1.3 STM32 状态和安全边界
 
-- [`scbp_protocol_defs.h`](/Users/zhiqin/Projects/Smart_Car/Common/SCBP_CAN/include/scbp_protocol_defs.h) 定义：
-  - `SCBP_MSG_ID_WHEEL_SPEED_STATUS = 0x210`，payload 16 字节，4 个 little-endian float。
-  - `SCBP_MSG_ID_ATTITUDE = 0x201`，payload 80 字节，schema 2 的 DualAHRS。
-  - `SCBP_MSG_ID_IMU_TELEMETRY = 0x207`，每个传感器 30 字节。
+- [`srp_registry.h`](/Users/zhiqin/Projects/Smart_Car/Common/SRP/include/srp_registry.h) 定义：
+  - `SRP_MSG_ID_WHEEL_SPEED_STATUS = 0x14`，payload 16 字节，4 个 little-endian float。
+  - `SRP_MSG_ID_ATTITUDE = 0x11`，payload 80 字节，schema 2 的 DualAHRS。
+  - `SRP_MSG_ID_IMU_TELEMETRY = 0x10`，每个传感器 30 字节。
 - [`motor_board_task.c`](/Users/zhiqin/Projects/Smart_Car/STM32H757/Middleware/MotorBoard/motor_board_task.c) 的 `motor_board_send_wheel_status()` 周期性发送实际轮速；`motor_board_get_actual_wheel_speeds()` 提供当前值。
-- 当前轮序是 `[RR, RF, LR, LF]`；`RF` 的 raw encoder 校正在 STM32 内部完成，`0x210` 携带的是校正后的值，ROS2 不能再静默把 RF 设为负。
+- 当前轮序是 `[RR, RF, LR, LF]`；`RF` 的 raw encoder 校正在 STM32 内部完成，`0x14` 携带的是校正后的值，ROS2 不能再静默把 RF 设为负。
 - [`imu_runtime.c`](/Users/zhiqin/Projects/Smart_Car/STM32H757/Application/RTOS/imu_runtime.c) 周期性打包并发送 DualAHRS 和 IMU telemetry。
-- [`s3_service.c`](/Users/zhiqin/Projects/Smart_Car/STM32H757/Middleware/Communication/Services/s3_service.c) 是 STM32-S3 SCBP 边界；不得把雷达原始包塞进这条控制/状态协议。
+- [`s3_service.c`](/Users/zhiqin/Projects/Smart_Car/STM32H757/Middleware/Communication/Services/s3_service.c) 是 STM32-S3 SRP 边界；不得把雷达原始包塞进这条控制/状态协议。
 - STM32 仍保留最终运动安全：姿态 gate、链路 timeout、BUS_OFF 和 `motor_board_force_stop()`。
 
 ### 1.4 成熟组件参考
@@ -43,8 +43,8 @@
 
 ```text
 YDLIDAR -> S3 UART1/GPIO44 -> S3 radar_uplink -> ROS2 s3_ydlidar_bridge -> /scan
-STM32 0x210 wheel status -> S3 telemetry uplink -> smartcar_state_bridge -> /odom
-STM32 0x201/0x207 attitude (optional read-only) -> smartcar_state_bridge -> /attitude or /imu/data_raw
+STM32 0x14 wheel status -> S3 telemetry uplink -> smartcar_state_bridge -> /odom
+STM32 0x11/0x10 attitude (optional read-only) -> smartcar_state_bridge -> /attitude or /imu/data_raw
 URDF + robot_state_publisher -> base_link -> laser_frame (+ imu_link)
 /scan + odom -> slam_toolbox online_async -> /map + map -> odom
 ```
@@ -58,24 +58,24 @@ ROS2 /scan -> STM32
 
 ## 3. 协议设计结论
 
-推荐新增一个**独立、受控的 telemetry 上行类型**，其 payload 传输完整且已验证的 SCBP-CAN frame（CAN ID、flags、8 位 sequence、length 和 payload）；SCBP 外层本身没有 timestamp。ROS2 端复用 `Common/SCBP_CAN` 的 wire 定义解析 `0x210/0x201/0x207`，时间戳分别按具体 payload 或 S3 外层语义处理。这样可以避免在 S3 和 ROS2 两端重新发明轮速/姿态字段。
+推荐新增一个**独立、受控的 telemetry 上行类型**，其 payload 传输完整且已验证的 SRPv4 frame（type、priority、flags、8 位 sequence、length 和 payload）；SRP 外层本身没有 timestamp。ROS2 端复用 `Common/SRP` 的 wire 定义解析 `0x14/0x11/0x10`，时间戳分别按具体 payload 或 S3 外层语义处理。这样可以避免在 S3 和 ROS2 两端重新发明轮速/姿态字段。
 
-但当前不能写入具体新 type 数值或声称兼容：必须先完成协议评审并提供至少一组真实 golden capture、错误 CRC、长度错误、序号跳变和断线重连样本。雷达 `RAW_YDLIDAR_FRAME` 与 telemetry 必须保持不同 message type；不修改已有雷达 type，不把雷达 payload 混进 STM32 SCBP 控制队列。
+但当前不能写入具体新 type 数值或声称兼容：必须先完成协议评审并提供至少一组真实 golden capture、错误 CRC、长度错误、序号跳变和断线重连样本。雷达 `RAW_YDLIDAR_FRAME` 与 telemetry 必须保持不同 message type；不修改已有雷达 type，不把雷达 payload 混进 STM32 SRP 控制队列。
 
 ## 4. 里程计数学
 
-1. 接收带源采样年龄/序号/有效位的轮速状态；现有 `0x210` 只有四个 float，不能单独证明数据新鲜，因此在补充合同前只能做实验回放。
+1. 接收带源采样年龄/序号/有效位的轮速状态；现有 `0x14` 只有四个 float，不能单独证明数据新鲜，因此在补充合同前只能做实验回放。
 2. 解包四个实际轮速，单位按现有代码视为 mm/s，固定轮序为 `[RR, RF, LR, LF]`。
-3. `ENCODER_DIR_SIGN={+1,-1,+1,+1}` 是 STM32 对 MotorBoard raw feedback 的内部校正，校正后的值已进入 `0x210`；ROS2 默认 wire 极性必须为 `[+1,+1,+1,+1]`，不得再次把 RF 设为负。
+3. `ENCODER_DIR_SIGN={+1,-1,+1,+1}` 是 STM32 对 MotorBoard raw feedback 的内部校正，校正后的值已进入 `0x14`；ROS2 默认 wire 极性必须为 `[+1,+1,+1,+1]`，不得再次把 RF 设为负。
 4. 应用经台架确认的车辆极性表，将每个轮速归一到“车辆向前为正”。不能只依据变量名推断。
 5. 计算：`v_right = mean(RR, RF)`，`v_left = mean(LR, LF)`；`v = (v_right + v_left)/2`；`omega = (v_right - v_left)/track_width`。
-6. 使用 `track_width_m`、`wheel_diameter_m` 参数，默认候选值为 0.193 m 和 0.065 m，但在实测前标记为未确认；`0x210` 已是 mm/s，轮径不参与线速度换算，只用于可选关节 rad/s。
+6. 使用 `track_width_m`、`wheel_diameter_m` 参数，默认候选值为 0.193 m 和 0.065 m，但在实测前标记为未确认；`0x14` 已是 mm/s，轮径不参与线速度换算，只用于可选关节 rad/s。
 7. 优先直接链接 Humble `diff_drive_controller::Odometry` 的公开库，适配层先将 m/s 乘以有效 `dt` 变成该版本 `updateFromVelocity()` 实际需要的每周期轮位移；处理时间倒退、`dt` 过小、非有限值和状态过期后再调用库。
 8. 发布 `nav_msgs/msg/Odometry`：`header.frame_id=odom`、`child_frame_id=base_link`、twist 为车体速度；默认只发布 `odom -> base_link` TF，避免与 EKF/SLAM 产生第二个发布者。
 
 ## 5. 姿态结论
 
-P1 可先发布只读 `geometry_msgs/msg/QuaternionStamped` 或项目自定义 `Attitude`，保留 schema、source、valid、timestamp 和原始四元数；这比直接伪装成 `sensor_msgs/msg/Imu` 更安全。`0x207` 中 LSM303 的 vector 是 magnetometer，BMI323 的 vector 是 gyro，不能把两者统一塞进一个 `/imu/data_raw`。只有确认 ROS REP-103 坐标轴、协方差、时间基准和重力补偿后，才分别映射到 `sensor_msgs/Imu`/`sensor_msgs/MagneticField` 并考虑 `robot_localization`。
+P1 可先发布只读 `geometry_msgs/msg/QuaternionStamped`，但必须先检查 schema、primary-valid/fault/stale、有限值、单位四元数，并把 wire `w,x,y,z` 重排为 ROS `x,y,z,w`；不满足时只发 diagnostics。`0x10` 中 LSM303 的 vector 是 magnetometer，BMI323 的 vector 是 gyro，不能把两者统一塞进一个 `/imu/data_raw`。只有确认 ROS REP-103 坐标轴、协方差、时间基准和重力补偿后，才分别映射到 `sensor_msgs/Imu`/`sensor_msgs/MagneticField` 并考虑 `robot_localization`。
 
 P1 建图不依赖姿态 topic；2D SLAM 先依赖 `/scan`、`odom -> base_link` 和静态雷达 TF。姿态若用于 TF，必须明确只由一个节点发布，不能与 odom yaw 或 SLAM 的 `map -> odom` 冲突。
 
@@ -100,9 +100,9 @@ P1 建图不依赖姿态 topic；2D SLAM 先依赖 `/scan`、`odom -> base_link`
 
 - 当前 `ROS2_WIN/docker/Dockerfile` 只安装 bridge、RViz 和 rosbag2 相关依赖；要运行 P1，必须显式加入 `ros-humble-slam-toolbox`、`ros-humble-robot-state-publisher`、`ros-humble-xacro`、`ros-humble-tf2-tools`、`ros-humble-nav2-map-server`、`ros-humble-robot-localization`、`ros-humble-diagnostic-updater` 和（若采用公开里程计库）`ros-humble-diff-drive-controller`，并记录镜像 digest 与 apt 包版本。
 - Windows 端只能有一个 TCP `8765` owner：保留/扩展现有 `s3_ydlidar_bridge` 为唯一 gateway 进程；`smartcar_state_bridge` 只能作为同进程 library/component 或订阅 gateway 内部输出，不能再创建 listener。
-- telemetry 不应创建第二套 TCP server/reassembly。应泛化已有 `s3_ydlidar_bridge` transport，或把它提取成共享 library，再由同一 gateway 分发 raw radar 与 SCBP telemetry。
-- S3 的实际接入点是 `ESPS3/components/smartcar_service/command_bridge.c` 的现有 SCBP relay，而不是只修改 `main/radar`；通过 `smartcar_service_set_telemetry_sink(callback, context)` 做依赖反转，parser callback 内完成有界复制/入队，不能做 Wi-Fi 阻塞操作或保存 `frame->payload` 指针。
-- telemetry 若复用 S3RD 外层，容量必须按当前 `SCBP_CAN_MAX_FRAME_SIZE=267` 字节重新预算，不能沿用仅适用于 YDLIDAR raw frame 的上限。
+- telemetry 不应创建第二套 TCP server/reassembly。应泛化已有 `s3_ydlidar_bridge` transport，或把它提取成共享 library，再由同一 gateway 分发 raw radar 与 SRP telemetry。
+- S3 的实际接入点是 `ESPS3/components/smartcar_service/command_bridge.c` 的现有 SRP relay，而不是只修改 `main/radar`；通过 `smartcar_service_set_telemetry_sink(callback, context)` 做依赖反转，parser callback 内完成有界复制/入队，不能做 Wi-Fi 阻塞操作或保存 `frame->payload` 指针。
+- telemetry 若复用 S3RD 外层，容量必须按共享定义 `SRP_MAX_FRAME_SIZE` 重新预算；当前值为 `8 + 500 + 4 = 512` 字节，不能沿用仅适用于 YDLIDAR raw frame 的上限。
 - ROS2 侧应修改已有 `s3_ydlidar_bridge` 的 `framing.*`/`transport.*` 为通用 envelope parser + message dispatcher，避免新增 state bridge 时重复 TCP reassembly；`TcpChunkAssembler` 必须真正执行 `max_ready_frames` 上限并报告丢弃。
 - ROS 侧优先使用标准 `nav_msgs/Odometry`、`sensor_msgs/JointState`、`geometry_msgs/QuaternionStamped`、`sensor_msgs/Imu` 和 `diagnostic_msgs`；只有标准消息无法表达的稳定跨节点合同才新增自定义 message。
 - `diff_drive_controller` 完整控制器适合已有 `ros2_control` 硬件接口和控制命令的底盘；当前只读轮速不满足其运行前提。P1 可只链接 Humble `diff_drive_controller::Odometry`（commit `eb4ca17d610eb4315f7241c0134de1bdfc5748ea`，2.54.0），绝不启动 `controller_manager`、plugin 或 `/cmd_vel`。
@@ -159,50 +159,50 @@ P1 建图不依赖姿态 topic；2D SLAM 先依赖 `/scan`、`odom -> base_link`
 ### 16.1 阻断：RF 不得在 ROS2 二次反相
 
 - `motor_board_task.c` 的 `ENCODER_DIR_SIGN={+1,-1,+1,+1}` 是 MotorBoard raw feedback 的 STM32 内部校正表（`[motor_board_task.c:60](/Users/zhiqin/Projects/Smart_Car/STM32H757/Middleware/MotorBoard/motor_board_task.c:60)`）。
-- 校正后的值写入 `s_actual_wheel_speed`，`0x210` 只把该数组原样编码发送（`[motor_board_task.c:539](/Users/zhiqin/Projects/Smart_Car/STM32H757/Middleware/MotorBoard/motor_board_task.c:539)`、`[motor_board_task.c:565](/Users/zhiqin/Projects/Smart_Car/STM32H757/Middleware/MotorBoard/motor_board_task.c:565)`）。
+- 校正后的值写入 `s_actual_wheel_speed`，`0x14` 只把该数组原样编码发送（`[motor_board_task.c:539](/Users/zhiqin/Projects/Smart_Car/STM32H757/Middleware/MotorBoard/motor_board_task.c:539)`、`[motor_board_task.c:565](/Users/zhiqin/Projects/Smart_Car/STM32H757/Middleware/MotorBoard/motor_board_task.c:565)`）。
 - 因此 ROS2 的 wire 默认倍率必须是 `[+1,+1,+1,+1]`。实车抬轮、前进、后退抓包只用于确认“车辆前进为正”的最终合同，不能预置 `RF=-1`。
 
-### 16.2 阻断：当前 `0x210` 没有新鲜度证明
+### 16.2 阻断：当前 `0x14` 没有新鲜度证明
 
-- `0x210` payload 固定为 16 字节四个 float，没有源采样时间、sample sequence、valid 或数据年龄（`[scbp_protocol_defs.h:93-101](/Users/zhiqin/Projects/Smart_Car/Common/SCBP_CAN/include/scbp_protocol_defs.h:93)`）。
+- `0x14` payload 固定为 16 字节四个 float，没有源采样时间、sample sequence、valid 或数据年龄（`[srp_registry.h:93-101](/Users/zhiqin/Projects/Smart_Car/Common/SRP/include/srp_registry.h:93)`）。
 - STM32 约每 50 ms 重发缓存，而缓存只在新的 `MSPD` 反馈到达时更新；反馈中断后仍可能重复发送最后一个非零值。ROS 收包时间只能代表重发时间，不能代表测量时间。
 - P1 必须先在协议评审中选择并冻结一种方案：新增版本化只读 wheel-status（含 `sample_tick/sample_seq/valid` 和 stale 语义，具体 message ID 不在评审前猜测），或明确“仅新反馈发送 + 源端 stale 清零/诊断”的兼容方案。前者是推荐方案。
-- 在新鲜度合同、golden capture 和断反馈实测完成前，`0x210 -> /odom` 只能用于离线/实验，不能作为 P1 SLAM 完成证据。
+- 在新鲜度合同、golden capture 和断反馈实测完成前，`0x14 -> /odom` 只能用于离线/实验，不能作为 P1 SLAM 完成证据。
 
 ### 16.3 阻断：Windows TCP `8765` 只有一个 owner
 
 - 当前 `TcpServerTransport` 直接 `bind/listen`，每个实例只服务一个客户端（`[transport.cpp:58](/Users/zhiqin/Projects/Smart_Car/ROS2_WIN/src/s3_ydlidar_bridge/src/transport.cpp:58)`、`[transport.cpp:142](/Users/zhiqin/Projects/Smart_Car/ROS2_WIN/src/s3_ydlidar_bridge/src/transport.cpp:142)`）。
-- 因此不能让 `s3_ydlidar_bridge` 和 `smartcar_state_bridge` 各自监听 `8765`。推荐保留现有包并把它扩展为唯一 `smartcar_gateway_bridge` 进程：一个 socket/reassembly、通用 S3RD envelope parser、按 message type 分发到雷达 decoder 和 SCBP telemetry/odom 模块。
+- 因此不能让 `s3_ydlidar_bridge` 和 `smartcar_state_bridge` 各自监听 `8765`。推荐保留现有包并把它扩展为唯一 `smartcar_gateway_bridge` 进程：一个 socket/reassembly、通用 S3RD envelope parser、按 message type 分发到雷达 decoder 和 SRP telemetry/odom 模块。
 - `smartcar_state_bridge` 可以保留为同进程静态库或 composable component；若做成独立进程，必须改为订阅 gateway 已发布的内部消息，不能再打开 TCP listener。
 
 ### 16.4 阻断：S3 组件依赖必须反转
 
 - `radar_uplink.c` 属于 ESP-IDF `main` component，而 `command_bridge.c` 属于 `smartcar_service`；让后者直接包含前者会形成反向依赖。
-- 推荐在 `smartcar_service` 公共头文件声明 `smartcar_service_set_telemetry_sink(callback, context)`。`command_bridge` 收到 SCBP frame 后在 parser callback 内完成固定大小复制并入有界/latest-only 队列，回调立即返回；`main/radar` 注册 sink，由低优先级 uplink task 取出并发送。
-- `scbp_parser` 的 `frame->payload` 指向 parser 内部缓冲（`[scbp_parser.h:30](/Users/zhiqin/Projects/Smart_Car/Common/SCBP_CAN/include/scbp_parser.h:30)`），不能在回调返回后保存指针，也不能在该回调内阻塞 Wi-Fi。
+- 推荐在 `smartcar_service` 公共头文件声明 `smartcar_service_set_telemetry_sink(callback, context)`。`command_bridge` 收到 SRP frame 后在 parser callback 内完成固定大小复制并入队；轮速使用有界 FIFO，姿态等观察流才可 latest-only，回调立即返回；`main/radar` 注册 sink，由低优先级 uplink task 取出并发送。
+- `srp_parser_t` 的 `frame->payload` 指向 parser 内部缓冲（`[srp_codec.h:31](/Users/zhiqin/Projects/Smart_Car/Common/SRP/include/srp_codec.h:31)`），不能在回调返回后保存指针，也不能在该回调内阻塞 Wi-Fi。
 
 ### 16.5 高风险：三个时钟域必须显式定义
 
-- SCBP frame 只有 CAN ID、flags、8 位 sequence、length 和 payload，没有通用 timestamp；`0x201` 自带 `timestamp_ms/sample_sequence`，`0x207` 自带传感器 timestamp，当前 `0x210` 没有。
+- SRP frame 只有 priority、type、flags、8 位 sequence、length 和 payload，没有通用 timestamp；`0x11` 自带 `timestamp_ms/sample_sequence`，`0x10` 自带传感器 timestamp，当前 `0x14` 没有。
 - S3 radar FIFO 在 UART 入队时记录 `esp_log_timestamp()`，S3RD 外层 timestamp 是 S3 uptime 毫秒并会回绕；ROS `rclcpp::Clock` 是主机时钟。三者重启和 wrap 不能直接比较。
-- 初版建议以 ROS host receipt time 发布 ROS header，保留 source timestamp/epoch/age 作为 diagnostics；只有 NTP/SNTP 或 offset 估计与误差上限被实测后，才把源时间用于融合。S3 发送前必须按 dequeue age 丢弃过期雷达帧，telemetry 使用 latest-only。
+- 初版建议以 ROS host receipt time 发布 ROS header，保留 source timestamp/epoch/age 作为 diagnostics；只有 NTP/SNTP 或 offset 估计与误差上限被实测后，才把源时间用于融合。S3 发送前必须按 dequeue age 丢弃过期雷达帧；轮速按源采样顺序进入有界 FIFO，姿态等纯观察流才可 latest-only。
 
-### 16.6 高风险：SCBP sequence 是全链路共享序号
+### 16.6 高风险：SRP sequence 是全链路共享序号
 
-- `scbp_link_send()` 对所有 message ID 共用一个 8 位 `next_sequence`（`[scbp_link.c:170](/Users/zhiqin/Projects/Smart_Car/Common/SCBP_CAN/scbp_link.c:170)`），不是每个 telemetry 类型独立计数器。
-- `0x210` 之间出现 `0x201`、`0x207`、日志或状态帧时，inner sequence 不连续是正常现象。验证必须区分 inner SCBP sequence、outer S3RD stream sequence 和 DualAHRS `sample_sequence`；不能把 inner 跳变直接当作轮速丢包。
+- `srp_link_send()` 对所有 message ID 共用一个 8 位 `next_sequence`（`[srp_link.c:170](/Users/zhiqin/Projects/Smart_Car/Common/SRP/srp_link.c:170)`），不是每个 telemetry 类型独立计数器。
+- `0x14` 之间出现 `0x11`、`0x10`、日志或状态帧时，inner sequence 不连续是正常现象。验证必须区分 inner SRP sequence、outer S3RD stream sequence 和 DualAHRS `sample_sequence`；不能把 inner 跳变直接当作轮速丢包。
 - 若协议需要每流丢包率，outer sequence 应按 `(device_id, stream_id, message_type)` 独立，具体字段和 reset/wrap 规则在协议评审中冻结。
 
 ### 16.7 高风险：通用 envelope parser 和 ready 队列边界
 
-- 当前 `S3FrameExtractor` 硬编码 YDLIDAR 最小 10 字节及 CT/flags 校验（`[framing.cpp:72](/Users/zhiqin/Projects/Smart_Car/ROS2_WIN/src/s3_ydlidar_bridge/src/framing.cpp:72)`、`[framing.cpp:101](/Users/zhiqin/Projects/Smart_Car/ROS2_WIN/src/s3_ydlidar_bridge/src/framing.cpp:101)`），不能直接解析 SCBP telemetry。
+- 当前 `S3FrameExtractor` 硬编码 YDLIDAR 最小 10 字节及 CT/flags 校验（`[framing.cpp:72](/Users/zhiqin/Projects/Smart_Car/ROS2_WIN/src/s3_ydlidar_bridge/src/framing.cpp:72)`、`[framing.cpp:101](/Users/zhiqin/Projects/Smart_Car/ROS2_WIN/src/s3_ydlidar_bridge/src/framing.cpp:101)`），不能直接解析 SRP telemetry。
 - 应拆成只负责 magic/version/header/length/CRC 的通用 parser，再按 type 执行 payload policy；未知 type 必须计数并丢弃，不能交给 YDLIDAR decoder。
 - `TcpChunkAssembler` 当前构造函数忽略 `max_ready_frames`，ready deque 可能在一次恶意大 chunk 中增长。实施时必须执行上限（明确丢弃 oldest/newest 策略）、增加 dropped-ready 计数和压力测试，才可称为 bounded transport（`[framing.cpp:140](/Users/zhiqin/Projects/Smart_Car/ROS2_WIN/src/s3_ydlidar_bridge/src/framing.cpp:140)`）。
 
 ### 16.8 高风险：共享协议源码的容器边界
 
-- 当前 Compose 只挂载 `ROS2_WIN/src`，容器看不到仓库根目录 `Common/SCBP_CAN`。若 ROS2 直接复用 `scbp_can_decode()`/`scbp_wire`，必须添加只读挂载（例如 `../../Common/SCBP_CAN:/ws/Common/SCBP_CAN:ro`）并在 CMake 中引用该路径，或先建立可复现的共享 package；不能复制一份协议定义。
-- 外层 telemetry buffer 按 `SCBP_CAN_MAX_FRAME_SIZE=267` 加 header/CRC 重新预算，并在 Windows 容器中做最大帧编译探针、ASan/边界测试（若工具链允许）。
+- 当前 Compose 只挂载 `ROS2_WIN/src`，容器看不到仓库根目录 `Common/SRP`。若 ROS2 直接复用 `srp_decode()`/`srp_wire`，必须添加只读挂载（例如 `../../Common/SRP:/ws/Common/SRP:ro`）并在 CMake 中引用该路径，或先建立可复现的共享 package；不能复制一份协议定义。
+- 外层 telemetry buffer 按共享 `SRP_MAX_FRAME_SIZE=512` 加 header/CRC 重新预算，并在 Windows 容器中做最大帧编译探针、ASan/边界测试（若工具链允许）。
 
 ### 16.9 开源复用的最终边界
 
@@ -218,5 +218,45 @@ P1 建图不依赖姿态 topic；2D SLAM 先依赖 `/scan`、`odom -> base_link`
 
 ### 16.10 文档和证据边界
 
-- 现有 `ROS2_WIN/README.md` 仍有“`radar_uplink_protocol.c` 不存在”的过时描述；实施前应同步文档，但不以旧文档推翻当前源码。
+- `ROS2_WIN/README.md`、`docs/final-report.md` 和 `docs/s3-gateway-protocol-TODO.md` 已同步为“上行源码存在但实验/默认关闭”；不以旧文档推翻当前源码。
 - 当前仅有 host-side bridge 离线测试记录；Windows Docker 镜像重建、真实 Wi-Fi/TCP、真实 telemetry、TF、SLAM、地图保存和车辆验收均未执行。任何交付报告都必须逐层列出固件/ELF hash、镜像 digest、配置、原始 capture、bag 和测试命令。
+
+## 17. 收口后的执行边界
+
+- 轮速里程计的 FIFO 与 stale latch 是实施前置条件；`0x14` 仍只有四个 mm/s float，未完成新 freshness 合同前不得作为 live SLAM 输入。`wheel_diameter` 不再次缩放线速度，只用于可选 `JointState` 的 rad/s。
+- 姿态 topic 只能在 valid/fault/stale、有限性、单位和 `wxyz -> xyzw` 字节序检查通过后发布；`0x10` 的 BMI323 gyro 与 LSM303 magnetometer 分开映射。
+- 建图产物分两类：标准 YAML/PGM 供 Nav2 map server/AMCL，`slam_toolbox serialize_map` 的 posegraph 供 localization/继续建图；两类都必须持久化并分别重载验证。
+- live 模式所有节点显式 `use_sim_time=false`；replay 模式使用 `ros2 bag play --clock` 且所有参与节点显式 `use_sim_time=true`，禁止混用。
+- 阶段 3 已完成受控的 S3 telemetry 与主机 envelope 实现；后续 `/odom`、TF、SLAM 和真实设备验收仍需单独批准与证据，不因本阶段代码通过而自动放行。
+
+## 18. S3 telemetry sink 实施核对（2026-08-29）
+
+- `smartcar_service_task -> srp_parser_feed -> srp_link_receive -> command_bridge_on_frame` 在同一个 service task 中同步执行；`frame->payload` 指向 parser 内部缓冲，只在当前 callback 内有效。
+- sink 只能在 `smartcar_service_init()` 前注册，回调内仅允许固定大小复制和零等待入队；网络发送继续由低优先级 uplink task 执行。
+- service 对 ROS sink 的白名单固定为 `0x11/0x10/0x14`；`0x12/0x13/0x20` 保持现有 App relay，不因本次实现扩大 ROS 数据面。
+- 有效 SRP view 使用现成 `srp_encode_frame()` 重建完整 frame，保留 type、priority、flags、inner sequence 和 payload，并重新生成 CRC/EOF；最大编码帧为 512 字节。
+- BLE 与 ROS sink 是两个独立消费者；BLE 未连接、notify 失败或 sink 队列满，均不能互相切断，也不能阻塞 UART2、BUS_OFF 恢复或 BLE 断连零速命令。
+- legacy `0x14` 仍只是缓存重发。S3 可以原样上行供抓包与离线诊断，但不能生成不存在的 `sample_tick/sample_seq/valid`，也不能据此宣称 live `/odom` 已具备有效新鲜度。
+
+## 19. 阶段 3 实施结果（2026-08-30）
+
+- `radar_telemetry_queue` 已改用 `SRP_MAX_FRAME_SIZE`，对 `0x14`、`0x11`、`0x10` 做完整 wire decode、来源/目的/flags、长度和有限值校验；轮速为有界 FIFO，姿态与两路 IMU 为独立 latest slot。
+- `radar_uplink` 注册 `smartcar_service` sink，在 S3 parser callback 外复制数据，使用零等待互斥和 PSRAM 轮速 FIFO；雷达 UART1、STM UART2 和 BLE 控制路径未改变。
+- 外层 S3RD 的 `sequence` 现由雷达和 telemetry 共用单一发送计数器；雷达 UART 原始序号只用于检测雷达缺帧和重同步。
+- Windows `S3FrameExtractor` 已按 type 分离 raw/telemetry payload policy；telemetry 默认上限直接绑定共享 `SRP_MAX_FRAME_SIZE`（当前 512 字节），`TcpChunkAssembler` 现在消费并统计超过 `max_ready_frames` 的完整帧，bridge 对 telemetry 走独立 SRP decoder/diagnostics 路径，不交给 YDLIDAR decoder。
+- 证据仍限于源码、host tests 和交叉编译；没有真实 S3/STM32 capture、协议冻结、Windows Docker live TCP、`/odom`、TF、SLAM 或车辆证据。
+
+## 20. ROS telemetry decoder 实施结果（2026-08-30）
+
+- 新增 `ROS2_WIN/src/s3_ydlidar_bridge/include/s3_ydlidar_bridge/telemetry_decoder.hpp` 与对应实现，直接调用 `Common/SRP` 的 C wire/parser，不复制 SRP wire 定义。
+- decoder 接受完整 SRPv4 frame，限制来源为 STM32H757、目的为 ESP32-S3/广播、flags 为 `STREAM_DATA`；按 `0x14`、`0x11`、`0x10` 的固定长度和 schema/sensor id 解码，并拒绝非有限浮点。
+- `bridge_node` 将 telemetry 分流到 decoder，发布 diagnostics 计数；`0x14` 的 `freshness_available` 固定为 false，因此当前仍不能安全地产生 live `/odom`。
+- ROS CMake 通过 `srp_codec` 静态库链接 `Common/SRP/srp_crc.c`、`srp_wire.c`、`srp_codec.c`；Windows Compose 只读挂载 `../../Common:/ws/Common`，保持单 TCP owner。
+- 本机已完成 C/C++ 编译和 wheel decode smoke；因为没有 ROS Humble/colcon/Docker，gtest 与 Windows Docker 验证仍待目标环境执行。
+
+## 21. CM7 协议构建边界复核（2026-08-30）
+
+- 工作树中的 `Common/SRP` 由 active `s3_service.c`/`s3_service.h` 直接使用。CM7 首次重配置曾因共享 codec/include 路径不完整而失败。
+- 已在 `STM32H757/CM7/CMakeLists.txt` 纳入 SRPv4 codec 源和 include 路径；CM7 service 与 UART2 均只编译 SRP 实现，不保留兼容协议。
+- 修复后 `cmake --build STM32H757/CM7/build/Debug -j2` 通过，ELF 为 `Smart_Car_H757_CM7.elf`，`arm-none-eabi-size` 为 text 175720、data 500、bss 59928 字节。
+- 该构建通过只证明当前源码可编译；真实刷写两端仍需用 UART capture 确认 SRPv4 wire format、序列、ACK 和恢复行为。

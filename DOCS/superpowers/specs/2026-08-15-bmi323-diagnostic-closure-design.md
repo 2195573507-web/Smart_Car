@@ -7,7 +7,7 @@ can be distinguished between SPI transport failure, low-byte ID mismatch, and
 high-byte/frame mismatch. The change is limited to
 `STM32H757/Middleware/Sensor/BMI323/`.
 
-The LSM303 path, IMU scheduling, SCBP/LOG transport, CubeMX configuration,
+The LSM303 path, IMU scheduling, SRPv4/LOG transport, CubeMX configuration,
 GPIO assignments, SPI transaction shape, and BMI323 failure isolation remain
 unchanged.
 

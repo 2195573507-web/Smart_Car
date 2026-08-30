@@ -4,7 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "scbp_link.h"
+#include "srp_link.h"
 
 typedef enum {
     RADAR_WAIT_SYNC = 0,
@@ -23,7 +23,7 @@ void radar_calibration_manager_set_transport(radar_calibration_send_ready_t send
 void radar_calibration_manager_step(void);
 bool radar_calibration_manager_on_boot_ready(const uint8_t *payload, uint8_t length);
 bool radar_calibration_manager_on_cal_event(const uint8_t *payload, uint8_t length);
-void radar_calibration_manager_on_ready_response(scbp_link_tx_result_t result,
+void radar_calibration_manager_on_ready_response(srp_link_tx_result_t result,
                                                  uint8_t status_code);
 radar_calibration_state_t radar_calibration_manager_get_state(void);
 uint8_t radar_calibration_manager_get_pwm(void);

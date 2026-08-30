@@ -8,6 +8,7 @@
 #include "s3_ydlidar_bridge/framing.hpp"
 #include "s3_ydlidar_bridge/official_decoder.hpp"
 #include "s3_ydlidar_bridge/scan_mapper.hpp"
+#include "s3_ydlidar_bridge/telemetry_decoder.hpp"
 #include "s3_ydlidar_bridge/transport.hpp"
 
 namespace s3_ydlidar_bridge {
@@ -27,15 +28,26 @@ class BridgeNode final : public rclcpp::Node {
   rclcpp::TimerBase::SharedPtr diagnostics_timer_;
   std::unique_ptr<FrameTransport> transport_;
   OfficialDecoder decoder_;
+  TelemetryDecoder telemetry_decoder_;
   ScanMapper mapper_;
   mutable std::mutex sequence_mutex_;
   mutable std::mutex accumulation_mutex_;
+  mutable std::mutex telemetry_mutex_;
   SequenceTracker sequence_tracker_;
   uint64_t accumulation_epoch_{0};
   int stale_after_ms_{500};
   int zero_packet_timeout_ms_{1000};
+  uint8_t raw_message_type_{1};
   std::atomic<uint64_t> ydlidar_errors_{0};
   std::atomic<uint64_t> decoded_packets_{0};
+  std::atomic<uint64_t> telemetry_packets_{0};
+  std::atomic<uint64_t> telemetry_bytes_{0};
+  std::atomic<uint64_t> telemetry_invalid_{0};
+  std::atomic<uint64_t> telemetry_unsupported_{0};
+  std::atomic<uint64_t> wheel_speed_packets_{0};
+  std::atomic<uint64_t> attitude_packets_{0};
+  std::atomic<uint64_t> imu_packets_{0};
+  std::atomic<uint64_t> wheel_freshness_unavailable_{0};
   std::atomic<uint64_t> accumulated_packets_{0};
   std::atomic<uint64_t> revolutions_published_{0};
   std::atomic<uint64_t> valid_points_{0};

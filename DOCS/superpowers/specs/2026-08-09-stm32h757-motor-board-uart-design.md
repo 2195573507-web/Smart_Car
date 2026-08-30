@@ -18,7 +18,8 @@ board UART route:
 
 The UART is 115200 baud, 8 data bits, no parity, 1 stop bit, with hardware
 flow control disabled. Existing USART1 logging, USART2 STM-S3 transport, IMU,
-LSM303, SCBP-V3, BLE, S3 firmware, and calibration code remain unchanged.
+LSM303, the SRPv4 STM-S3 link, BLE, S3 firmware, and calibration code remain
+unchanged.
 
 The former TIM3 CH1/CH2 local PWM output on PC6/PC7 is stopped. Its generated
 initialization and historical pin mapping remain in source comments/history
@@ -74,7 +75,7 @@ motor_board_test_task
 
 The task uses a finite delay and finite HAL timeouts, so a disconnected board
 cannot block the scheduler indefinitely. No callback is added to the existing
-USART1/USART2 paths and no SCBP-V3 frame is passed through this module.
+USART1/USART2 paths and no SRPv4 frame is passed through this module.
 
 ## TIM3 Resource Retirement
 
@@ -108,7 +109,7 @@ reviewed.
 ## Verification
 
 1. Static searches confirm the requested pins and that no protected IMU,
-   SCBP-V3, S3, or BLE files changed.
+   SRPv4, S3, or BLE files changed.
 2. IOC/source checks confirm PC6=`USART6_TX`, PC7=`USART6_RX`, 115200 8N1,
    and no active TIM3 PC6/PC7 post-init.
 3. `STM32H757/CM7` Debug clean build validates compile/link integration.

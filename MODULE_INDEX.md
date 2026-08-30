@@ -6,7 +6,7 @@
 | ESP32-S3 | [esp32-s3.md](docs/esp32s3/esp32-s3.md) | `ESPS3/` | `main/main.c::app_main` |
 | BLE | [ble.md](docs/esp32s3/ble.md) | `ESPS3/components/s3_ble`, App `BLE/` | `s3_ble_init`, `BLEManager` |
 | UART | [uart.md](docs/protocol/uart.md) | STM `UART_Link`, S3 `stm_uart` | `uart_link_task`, `stm_uart_task` |
-| Protocol | [protocol.md](docs/protocol/protocol.md) | STM/S3 `sc_frame`, App model | `sc_frame_encode`, `SmartCarProtocol.Parser.feed` |
+| Protocol | [protocol.md](docs/protocol/protocol.md) | STM/S3 `Common/SRP`, App BLE model | `srp_encode_frame`, `srp_parser_feed`, `SmartCarProtocol.Parser.feed` |
 | IMU | [imu-pipeline.md](docs/imu/imu-pipeline.md) | `STM32H757/Middleware/Sensor` | `imu_init`, `imu_update` |
 | LSM303 | [lsm303.md](docs/imu/lsm303.md) | `STM32H757/Drivers/IMU/LSM303` | `lsm303_init`, `lsm303_read_acc/mag` |
 | BMI323 | [bmi323.md](docs/imu/bmi323.md) | `STM32H757/Drivers/IMU/BMI323` | `bmi323_init_diag` |

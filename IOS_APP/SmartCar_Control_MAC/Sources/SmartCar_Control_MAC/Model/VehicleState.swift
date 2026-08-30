@@ -502,7 +502,7 @@ enum DecodedMessage: Equatable {
                 }
                 self = .dualAttitude(dual)
             case 30:
-                // Active SCBP ATTITUDE layout: timestamp_ms, source, valid.
+                // Active SRPv4 ATTITUDE payload layout: timestamp_ms, source, valid.
                 guard bytes[29] <= 1,
                       let source = AttitudeSource(rawValue: bytes[28]) else {
                     throw DecodeError.invalidPayload("ATTITUDE requires timestamp/source/valid fields")

@@ -26,3 +26,10 @@ sticky frames; it is published only on the next zero packet. The Python sender
 under `testdata/` covers legal no-intensity/intensity frames, half/sticky reads,
 bad CRC/version/length, duplicate/jump sequences, and disconnect/reconnect.
 These are deterministic fixtures, not real-device captures.
+
+The telemetry decoder tests use the canonical `Common/SRP` encoder to
+construct complete `0x14`, `0x11`, and `0x10` frames. They verify SRPv4
+priority, `STREAM_DATA`, fixed payload sizes, DualAHRS schema, IMU sensor IDs,
+and finite floating-point values. Legacy `0x210` is intentionally reported as
+missing source freshness; these tests do not claim `/odom`, TF, SLAM, or live
+device acceptance.

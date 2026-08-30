@@ -14,6 +14,34 @@ find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(Threads REQUIRED)
 
+# Reuse the repository's canonical SRPv4 wire/parser implementation.  The
+# Docker compose file mounts Common/ at /ws/Common; the first candidate is the
+# normal in-tree checkout path used by local builds.
+set(SMARTCAR_COMMON_ROOT "" CACHE PATH "Path to the repository Common directory")
+if(NOT SMARTCAR_COMMON_ROOT)
+  foreach(candidate
+      "${CMAKE_CURRENT_SOURCE_DIR}/../../../Common"
+      "/ws/Common")
+    if(EXISTS "${candidate}/SRP/srp_codec.c")
+      set(SMARTCAR_COMMON_ROOT "${candidate}")
+      break()
+    endif()
+  endforeach()
+endif()
+if(NOT SMARTCAR_COMMON_ROOT OR
+   NOT EXISTS "${SMARTCAR_COMMON_ROOT}/SRP/srp_codec.c")
+  message(FATAL_ERROR "Common/SRP is required for telemetry decoding")
+endif()
+set(SRP_ROOT ${SMARTCAR_COMMON_ROOT}/SRP)
+
+add_library(srp_codec STATIC
+  ${SRP_ROOT}/srp_crc.c
+  ${SRP_ROOT}/srp_wire.c
+  ${SRP_ROOT}/srp_codec.c
+)
+target_include_directories(srp_codec PUBLIC
+  ${SRP_ROOT}/include)
+
 set(YDLIDAR_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ydlidar_sdk)
 set(YDLIDAR_GENERATED_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated)
 file(MAKE_DIRECTORY ${YDLIDAR_GENERATED_DIR})
@@ -56,9 +84,11 @@ add_library(s3_ydlidar_bridge_core STATIC
   src/transport.cpp
   src/official_decoder.cpp
   src/scan_mapper.cpp
+  src/telemetry_decoder.cpp
 )
 target_include_directories(s3_ydlidar_bridge_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<BUILD_INTERFACE:${SRP_ROOT}/include>
   $<BUILD_INTERFACE:${YDLIDAR_ROOT}>
   $<BUILD_INTERFACE:${YDLIDAR_ROOT}/core>
   $<BUILD_INTERFACE:${YDLIDAR_ROOT}/src>
@@ -66,7 +96,7 @@ target_include_directories(s3_ydlidar_bridge_core PUBLIC
 )
 ament_target_dependencies(s3_ydlidar_bridge_core
   builtin_interfaces diagnostic_msgs rclcpp sensor_msgs)
-target_link_libraries(s3_ydlidar_bridge_core ydlidar_sdk)
+target_link_libraries(s3_ydlidar_bridge_core ydlidar_sdk srp_codec)
 
 add_executable(s3_ydlidar_bridge_node src/main.cpp src/bridge_node.cpp)
 target_include_directories(s3_ydlidar_bridge_node PRIVATE
@@ -128,6 +158,14 @@ if(BUILD_TESTING)
     target_include_directories(test_tcp_server PRIVATE
       ${CMAKE_CURRENT_SOURCE_DIR}/include)
     target_link_libraries(test_tcp_server s3_ydlidar_bridge_core)
+  endif()
+
+  ament_add_gtest(test_telemetry_decoder test/test_telemetry_decoder.cpp)
+  if(TARGET test_telemetry_decoder)
+    target_include_directories(test_telemetry_decoder PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}/include
+      ${SRP_ROOT}/include)
+    target_link_libraries(test_telemetry_decoder s3_ydlidar_bridge_core)
   endif()
 endif()
 

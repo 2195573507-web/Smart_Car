@@ -1,5 +1,9 @@
 # Findings: STM32-S3 SCBP-CAN Command Reference
 
+> Historical/deprecated findings from the pre-SRPv4 contract. Retained for
+> audit traceability only; do not copy its frame layout, IDs, or CRC rules into
+> current firmware.
+
 ## Confirmed Source Facts
 
 - Current STM32H757 <-> ESP32-S3 UART2 path is shared SCBP-CAN in `Common/SCBP_CAN/`.

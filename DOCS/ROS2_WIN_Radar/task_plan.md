@@ -18,7 +18,7 @@
 
 ## 2026-08-28：S3-ROS2-STM32 构建审计计划
 
-- [x] 对齐当前 S3 雷达输入、活动构建清单、S3-STM32 SCBP-CAN 边界与 CM7 Debug 构建路径。
+- [x] 对齐当前 S3 雷达输入、活动构建清单、S3-STM32 SRPv4 边界与 CM7 Debug 构建路径。
 - [x] 新增分阶段的 S3、Windows ROS2 与 STM32 构建/审计计划，明确雷达不上 STM32 与 ROS2 暂不控制车辆的范围。
 - [x] 记录当前 S3 源码与旧雷达测试文档存在的 PWM/监测描述漂移，作为实施前的审计门。
 - [x] P1 已接入 S3 雷达帧定界、官方 XOR 校验、统计和 latest-only 原始帧槽；host 测试与 ESP-IDF 构建通过。
@@ -33,7 +33,7 @@
 
 - S3 当前存在实验性 LAN/TCP 上行草案，但外层网关协议尚未冻结；它不能作为 Windows live receiver 或 ROS2 `/scan` 的正式输入合同。
 - 本计划不修改 S3、ROS2_WIN、STM32、网络配置或协议代码；`SMARTCAR_RADAR_UPLINK_ENABLED` 在协议冻结和现场验收前保持关闭。
-- 数据边界保持为 `YDLIDAR -> S3 UART1/GPIO44 -> S3 校验 -> Wi-Fi -> ROS2_WIN`；雷达原始数据不进入 STM32 UART2/SCBP-CAN，ROS2 暂不获得车体运动控制权。
+- 数据边界保持为 `YDLIDAR -> S3 UART1/GPIO44 -> S3 校验 -> Wi-Fi -> ROS2_WIN`；雷达原始数据不进入 STM32 UART2/SRPv4，ROS2 暂不获得车体运动控制权。
 
 ### 阶段与退出条件
 

@@ -140,6 +140,10 @@ BridgeNode::BridgeNode()
     tcp_config.protocol.expected_message_type = static_cast<uint8_t>(
         readU32Parameter(*this, "s3_expected_message_type",
                          tcp_config.protocol.expected_message_type));
+    tcp_config.protocol.telemetry_message_type = static_cast<uint8_t>(
+        readU32Parameter(*this, "s3_telemetry_message_type",
+                         tcp_config.protocol.telemetry_message_type));
+    raw_message_type_ = tcp_config.protocol.expected_message_type;
     tcp_config.protocol.allowed_flags_mask = static_cast<uint16_t>(
         readU32Parameter(*this, "s3_allowed_flags_mask",
                          tcp_config.protocol.allowed_flags_mask));
@@ -164,6 +168,19 @@ BridgeNode::BridgeNode()
         static_cast<int64_t>(tcp_config.protocol.max_payload_bytes));
     if (max_payload > 0 && max_payload <= 65535) {
       tcp_config.protocol.max_payload_bytes = static_cast<size_t>(max_payload);
+    }
+    const int64_t telemetry_max_payload = declare_parameter(
+        "s3_telemetry_max_payload_bytes",
+        static_cast<int64_t>(tcp_config.protocol.telemetry_max_payload_bytes));
+    if (telemetry_max_payload > 0 &&
+        telemetry_max_payload <= static_cast<int64_t>(SRP_MAX_FRAME_SIZE)) {
+      tcp_config.protocol.telemetry_max_payload_bytes =
+          static_cast<size_t>(telemetry_max_payload);
+    } else {
+      RCLCPP_WARN(get_logger(),
+                  "s3_telemetry_max_payload_bytes must be in 1..%u; using %zu",
+                  static_cast<unsigned>(SRP_MAX_FRAME_SIZE),
+                  tcp_config.protocol.telemetry_max_payload_bytes);
     }
     if (tcp_config.protocol.min_payload_bytes >
         tcp_config.protocol.max_payload_bytes) {
@@ -262,6 +279,42 @@ void BridgeNode::onFrame(ReceivedFrame frame) {
     if (sequence_status == SequenceStatus::kWrap) {
       ++sequence_wraps_;
     }
+  }
+
+  // Telemetry shares the S3RD envelope and sequence space, but is not a
+  // YDLIDAR packet. Decode it for diagnostics only; never feed it to the scan
+  // decoder or use legacy wheel data as live odometry.
+  if (frame.message_type != raw_message_type_) {
+    ++telemetry_packets_;
+    telemetry_bytes_.fetch_add(frame.payload.size());
+    WheelSpeedTelemetry wheel;
+    AttitudeTelemetry attitude;
+    ImuTelemetry imu;
+    std::string telemetry_error;
+    TelemetryStatus telemetry_status;
+    {
+      std::lock_guard<std::mutex> lock(telemetry_mutex_);
+      telemetry_status = telemetry_decoder_.decode(
+          frame.payload, wheel, attitude, imu, telemetry_error);
+    }
+    if (telemetry_status == TelemetryStatus::kInvalid) {
+      ++telemetry_invalid_;
+      if (!telemetry_error.empty()) {
+        RCLCPP_WARN(get_logger(), "%s", telemetry_error.c_str());
+      }
+    } else if (telemetry_status == TelemetryStatus::kUnsupported) {
+      ++telemetry_unsupported_;
+    } else if (telemetry_status == TelemetryStatus::kWheelSpeed) {
+      ++wheel_speed_packets_;
+      if (!wheel.freshness_available) {
+        ++wheel_freshness_unavailable_;
+      }
+    } else if (telemetry_status == TelemetryStatus::kAttitude) {
+      ++attitude_packets_;
+    } else if (telemetry_status == TelemetryStatus::kImu) {
+      ++imu_packets_;
+    }
+    return;
   }
 
   std::vector<::node_info> nodes;
@@ -393,6 +446,15 @@ void BridgeNode::publishDiagnostics() {
                 ? 0U
                 : transport_stats.accepted_connections - 1U);
   addNumber(status, "decoded_packets", decoded_packets_.load());
+  addNumber(status, "telemetry_packets", telemetry_packets_.load());
+  addNumber(status, "telemetry_bytes", telemetry_bytes_.load());
+  addNumber(status, "telemetry_invalid", telemetry_invalid_.load());
+  addNumber(status, "telemetry_unsupported", telemetry_unsupported_.load());
+  addNumber(status, "wheel_speed_packets", wheel_speed_packets_.load());
+  addNumber(status, "attitude_packets", attitude_packets_.load());
+  addNumber(status, "imu_packets", imu_packets_.load());
+  addNumber(status, "wheel_freshness_unavailable",
+            wheel_freshness_unavailable_.load());
   addNumber(status, "accumulated_packets", accumulated_packets_.load());
   addNumber(status, "revolutions_published", revolutions_published_.load());
   addNumber(status, "valid_points", valid_points_.load());

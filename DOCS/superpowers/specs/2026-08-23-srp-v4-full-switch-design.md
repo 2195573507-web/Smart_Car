@@ -1,5 +1,9 @@
 # SRP v4 Full-Switch Design
 
+> Migration design record. Any SCBP-CAN references below describe the
+> pre-switch implementation being replaced; they are historical and are not
+> active protocol or build instructions.
+
 Status: CONFIRMED  
 Date: 2026-08-23  
 Scope: STM32H757 USART2 <-> ESP32-S3 UART2 gateway link
@@ -126,4 +130,3 @@ unknown TLV skipping, sequence wrap, and 4-byte alignment. CM7/CM4 and ESP-IDF
 builds provide source/build evidence. UART stress, EMG latency, dynamic baud
 switching, and 24-hour CRC stability require matching flashed images and live
 captures and are not inferred from builds.
-

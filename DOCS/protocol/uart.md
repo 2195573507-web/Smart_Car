@@ -40,7 +40,7 @@ termios/DispatchSourceRead for the standalone logger.
 ## Current Status
 
 Transport implementations exist. The STM-S3 route is USART2/UART2 at 921600
-8N1 and carries SCBP-CAN; radar uses S3 UART1/GPIO44; logger uses STM
+8N1 and carries SRP v4; radar uses S3 UART1/GPIO44; logger uses STM
 USART1/PA9-PA10. Physical signals and end-to-end delivery are unverified.
 
 ## Known Issues

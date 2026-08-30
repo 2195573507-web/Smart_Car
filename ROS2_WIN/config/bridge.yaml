@@ -10,11 +10,15 @@ s3_ydlidar_bridge:
     tcp_max_ready_frames: 64
     s3_expected_version: 1
     s3_expected_message_type: 1
+    # Experimental SRPv4 telemetry envelope type. It is decoded for diagnostics
+    # only; legacy 0x210 has no freshness contract and is not published as odom.
+    s3_telemetry_message_type: 2
     s3_allowed_flags_mask: 1
     s3_expected_device_id: 1
     s3_expected_stream_id: 1
     s3_min_payload_bytes: 10
     s3_max_payload_bytes: 65535
+    s3_telemetry_max_payload_bytes: 512
     frame_id: laser_frame
     angle_min: -3.1415927
     angle_max: 3.1415927

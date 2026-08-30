@@ -1,5 +1,10 @@
 # SCBP-CAN Migration Plan
 
+> Historical/deprecated record. This plan describes the pre-SRPv4 SCBP-CAN
+> migration and is retained for traceability only. The active STM32H757 <->
+> ESP32-S3 UART2 contract is SRPv4 in `Common/SRP`; do not use this plan to
+> select frame fields, IDs, CRCs, or build inputs.
+
 ## Goal
 
 Replace the STM32H757 CM7 <-> ESP32-S3 UART SCBP-V3 path with the approved

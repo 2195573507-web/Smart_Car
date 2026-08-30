@@ -13,19 +13,19 @@ IDLE -> INIT -> SELF_TEST -> STATIC_CALIBRATION -> READY
                                            \\-> FAILED
 ```
 
-The STM32 sends transactional `BOOT_READY(0x007)` when it waits for the S3
+The STM32 sends transactional SRPv4 `BOOT_READY(0x07)` when it waits for the S3
 zero-PWM handshake. The S3 applies zero calibration PWM and sends
-transactional `RADAR_PWM_READY(0x302, speed_percent=0)`. The STM32 admits the
+transactional `RADAR_PWM_READY(0x21, speed_percent=0)`. The STM32 admits the
 message only at the expected state, keeps PWM at zero through the static
 window, and returns a fast ACK or ERROR.
 
 After static calibration closes, STM emits transactional
-`CAL_EVENT(0x001, STATIC_DONE=1)`. S3 releases its calibration lock only after
+`CAL_EVENT(0x01, STATIC_DONE=1)`. S3 releases its calibration lock only after
 admitting that event. Retry handling is idempotent at both admission points.
 
 ## Published Status
 
-The active calibration status is only `IMU_CAL_STATUS(0x202)`, an 11-byte
+The active calibration status is only `IMU_CAL_STATUS(0x12)`, an 11-byte
 payload:
 
 ```text

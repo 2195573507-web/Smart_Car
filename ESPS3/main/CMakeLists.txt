@@ -3,6 +3,7 @@ idf_component_register(
         "main.c"
         "radar/radar_parser.c"
         "radar/radar_frame_fifo.c"
+        "radar/radar_telemetry_queue.c"
         "radar/radar_uart.c"
         "radar/radar_uplink_protocol.c"
         "radar/radar_uplink_tx.c"

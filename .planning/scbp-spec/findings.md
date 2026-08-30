@@ -1,5 +1,9 @@
 # SCBP Audit Findings
 
+> Historical/deprecated audit evidence from before the SRPv4 full switch.
+> Retained for traceability; current STM32-S3 UART2 facts must be read from
+> `Common/SRP` and the active firmware sources.
+
 This file records source evidence while the audit proceeds. Entries must retain
 exact file/function references and distinguish confirmed facts from inference.
 

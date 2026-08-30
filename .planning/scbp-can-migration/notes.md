@@ -1,5 +1,9 @@
 # SCBP-CAN Migration Notes
 
+> Historical/deprecated notes. These entries describe an earlier protocol and
+> are not an active STM32-S3 wire contract. Current source uses SRPv4 from
+> `Common/SRP`.
+
 ## Confirmed Decisions
 
 - Scheme A is approved: replace the STM32H757 <-> ESP32-S3 UART V3 protocol in

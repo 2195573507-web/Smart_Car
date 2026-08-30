@@ -16,9 +16,9 @@ rejects unsupported version/type, configured identity mismatches, invalid
 payload bounds, and CRC errors. A zero-position packet starts a revolution and
 the next zero-position packet emits the preceding complete scan; it is never
 used to fabricate a partial scan. No
-`ESPS3/main/radar/radar_uplink_protocol.c` exists in this repository, so
-compatibility with a current S3 firmware implementation is unverified and the
-candidate remains experimental.
+`ESPS3/main/radar/radar_uplink_protocol.c` exists in the working tree, but
+compatibility with a flashed/current S3 firmware implementation is unverified
+and the candidate remains experimental/default-disabled.
 
 The project materials inspected on 2026-08-28 do not freeze the S3 Wi-Fi
 envelope. `ESPS3/docs/S3_YDLIDAR_X3PRO_TEST.md` stops at UART1/GPIO44 raw-byte
@@ -36,7 +36,7 @@ guessed:
 - timestamp semantics and maximum accepted age;
 - whether a payload contains exactly one YDLIDAR packet or a bounded batch.
 
-The existing `AA 55` SCBP frame documented for STM32 <-> S3 control/status is
+The existing `AA 55` SRPv4 frame documented for STM32 <-> S3 control/status is
 not treated as a radar Wi-Fi envelope. Shared magic bytes do not establish a
 shared payload layout or checksum contract.
 

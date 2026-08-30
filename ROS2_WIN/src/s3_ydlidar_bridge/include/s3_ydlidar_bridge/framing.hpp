@@ -9,6 +9,10 @@
 #include <string>
 #include <vector>
 
+extern "C" {
+#include "srp_def.h"
+}
+
 namespace s3_ydlidar_bridge {
 
 struct ReceivedFrame {
@@ -52,12 +56,20 @@ class UnconfiguredFrameExtractor final : public FrameExtractor {
 
 struct S3ProtocolConfig {
   uint8_t expected_version{1};
+  // Raw YDLIDAR remains the primary stream for the existing scan bridge.
   uint8_t expected_message_type{1};
+  // The S3 telemetry envelope is accepted by the shared gateway parser but is
+  // dispatched to a state decoder by a later stage, not to the scan decoder.
+  uint8_t telemetry_message_type{2};
   uint16_t allowed_flags_mask{0x0001U};
   uint32_t expected_device_id{1};
   uint32_t expected_stream_id{1};
   size_t min_payload_bytes{10};
   size_t max_payload_bytes{65535};
+  size_t telemetry_min_payload_bytes{1};
+  // A telemetry payload is one complete SRPv4 frame. Keep this default tied
+  // to the shared contract instead of duplicating its byte count.
+  size_t telemetry_max_payload_bytes{SRP_MAX_FRAME_SIZE};
 };
 
 struct S3ProtocolCounters {
@@ -108,6 +120,7 @@ class TcpChunkAssembler {
   size_t bufferedBytes() const noexcept { return buffer_.size(); }
   size_t droppedBytes() const noexcept { return dropped_bytes_; }
   size_t invalidFrames() const noexcept { return invalid_frames_; }
+  size_t droppedReadyFrames() const noexcept { return dropped_ready_frames_; }
   bool protocolConfigured() const noexcept { return protocol_configured_; }
 
  private:
@@ -115,8 +128,10 @@ class TcpChunkAssembler {
   std::vector<uint8_t> buffer_;
   std::deque<ReceivedFrame> ready_;
   size_t max_buffer_bytes_;
+  size_t max_ready_frames_;
   size_t dropped_bytes_{0};
   size_t invalid_frames_{0};
+  size_t dropped_ready_frames_{0};
   bool protocol_configured_{true};
 };
 

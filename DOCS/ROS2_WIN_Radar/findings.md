@@ -4,7 +4,7 @@
 
 - 当前 S3 雷达输入是 UART1、GPIO44 RX、115200 8N1；GPIO4 PWM 当前源宏为 0%。
 - （P1 实施前基线）`ESPS3/main/radar/radar_parser.c` 已存在，但当时未被当前 `ESPS3/main/CMakeLists.txt` 编译且 UART 任务未调用它；该问题已在本轮修复。
-- S3 与 STM32 的现有控制链是 UART2 GPIO17/18、921600 8N1、SCBP-CAN；雷达数据不应接入此链路。
+- S3 与 STM32 的现有控制链是 UART2 GPIO17/18、921600 8N1、SRPv4；雷达数据不应接入此链路。
 - CM7 规范构建目录是 `STM32H757/CM7/build/Debug`，唯一固件 ELF 为 `Smart_Car_H757_CM7.elf`。
 - Windows ROS2 目录尚无实际工作区；本计划选择先使用同一 LAN 的自定义 TCP 网关，跨 Wi-Fi/NAT 远程模式再使用 MQTT/TLS 或 WSS 中继。
 - 旧 `ESPS3/docs/S3_YDLIDAR_X3PRO_TEST.md` 与当前活动源码存在 PWM/监测描述漂移；实施前必须按源码和实物重新审计后同步文档。
@@ -15,12 +15,12 @@
 - 官方 SDK 协议文档的 checksum 为 `PH ^ FSA ^ each Si ^ (LSN << 8 | CT) ^ LSA`，强度模式的每个三字节样本拆为一个强度字节与一个小端距离字；S3 解析器已按此规则实现默认校验。
 - 解析器保留拆分 `AA` 包头、按 `LSN * sample_bytes + 10` 计算长度，并在校验通过后才更新 latest-only 槽；异常流不会把 UART 读取块直接视为有效帧。
 - Wi-Fi 上行尚未实现：当前计划没有冻结外层网关报文字段、最大长度和网络端点，继续编码会引入不可审计的协议猜测。
-- S3 构建验证确认 `radar_parser.c` 和 `radar_uart.c` 均已进入 `main` 组件；本次新增代码未修改 GPIO4 PWM 宏、UART2/SCBP-CAN 或 STM32 文件。
+- S3 构建验证确认 `radar_parser.c` 和 `radar_uart.c` 均已进入 `main` 组件；本次新增代码未修改 GPIO4 PWM 宏、UART2/SRPv4 或 STM32 文件。
 
 ## 2026-08-28 P2 代码复验
 
 - 当前 S3 上行实现采用实验性 LAN TCP：S3 主动连接 Windows bridge，TCP 字节流由接收端按固定 26 字节头、payload 长度和 2 字节 CRC16-Modbus 重组；不能把一次 `recv()` 视为一帧。
-- 网关 payload 是 S3 已通过 YDLIDAR XOR 校验的完整 `AA 55` 原始帧；S3 不向 STM32 发送雷达原始数据，也不改变 GPIO4 PWM、BLE 或 UART2/SCBP-CAN 所有权。
+- 网关 payload 是 S3 已通过 YDLIDAR XOR 校验的完整 `AA 55` 原始帧；S3 不向 STM32 发送雷达原始数据，也不改变 GPIO4 PWM、BLE 或 UART2/SRPv4 所有权。
 - 上行任务保留最新序号帧；断线或发送失败时关闭 socket 并退避重连，恢复连接后可能重复发送最新帧，Windows 端必须依据 `sequence` 去重并统计间隔。
 - TCP connect 已改为非阻塞加 `select()` 超时；发送超时独立于连接超时。该实现只完成源代码级边界，仍未证明真实网络下的时延、丢包和恢复行为。
 - Wi-Fi 凭据现在由 `ESPS3/main/radar/radar_wifi_credentials.h` 的列表维护，启动前逐项检查非空和长度，过长配置返回参数错误；真实密码不打印，也不应提交到公开仓库。

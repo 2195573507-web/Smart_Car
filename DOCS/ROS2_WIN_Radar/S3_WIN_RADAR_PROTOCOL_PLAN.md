@@ -27,7 +27,7 @@ YDLIDAR
 ```
 
 - S3 是雷达 UART 的唯一拥有者；GPIO4 PWM 保持现状。
-- STM32 继续负责既有控制、安全和执行链路，雷达数据不上行到 STM32 UART2/SCBP-CAN。
+- STM32 继续负责既有控制、安全和执行链路，雷达数据不上行到 STM32 UART2/SRPv4。
 - Windows 端 Docker/WSL2、`colcon build`、`colcon test` 和 16 个测试通过，是用户提供的环境基线；`rviz2`/`rqt` 显示和真实网络仍待验证。
 - 最新 S3 日志只证明 IO44 持续收到 UART 数据；其中多次出现 `AA 55`，但日志是截断 HEX，不能证明完整帧校验、Wi-Fi 传输或 `/scan`。
 - S3 当前存在实验性 LAN/TCP 上行代码。其字段只能作为候选设计参考，不能直接视为发布接口。
@@ -99,7 +99,7 @@ YDLIDAR
 - 每个录包登记雷达型号、固件（若可得）、供电、M_CTR 状态、波特率、采集时间和硬件版本。
 - 记录有效帧数、校验错误、UART 溢出、任务栈余量、内部 RAM/PSRAM 水位。
 
-退出条件：有可复现的完整帧和异常帧输入，且没有改变 GPIO4 PWM、UART2/SCBP-CAN 或 BLE 控制含义。
+退出条件：有可复现的完整帧和异常帧输入，且没有改变 GPIO4 PWM、UART2/SRPv4 或 BLE 控制含义。
 
 ### S3-P1：协议 codec 与 transport
 
@@ -168,7 +168,7 @@ YDLIDAR
 
 本协议计划不新增 STM32 接口。以下不变量必须保持：
 
-- 雷达原始帧、网关包和 `/scan` 不进入 STM32 UART2/SCBP-CAN；
+- 雷达原始帧、网关包和 `/scan` 不进入 STM32 UART2/SRPv4；
 - GPIO4 PWM 不因网络上行而改变；
 - STM32 仍是底盘执行和最终安全停止的所有者；
 - ROS2 未来若需要控制车辆，必须另立控制协议和安全评审，不能复用雷达上行通道。
@@ -194,4 +194,4 @@ YDLIDAR
 4. 协议冻结后，S3 codec/transport 与 WIN bridge/decoder 并行实现。
 5. 先离线 replay，再同一 LAN，最后跨网 relay。
 
-详细阶段进度仍记录在 [`task_plan.md`](task_plan.md)、[`findings.md`](findings.md) 和 [`progress.md`](progress.md)。
+详细阶段进度仍记录在 [`task_plan.md`](../history/context/task_plan.md)、[`findings.md`](../history/context/findings.md) 和 [`progress.md`](../history/context/progress.md)。

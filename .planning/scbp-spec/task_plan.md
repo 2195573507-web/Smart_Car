@@ -1,5 +1,8 @@
 # Task Plan: STM32H757 to ESP32-S3 SCBP Protocol Specification
 
+> Historical/deprecated specification task. The protocol described here was
+> superseded by SRPv4; current source and builds use `Common/SRP`.
+
 ## Goal
 
 Produce a source-grounded Markdown specification of the STM32H757 <-> ESP32-S3

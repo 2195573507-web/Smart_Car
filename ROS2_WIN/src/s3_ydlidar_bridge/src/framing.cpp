@@ -69,9 +69,20 @@ ExtractStatus S3FrameExtractor::extract(const std::vector<uint8_t> &buffer,
   const uint32_t sequence = readU32(buffer, 16U);
   const uint32_t timestamp_ms = readU32(buffer, 20U);
   const size_t payload_length = readU16(buffer, 24U);
-  if (payload_length < kYdlidarHeaderBytes ||
-      payload_length < config_.min_payload_bytes ||
-      payload_length > config_.max_payload_bytes) {
+  const bool is_raw = message_type == config_.expected_message_type;
+  const bool is_telemetry = message_type == config_.telemetry_message_type &&
+                            message_type != config_.expected_message_type;
+  if (!is_raw && !is_telemetry) {
+    ++type_errors_;
+    consumed = 1U;
+    return ExtractStatus::kInvalid;
+  }
+  const size_t min_payload = is_raw ? std::max(kYdlidarHeaderBytes,
+                                               config_.min_payload_bytes)
+                                    : config_.telemetry_min_payload_bytes;
+  const size_t max_payload = is_raw ? config_.max_payload_bytes
+                                    : config_.telemetry_max_payload_bytes;
+  if (payload_length < min_payload || payload_length > max_payload) {
     ++length_errors_;
     consumed = 1U;
     return ExtractStatus::kInvalid;
@@ -85,11 +96,6 @@ ExtractStatus S3FrameExtractor::extract(const std::vector<uint8_t> &buffer,
     consumed = frame_length;
     return ExtractStatus::kInvalid;
   }
-  if (message_type != config_.expected_message_type) {
-    ++type_errors_;
-    consumed = frame_length;
-    return ExtractStatus::kInvalid;
-  }
   const uint16_t expected_crc = crc16Modbus(buffer, 4U, kHeaderBytes +
                                                     payload_length);
   const uint16_t received_crc = readU16(buffer, kHeaderBytes + payload_length);
@@ -98,13 +104,15 @@ ExtractStatus S3FrameExtractor::extract(const std::vector<uint8_t> &buffer,
     consumed = frame_length;
     return ExtractStatus::kInvalid;
   }
-  const uint8_t payload_ct = buffer[kHeaderBytes + 2U];
-  const bool unknown_flags = (flags & ~config_.allowed_flags_mask) != 0U;
-  const bool ct_mismatch = (flags & 0x0001U) != (payload_ct & 0x01U);
-  if (unknown_flags || ct_mismatch) {
-    ++flags_errors_;
-    consumed = frame_length;
-    return ExtractStatus::kInvalid;
+  if (is_raw) {
+    const uint8_t payload_ct = buffer[kHeaderBytes + 2U];
+    const bool unknown_flags = (flags & ~config_.allowed_flags_mask) != 0U;
+    const bool ct_mismatch = (flags & 0x0001U) != (payload_ct & 0x01U);
+    if (unknown_flags || ct_mismatch) {
+      ++flags_errors_;
+      consumed = frame_length;
+      return ExtractStatus::kInvalid;
+    }
   }
   if (device_id != config_.expected_device_id ||
       stream_id != config_.expected_stream_id) {
@@ -123,7 +131,7 @@ ExtractStatus S3FrameExtractor::extract(const std::vector<uint8_t> &buffer,
   frame.payload.assign(buffer.begin() + static_cast<ptrdiff_t>(kHeaderBytes),
                        buffer.begin() +
                            static_cast<ptrdiff_t>(kHeaderBytes + payload_length));
-  frame.zero_packet = frame.payload.size() > 2U &&
+  frame.zero_packet = is_raw && frame.payload.size() > 2U &&
                       (frame.payload[2] & 0x01U) != 0U;
   consumed = frame_length;
   ++accepted_frames_;
@@ -139,9 +147,10 @@ S3ProtocolCounters S3FrameExtractor::counters() const noexcept {
 
 TcpChunkAssembler::TcpChunkAssembler(std::shared_ptr<FrameExtractor> extractor,
                                      size_t max_buffer_bytes,
-                                     size_t)
+                                     size_t max_ready_frames)
     : extractor_(std::move(extractor)),
-      max_buffer_bytes_(max_buffer_bytes) {
+      max_buffer_bytes_(max_buffer_bytes),
+      max_ready_frames_(max_ready_frames) {
   protocol_configured_ = extractor_ != nullptr;
 }
 
@@ -206,8 +215,12 @@ bool TcpChunkAssembler::feed(const uint8_t *data, size_t size) {
     if (frame.received_steady_ns == 0U) {
       frame.received_steady_ns = steadyNowNs();
     }
-    ready_.push_back(std::move(frame));
-    produced = true;
+    if (ready_.size() >= max_ready_frames_) {
+      ++dropped_ready_frames_;
+    } else {
+      ready_.push_back(std::move(frame));
+      produced = true;
+    }
   }
   return produced;
 }

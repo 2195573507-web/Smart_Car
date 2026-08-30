@@ -1,8 +1,9 @@
 # ROS2_WIN delivery report
 
-This report covers the experimental S3 -> Windows ROS2 LAN/TCP PoC. It does
-not modify STM32H757, ESPS3, IOS-APP, GPIO4 PWM, UART2, SCBP-CAN, BLE, vehicle
-control, Nav2, or `/cmd_vel` paths.
+This report covers the experimental S3 -> Windows ROS2 LAN/TCP PoC and the
+read-only SRPv4 telemetry diagnostics path. Runtime control semantics remain
+unchanged: no ROS2 vehicle command, UART2 control, BLE, GPIO4 PWM, Nav2, or
+`/cmd_vel` path is added.
 
 ## 1. Added and modified files
 
@@ -16,12 +17,13 @@ control, Nav2, or `/cmd_vel` paths.
 | `docker/entrypoint.sh` | Sources ROS 2 and an existing overlay before invoking the requested command. |
 | `docker/enable-wsl2.ps1` | Documents the administrator-only Windows remediation required when Docker Desktop's Linux engine is unavailable. |
 | `docker/open_rviz2.ps1` | Provides a Windows-side helper for launching RViz2 through the configured Compose service. |
-| `src/s3_ydlidar_bridge/CMakeLists.txt`, `package.xml` | Declare the ament package, C++17 build, ROS dependencies, vendored SDK, executable, and six gtest targets. |
+| `src/s3_ydlidar_bridge/CMakeLists.txt`, `package.xml` | Declare the ament package, C++17 build, ROS dependencies, vendored SDK, executable, and seven gtest targets. |
 | `src/s3_ydlidar_bridge/config/bridge.yaml` | Installs the package-local form of the runtime configuration. |
 | `include/s3_ydlidar_bridge/framing.hpp`, `src/framing.cpp` | Define and validate the experimental envelope, bounded TCP framing, and sequence classification. |
 | `include/s3_ydlidar_bridge/transport.hpp`, `src/transport.cpp` | Implement unconfigured/replay transports and the single-client reconnecting TCP server. |
 | `include/s3_ydlidar_bridge/official_decoder.hpp`, `src/official_decoder.cpp` | Adapt a caller-owned read-only payload buffer to the official SDK parser, without a serial port or control writes. |
 | `include/s3_ydlidar_bridge/scan_mapper.hpp`, `src/scan_mapper.cpp` | Convert official parser nodes into parameterized metre/radian `LaserScan` data. |
+| `include/s3_ydlidar_bridge/telemetry_decoder.hpp`, `src/telemetry_decoder.cpp`, `test/test_telemetry_decoder.cpp` | Decode complete SRPv4 `0x14/0x11/0x10` telemetry using the canonical Common codec; validate and count diagnostics without publishing `/odom`. |
 | `include/s3_ydlidar_bridge/bridge_node.hpp`, `src/bridge_node.cpp`, `src/main.cpp` | Provide ROS parameters, `/scan`, `/diagnostics`, staleness, and sequence handling. |
 | `launch/bridge.launch.py`, `rviz/s3_ydlidar_bridge.rviz`, `rqt/README.md` | Supply minimal launch, visualization, and diagnostics viewing configuration. |
 | `test/test_framing.cpp`, `test/test_s3_protocol.cpp`, `test/test_tcp_server.cpp` | Test bounded half/sticky framing, envelope rejection, and loopback reconnect. |
@@ -60,8 +62,9 @@ port and exposes radar controls.
 
 ## 3. Experimental protocol
 
-`ESPS3/main/radar/radar_uplink_protocol.c` was requested but is absent from
-this repository. The receiver therefore follows the supplied candidate only:
+`ESPS3/main/radar/radar_uplink_protocol.c` now exists in the working tree, but
+the uplink is experimental and remains opt-in/default-disabled. The receiver
+therefore follows the candidate format only:
 `S3RD` magic, version 1, type 1 (`RAW_YDLIDAR_FRAME`), little-endian flags,
 device ID, stream ID, sequence, timestamp_ms, payload length, complete AA 55
 YDLIDAR frame, and little-endian CRC16-Modbus. CRC covers version through
@@ -152,13 +155,18 @@ published scans. Unit tests cover the half/sticky framing paths as well.
 
 ## 8. S3 gateway protocol status
 
-No frozen S3 Wi-Fi envelope or capture was found. The S3 radar test document
-only covers UART1/GPIO44 raw capture, and the architecture/data-flow documents
-mark the Wi-Fi radar bridge as future work. Magic/version/type, length
+No frozen S3 Wi-Fi envelope or current end-to-end capture was accepted. The S3
+radar test document still covers UART1/GPIO44 raw capture, while the working
+tree contains an experimental candidate uplink. Magic/version/type, length
 encoding, device identity, sequence semantics, outer CRC/authentication,
-timestamp policy, and packet batching remain unknown. The existing STM-S3
+timestamp policy, and packet batching remain unapproved. The existing STM-S3
 `AA 55` control/status envelope is a separate protocol and is not reused.
-Live mode consequently uses `UnconfiguredTransport` and publishes nothing.
+Live mode consequently remains opt-in. The host extractor accepts the
+experimental telemetry type `2` for shared framing and the bridge decodes
+complete SRPv4 telemetry for diagnostics, but does not publish `/odom` or feed
+telemetry to the YDLIDAR decoder. Historical
+`/scan` evidence does not prove the current S3 firmware chain or SLAM/vehicle
+operation.
 
 ## 9. How to start
 
@@ -183,6 +191,7 @@ sample.
 ## 11. Minimum conditions for live S3 data
 
 Still unverified: real S3 Wi-Fi, real capture, same-network hardware link,
-cross-network/NAT, and all vehicle-control behavior. This task explicitly does
-not modify STM32, GPIO4 PWM, UART2/SCBP-CAN, BLE, Nav2, or `/cmd_vel`, and does
-not represent a formal protocol freeze.
+cross-network/NAT, Windows Docker/colcon execution, telemetry freshness,
+`/odom`, TF, SLAM, and all vehicle-control behavior. The CM7 change only keeps
+the active SRPv4 codec in the Debug build; it does not represent a formal
+protocol freeze.

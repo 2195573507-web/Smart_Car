@@ -92,7 +92,7 @@ The project is in infrastructure initialization. The authorized deliverables are
 ### 2026-08-28: S3-ROS2-STM32 build audit plan
 
 - Added a staged implementation and audit plan for the current `YDLIDAR -> S3 -> Wi-Fi -> ROS2_WIN` direction.
-- It reserves raw radar packages for S3-to-ROS2 only, keeps the active STM32-S3 SCBP-CAN control link unchanged, and requires a separate safety decision before Nav2 can affect motion.
+- It reserves raw radar packages for S3-to-ROS2 only, keeps the active STM32-S3 SRPv4 control link unchanged, and requires a separate safety decision before Nav2 can affect motion.
 - The plan identifies the current S3 source/documentation drift around PWM and GPIO observation as a pre-implementation audit gate.
 - This entry is documentation-only. No firmware, ROS2 workspace, network transport, build, flash, device, SLAM, navigation, or vehicle test was performed.
 

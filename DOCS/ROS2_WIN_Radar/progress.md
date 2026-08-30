@@ -2,7 +2,7 @@
 
 ## 2026-08-28
 
-- 已按只读方式核对 S3 雷达 UART/PWM 当前源码、S3-STM32 SCBP-CAN 边界、CM7 规范构建路径、ROS2 Windows 部署资料和工作树状态。
+- 已按只读方式核对 S3 雷达 UART/PWM 当前源码、S3-STM32 SRPv4 边界、CM7 规范构建路径、ROS2 Windows 部署资料和工作树状态。
 - 已识别活动源码与旧 S3 雷达测试文档的 PWM/监测描述漂移；计划以活动源码为准并将文档同步列为审计门。
 - 已新增端到端构建与审计计划；本次未修改 S3、STM32 或 ROS2 业务代码，也未运行构建、网络或硬件测试。
 
@@ -22,7 +22,7 @@
 
 - 新增 `ESPS3/main/radar/radar_uplink_protocol.h/.c`：固定小端网关头、版本/消息类型、device/stream/sequence、S3 单调时间戳、payload 长度和 CRC16-Modbus；只接受已通过 YDLIDAR 校验的完整原始帧。
 - 新增 `ESPS3/main/radar/radar_uplink.h/.c`：独立低优先级 Wi-Fi STA/TCP 上行任务，断线重连采用有界指数退避，网络慢时保持 latest-only，不阻塞 UART1 接收、BLE 日志或 STM UART2。
-- `main.c` 仅调用可选上行初始化；默认 Kconfig 关闭，SSID、密码、Windows 主机和端口为空时拒绝启动；GPIO4 PWM、UART2/SCBP-CAN、BLE 命令含义未改动。
+- `main.c` 仅调用可选上行初始化；默认 Kconfig 关闭，SSID、密码、Windows 主机和端口为空时拒绝启动；GPIO4 PWM、UART2/SRPv4、BLE 命令含义未改动。
 - 收紧 TCP 连接行为：非阻塞 `connect()` 加 `select()` 超时，发送使用独立 `SO_SNDTIMEO`；Wi-Fi SSID/密码超过芯片字段容量时拒绝而不是静默截断。
 - 主机验证通过：`sh main/radar/tests/run_host_tests.sh`、两个 `-std=c11 -pedantic -Wall -Wextra -Werror` 测试、ASAN（`detect_leaks=0`）和 UBSAN；`git diff --check` 通过。
 - 上行协议测试补充了零位包标志、版本/消息类型拒绝和最大合法强度帧（255 点）round-trip，严格编译、ASAN 和 UBSAN 复验均通过。
@@ -58,7 +58,7 @@
 
 - 将 `ESPS3/main/radar/radar_uart.c` 的单槽 latest-frame 改为固定八槽完整帧 FIFO；满载只丢弃最旧帧并记录 `fifo_drop_oldest`，不执行动态分配或网络阻塞。
 - `radar_uplink.c` 按 FIFO 顺序发送所有已接收的校验有效帧，保留原始 parser 时间戳；TCP 发送中断时保留一个待发送包，重连后先重试；发送轮询由 20 ms 收紧为 5 ms，避免人为限制正常 X3PRO 包速率。
-- S3RD 26 字节头、device/stream ID、flags、CRC、UART1/GPIO44、GPIO4 PWM、UART2/SCBP-CAN 和 BLE 原始 UART 日志开关均未改变。
+- S3RD 26 字节头、device/stream ID、flags、CRC、UART1/GPIO44、GPIO4 PWM、UART2/SRPv4 和 BLE 原始 UART 日志开关均未改变。
 - 新增 `radar_frame_fifo.[ch]` 及主机测试，覆盖顺序、元数据、满载丢旧、空队列和短缓冲行为。
 - ESP-IDF 5.5.4 上行启用构建、`idf.py size`、主机测试、ASAN/UBSAN 和 `git diff --check` 均通过；未刷写、未做真实 Wi-Fi/TCP 或 Windows 整圈组帧验收。
 

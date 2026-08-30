@@ -1,5 +1,9 @@
 # Task Plan: STM32-S3 SCBP-CAN Command Reference
 
+> Historical/deprecated document. It records the superseded SCBP-CAN command
+> reference work. The active command registry is SRPv4 in
+> `Common/SRP/include/srp_registry.h`.
+
 ## Goal
 
 Create a source-based reference document that is the required starting point

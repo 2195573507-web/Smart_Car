@@ -1,5 +1,8 @@
 # Smart_Car Decision Log
 
+> Protocol note: entries describing `sc_frame.*` or SCBP are historical
+> decisions. The active STM32-S3 UART contract is SRPv4 in `Common/SRP/`.
+
 This is the durable record of accepted boundaries. A decision records what was
 chosen and why; it does not turn an unverified plan into runtime evidence.
 
@@ -88,11 +91,11 @@ chosen and why; it does not turn an unverified plan into runtime evidence.
 ## 2026-08-07: Two Frame Envelopes Must Stay Distinct
 
 - **Problem:** documents use “AA55” for incompatible byte layouts.
-- **Decision:** document App BLE v1 (`AA | 01 | ... | 55`) and STM32-S3 source
-  frames (`AA | 55 | 01 | ... | CRC`) as separate contracts until a verified
-  bridge explicitly translates them.
-- **Reason:** `SmartCarProtocol.swift` and both C `sc_frame.c` implementations
-  have different offsets, tails, and type tables.
+- **Decision:** document App BLE v1 (`AA | 01 | ... | 55`) and the current
+  STM32-S3 SRPv4 UART frame (`AA 55 | LEN | HEADER | PAYLOAD | CRC | 0D 0A`)
+  as separate contracts; the verified bridge explicitly translates them.
+- **Reason:** `SmartCarProtocol.swift` and the SRPv4 codec have different
+  offsets, tails, CRCs, and type tables.
 - **Impact:** no document may claim a single end-to-end protocol without naming
   the transport boundary and implementation evidence.
 

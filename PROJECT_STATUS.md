@@ -1,13 +1,13 @@
 # Smart_Car Project Status
 
-Status date: 2026-08-07. This is a source/documentation snapshot, not a
+Status date: 2026-08-30. This is a source/documentation snapshot, not a
 release tag and not a hardware acceptance report.
 
 ## Version
 
 | Item | Value | Evidence |
 | --- | --- | --- |
-| Knowledge base | `AI context baseline 2026-08-07` | This refactor |
+| Knowledge base | `SRPv4 migration baseline 2026-08-30` | Source/build audit |
 | Product/firmware release | Not formally tagged | Repository inspection |
 | App package | SwiftPM macOS package | `IOS_APP/SmartCar_Control_MAC/Package.swift` |
 | S3 firmware | ESP-IDF project | `ESPS3/CMakeLists.txt`, `ESPS3/main/main.c` |
@@ -32,7 +32,7 @@ release tag and not a hardware acceptance report.
 | LSM303 driver and manager path | 完成 | `lsm303.c`, `imu_manager.c` | I2C electrical behavior unverified |
 | Calibration/filter/attitude layers | 完成 | `imu_calibration.c`, `imu_filter.c`, `attitude.c` | Full reset-to-ready capture unverified |
 | STM32-S3 UART transport | 完成 | `uart_link.c`, `stm_uart.c`, USART2/UART2 constants | Physical link unverified |
-| STM32-S3 frame codec/parser | 完成 | `sc_frame.*` on both endpoints | It is a distinct envelope from App BLE |
+| STM32-S3 frame codec/parser | 完成 | `Common/SRP` (`srp_codec`, `srp_link`) on both endpoints | Active UART2 contract is SRPv4; physical link unverified |
 | S3 BLE GATT transport | 完成 | `s3_ble.c`, FFE0-FFE3 definitions | BLE session/notifications unverified |
 | S3 radar raw transport/PWM | 完成 | `radar_uart.c`, `radar_parser.c`, `radar_control.c` | Radar protocol and motor behavior unverified |
 | macOS control/developer UI | 完成 | SwiftUI views, `SmartCarViewModel` | App-to-device behavior unverified |
@@ -46,7 +46,7 @@ release tag and not a hardware acceptance report.
 | S3 -> BLE telemetry relay | S3 internal service handles STM frames, but a current telemetry-to-BLE relay is not proven | `smartcar_service`, `imu_bridge.c` |
 | IMU bridge | `imu_bridge_handle()` is an empty function | `ESPS3/components/smartcar_service/imu_bridge.c` |
 | Calibration chain | STM/S3 radar calibration state machine exists, but full reset/ACK/event/hardware evidence is absent | source and history records |
-| Protocol unification | App trailing-tail frame and STM-S3 AA55-prefix frame differ in layout/type table | source comparison |
+| Protocol boundaries | STM32-S3 UART2 is unified on SRPv4; App BLE intentionally remains a separate envelope | `DOCS/protocol/protocol.md`, `DOCS/architecture/communication.md` |
 | UART documentation | current source uses PA2/PA3 while IOC labels PD3/PD4 as legacy connector GPIO | IOC/MSP/header comparison |
 
 ## Paused
@@ -70,6 +70,8 @@ release tag and not a hardware acceptance report.
 
 - A5/5A plus CRC-CCITT protocol planning, retained only in
   `docs/history/protocol/`.
+- `Common/SCBP_CAN` executable sources and tests; removed from the active
+  source/build graph. Remaining SCBP references are historical audit records.
 - The former unified V1 and V2 protocol tables as cross-boundary authority;
   current source requires separate App BLE and STM-S3 frame pages.
 - Any claim that the old PD3/PD4 connector GPIO labels are the current USART2
@@ -91,8 +93,8 @@ release tag and not a hardware acceptance report.
 
 ## TODO / Human Confirmation
 
-- Confirm which frame contract is the approved cross-boundary contract before
-  implementing a bridge.
+- Confirm both flashed endpoints report SRPv4 sync and capture the live UART2
+  frame/CRC exchange; source/build evidence alone is insufficient.
 - Confirm the physical STM32 USART2 PA2/PA3 <-> S3 GPIO17/18 wiring and the
   legacy IOC labels.
 - Confirm App command/telemetry acceptance criteria and stop semantics.

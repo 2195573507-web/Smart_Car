@@ -10,7 +10,7 @@ the redundant quaternion whenever final Euler values are reference-adjusted.
 
 ## UART Output
 
-UART2 publishes only `ATTITUDE(0x201)` with the 80-byte SCBP-CAN schema-2
+UART2 publishes only `ATTITUDE(0x11)` with the 80-byte SRP schema-2
 payload. Its fields are little-endian:
 
 | Offset | Field |
