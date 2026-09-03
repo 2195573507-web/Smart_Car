@@ -1,7 +1,6 @@
 import AppKit
 import SwiftUI
 import Foundation
-import UniformTypeIdentifiers
 
 struct DeviceLogView: View {
     let title: String
@@ -10,6 +9,9 @@ struct DeviceLogView: View {
 
     @State private var minimumLevel: SmartCarLogLevel = .info
     @State private var isScrollPaused = false
+    @State private var lastAutomaticScrollAt: Date?
+
+    private static let automaticScrollInterval: TimeInterval = 0.5
 
     private var visibleRecords: [SmartCarLogRecord] {
         store.records.filter { $0.level >= minimumLevel }
@@ -25,6 +27,13 @@ struct DeviceLogView: View {
 
                 Text(title)
                     .font(.headline.monospaced())
+
+                Text(recordingStatus)
+                    .font(.caption.monospaced())
+                    .foregroundStyle(store.recordingFileName == nil ? Color.secondary : Color.green)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .frame(minWidth: 180, maxWidth: 300, alignment: .leading)
 
                 Spacer()
 
@@ -48,6 +57,11 @@ struct DeviceLogView: View {
                 }
                 .help("Clear \(title) logs")
 
+                Button(action: revealLogDirectory) {
+                    Image(systemName: "folder")
+                }
+                .help("Open LOG Folder")
+
                 Button {
                     let text = store.records.map(copyLine).joined(separator: "\n")
                     NSPasteboard.general.clearContents()
@@ -56,13 +70,6 @@ struct DeviceLogView: View {
                     Label("Copy All Logs", systemImage: "doc.on.doc")
                 }
                 .help("Copy all logs")
-
-                Button {
-                    exportRecords(store.records)
-                } label: {
-                    Label("Export TXT", systemImage: "square.and.arrow.down")
-                }
-                .help("Export all logs as TXT")
             }
             .padding(.horizontal, 24)
             .padding(.vertical, 14)
@@ -90,43 +97,46 @@ struct DeviceLogView: View {
                     .padding(.vertical, 12)
                 }
                 .onAppear {
-                    scrollToBottom(proxy, animated: false)
+                    scrollToBottom(proxy)
                 }
                 .onChange(of: store.records.count) { _, _ in
                     guard !isScrollPaused else { return }
-                    scrollToBottom(proxy, animated: true)
+                    let now = Date()
+                    guard lastAutomaticScrollAt == nil ||
+                        now.timeIntervalSince(lastAutomaticScrollAt!) >= Self.automaticScrollInterval
+                    else { return }
+                    lastAutomaticScrollAt = now
+                    scrollToBottom(proxy)
                 }
                 .onChange(of: minimumLevel) { _, _ in
                     guard !isScrollPaused else { return }
-                    scrollToBottom(proxy, animated: false)
+                    scrollToBottom(proxy)
                 }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private func scrollToBottom(_ proxy: ScrollViewProxy, animated: Bool) {
-        if animated {
-            withAnimation(.easeOut(duration: 0.15)) {
-                proxy.scrollTo("log-bottom", anchor: .bottom)
-            }
-        } else {
-            proxy.scrollTo("log-bottom", anchor: .bottom)
-        }
+    private func scrollToBottom(_ proxy: ScrollViewProxy) {
+        proxy.scrollTo("log-bottom", anchor: .bottom)
     }
 
     private func copyLine(_ record: SmartCarLogRecord) -> String {
         "\(deviceLogTimestamp(record.timestampMilliseconds)) [\(record.source.displayName)][\(record.level.displayName)] \(record.message)"
     }
 
-    private func exportRecords(_ records: [SmartCarLogRecord]) {
-        let panel = NSSavePanel()
-        panel.nameFieldStringValue = "smartcar-logs.txt"
-        panel.allowedContentTypes = [.plainText]
-        panel.canCreateDirectories = true
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        try? records.map(copyLine).joined(separator: "\n")
-            .write(to: url, atomically: true, encoding: .utf8)
+    private var recordingStatus: String {
+        guard let fileName = store.recordingFileName else { return "Not recording" }
+        return "Recording: \(fileName)"
+    }
+
+    private func revealLogDirectory() {
+        do {
+            try SessionLogWriter.ensureLogDirectory()
+            NSWorkspace.shared.open(SessionLogWriter.logDirectoryURL)
+        } catch {
+            print("[SESSION_LOG] directory unavailable: \(error.localizedDescription)")
+        }
     }
 }
 

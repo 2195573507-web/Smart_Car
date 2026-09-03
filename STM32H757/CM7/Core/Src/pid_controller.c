@@ -1,9 +1,23 @@
 #include "pid_controller.h"
+
+/* 轮速斜坡与 PID 实现；创建人：待确认（当前维护人：Zhiqin）。 */
 #include "wheel_control_params.h"
 
 #include <math.h>
 #include <stddef.h>
 
+/**
+ * @brief 将标量限制在对称区间 [-|limit|, |limit|] 内。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * @param[in] value 待限制的标量。
+ * @param[in] limit 对称上限；有限负值按绝对值处理。
+ * @return value 超过正/负限时返回对应边界，否则返回 value；value 或 limit 为 NaN 时比较
+ *         不成立并原样返回 value，函数无独立失败码。
+ * 调用方式：仅 PID 步进路径用于积分、摩擦补偿比例和最终输出限幅。
+ * 线程约束：纯计算、不阻塞、不获取 mutex 且可重入，禁止 ISR 调用；参数按值传递，
+ *           不访问共享状态或涉及对象所有权。
+ */
 static float clamp_float(float value, float limit)
 {
     if (limit < 0.0f) {
@@ -18,6 +32,7 @@ static float clamp_float(float value, float limit)
     return value;
 }
 
+/** 按最大加速度和动态 dt 推进目标斜坡。 */
 float Ramp_Update(Ramp_Profile_t *ramp, float final_target, float dt_seconds)
 {
     float step;
@@ -44,6 +59,7 @@ float Ramp_Update(Ramp_Profile_t *ramp, float final_target, float dt_seconds)
     return ramp->current_target;
 }
 
+/** 更新斜坡最大加速度；非法值保持原配置。 */
 void Ramp_Update_Max_Accel(Ramp_Profile_t *ramp, float max_accel)
 {
     if (ramp == NULL || !isfinite(max_accel) || max_accel < 0.0f) {
@@ -52,6 +68,7 @@ void Ramp_Update_Max_Accel(Ramp_Profile_t *ramp, float max_accel)
     ramp->max_accel = max_accel;
 }
 
+/** 初始化 PID 参数、限幅和反馈滤波状态。 */
 void pid_controller_init(pid_controller_t *pid, float kp, float ki, float kd,
                          float max_out, float max_iout, float deadband)
 {
@@ -68,6 +85,7 @@ void pid_controller_init(pid_controller_t *pid, float kp, float ki, float kd,
     pid_controller_reset(pid);
 }
 
+/** 在线更新 PID 增益并保留积分/反馈历史。 */
 void PID_Update_Gains(PID_Controller_t *pid, float kp, float ki, float kd)
 {
     if (pid == NULL || !isfinite(kp) || !isfinite(ki) || !isfinite(kd)) {
@@ -78,6 +96,7 @@ void PID_Update_Gains(PID_Controller_t *pid, float kp, float ki, float kd)
     pid->kd = kd;
 }
 
+/** 清除积分、微分和输出历史。 */
 void pid_controller_reset(pid_controller_t *pid)
 {
     if (pid == NULL) {
@@ -91,6 +110,7 @@ void pid_controller_reset(pid_controller_t *pid)
     pid->initialized = 0U;
 }
 
+/** 执行一次内置速度前馈、P/I、死区和抗积分饱和步进。 */
 float pid_controller_step_with_feedforward(pid_controller_t *pid,
                                             float target, float actual,
                                             float dt_seconds)
@@ -155,6 +175,7 @@ float pid_controller_step_with_feedforward(pid_controller_t *pid,
     return output;
 }
 
+/** 兼容入口；当前与内置前馈步进的行为完全一致。 */
 float pid_controller_step(pid_controller_t *pid, float target, float actual,
                           float dt_seconds)
 {

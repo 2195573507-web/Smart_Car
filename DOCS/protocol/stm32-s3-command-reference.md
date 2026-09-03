@@ -76,6 +76,15 @@ error_code`. `ATTITUDE` is the 80-byte schema-2 DualAHRS payload, and
 `IMU_TELEMETRY` is a source-tagged 30-byte sample. Their schemas and flags are
 specified in `SRP_v4_Spec.md` and must not be inferred from receive time.
 
+`CHASSIS_STATE` is the 24-byte schema-1 payload
+`schema_u8 | flags_u8 | reserved_u16 | timestamp_ms_u32 | x_mm_f32 |
+y_mm_f32 | yaw_deg_f32 | total_dist_m_f32`. Defined flags are attitude safety
+fused `0x01`, heading locked `0x02`, odometry valid `0x04`, and attitude ready
+`0x08`; all other bits and the reserved field must be zero. The timestamp is
+the CM7 monotonic arrival time of the MotorBoard MSPD source sample. Consumers
+must stop odometry publication when `ODOMETRY_VALID` is clear and must not
+reinterpret S3/host receipt time as source freshness.
+
 ## Fast Responses And Configuration
 
 The four-byte response payload is:

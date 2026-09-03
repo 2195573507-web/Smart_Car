@@ -62,57 +62,65 @@ struct SmartCarLogParser: Sendable {
     private static let headerSize = 10
     private static let crcSize = 2
     private static let maxPayload = 96
+    private static let maxBuffer = 2_048
 
     private var buffer: [UInt8] = []
+    private var readIndex = 0
+
+    init() {}
 
     mutating func reset() {
         buffer.removeAll(keepingCapacity: true)
+        readIndex = 0
     }
 
     mutating func feed(_ data: Data, receivedAt: Date) -> [SmartCarLogRecord] {
         buffer.append(contentsOf: data)
+        if buffer.count > Self.maxBuffer {
+            buffer = Array(buffer.suffix(Self.maxBuffer))
+            readIndex = 0
+        }
         var records: [SmartCarLogRecord] = []
 
         while true {
-            guard let headIndex = buffer.indices.first(where: {
-                $0 + 1 < buffer.count && buffer[$0] == Self.head[0] && buffer[$0 + 1] == Self.head[1]
-            }) else {
-                buffer.removeAll(keepingCapacity: true)
-                break
+            while readIndex + 1 < buffer.count,
+                  !(buffer[readIndex] == Self.head[0] &&
+                    buffer[readIndex + 1] == Self.head[1]) {
+                readIndex += 1
             }
-            if headIndex > 0 {
-                buffer.removeFirst(headIndex)
-            }
-            guard buffer.count >= Self.headerSize else { break }
+            guard readIndex + Self.headerSize <= buffer.count else { break }
 
-            guard buffer[2] == Self.version,
-                  let source = SmartCarLogSource(rawValue: buffer[3]),
-                  let level = SmartCarLogLevel(rawValue: buffer[4]) else {
-                buffer.removeFirst()
+            guard buffer[readIndex + 2] == Self.version,
+                  let source = SmartCarLogSource(rawValue: buffer[readIndex + 3]),
+                  let level = SmartCarLogLevel(rawValue: buffer[readIndex + 4]) else {
+                readIndex += 1
                 continue
             }
 
-            let payloadLength = Int(buffer[9])
+            let payloadLength = Int(buffer[readIndex + 9])
             guard payloadLength <= Self.maxPayload else {
-                buffer.removeFirst()
+                readIndex += 1
                 continue
             }
             let frameLength = Self.headerSize + payloadLength + Self.crcSize
-            guard buffer.count >= frameLength else { break }
+            guard buffer.count - readIndex >= frameLength else { break }
 
-            let crcOffset = Self.headerSize + payloadLength
+            let crcOffset = readIndex + Self.headerSize + payloadLength
             let receivedCRC = UInt16(buffer[crcOffset]) | (UInt16(buffer[crcOffset + 1]) << 8)
-            let calculatedCRC = Self.crc16Modbus(Array(buffer[2..<crcOffset]))
+            let calculatedCRC = Self.crc16Modbus(buffer[(readIndex + 2)..<crcOffset])
             guard receivedCRC == calculatedCRC else {
-                buffer.removeFirst()
+                readIndex += 1
                 continue
             }
 
-            let timestamp = UInt32(buffer[5]) |
-                (UInt32(buffer[6]) << 8) |
-                (UInt32(buffer[7]) << 16) |
-                (UInt32(buffer[8]) << 24)
-            let message = String(decoding: buffer[Self.headerSize..<crcOffset], as: UTF8.self)
+            let timestamp = UInt32(buffer[readIndex + 5]) |
+                (UInt32(buffer[readIndex + 6]) << 8) |
+                (UInt32(buffer[readIndex + 7]) << 16) |
+                (UInt32(buffer[readIndex + 8]) << 24)
+            let message = String(
+                decoding: buffer[(readIndex + Self.headerSize)..<crcOffset],
+                as: UTF8.self
+            )
             records.append(
                 SmartCarLogRecord(
                     source: source,
@@ -122,12 +130,25 @@ struct SmartCarLogParser: Sendable {
                     receivedAt: receivedAt
                 )
             )
-            buffer.removeFirst(frameLength)
+            readIndex += frameLength
         }
+        compactIfNeeded()
         return records
     }
 
-    private static func crc16Modbus(_ bytes: [UInt8]) -> UInt16 {
+    private mutating func compactIfNeeded() {
+        guard readIndex > 0 else { return }
+        if readIndex >= buffer.count {
+            buffer.removeAll(keepingCapacity: true)
+            readIndex = 0
+        } else if readIndex >= 256 || readIndex * 2 >= buffer.count {
+            buffer = Array(buffer[readIndex...])
+            readIndex = 0
+        }
+    }
+
+    private static func crc16Modbus<S: Sequence>(_ bytes: S) -> UInt16
+    where S.Element == UInt8 {
         var crc: UInt16 = 0xFFFF
         for byte in bytes {
             crc ^= UInt16(byte)

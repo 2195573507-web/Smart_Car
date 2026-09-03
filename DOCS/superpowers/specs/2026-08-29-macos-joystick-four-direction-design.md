@@ -1,81 +1,115 @@
-# macOS 摇杆四方向轮速控制设计
+# macOS 摇杆 A+ 连续差速控制设计
 
 ## 状态
 
-实现已完成：macOS SwiftPM 构建与打包 bundle 启动验证通过；BLE、UART、
-STM32 应用和车辆行为仍为 `UNVERIFIED`。本文只覆盖当前
-`IOS_APP/SmartCar_Control_MAC` 可执行目标中的现有圆形摇杆。
+代码实现已完成，Swift 主机编译和活动 bundle 启动验证通过；BLE、UART、
+STM32 应用和车辆行为仍需分别验证，当前不能据此宣称物理验收完成。
+
+本文记录 `IOS_APP/SmartCar_Control_MAC` 现有圆形摇杆的连续差速控制语义。
 
 ## 背景与现状
 
-`ControlModeView` 已包含 `VirtualJoystick`，但它当前发送 App BLE
-`CONTROL(0x01)` 帧。现行 ESP32-S3 `command_bridge` 处理的是 App
-`WHEEL_SPEED_CMD(0x15)`、PID 和雷达速度，未处理旧 `CONTROL(0x01)`，所以
-当前摇杆的方向命令不能沿已实现的 S3 -> STM32 轮速路径得到确认。
+原实现按拖动的主轴把摇杆量化为前进、后退、原地左转或原地右转。这样斜向
+拖动会丢失幅度信息，无法表达缓转和急转。
 
-现有轮速路径保持不变：App 发送四个 little-endian `float32` 轮速，S3
-转发为 SRPv4 `WHEEL_SPEED_CMD(0x02)`，STM32 接收顺序为
-`[M1:RR, M2:RF, M3:LR, M4:LF]`。
+当前实现保留原有界面和 BLE 轮速路径，新增 `JoystickIntent`，把归一化的
+水平/垂直输入转换为四轮目标。底盘仍是左右两侧差速结构，不支持纯横移。
 
 ## 目标
 
-1. 保留现有摇杆外观、拖动手势和四方向档位体验。
-2. 将摇杆方向转换为现有 BLE `0x15` 四轮速度命令。
-3. 使用现有速度滑块控制摇杆输出幅值。
-4. 回中、方向切换、释放、断链和 App 生命周期变化均保持零速安全行为。
-5. 不新增协议类型，不修改 S3、STM32、GPIO、轮序和底层控制参数。
+1. 保留现有摇杆外观、拖动手势和速度滑块。
+2. 纵向偏移决定前进/后退线速度，横向偏移幅度决定转弯速度。
+3. 保持向左输入始终表示左转、向右输入始终表示右转，前进和倒车不翻转
+   横向极性。
+4. 复用现有 App BLE `0x15` 四轮速度命令、心跳和生命周期归零逻辑。
+5. 不新增协议类型，不修改 S3、STM32、GPIO、轮序、PID 或 `WHEEL_TRIM`。
 
 ## 非目标
 
-- 不实现连续二维速度/角速度控制。
-- 不新增摇杆页面或替换现有 UI 布局。
-- 不在本次工作中修改全局急停协议或宣称硬件急停能力。
-- 不根据构建结果宣称 BLE、UART、电机或车辆行为已验收。
+- 不实现麦克纳姆轮/全向轮所需的纯左移、纯右移或任意横移。
+- 不在 View 中创建独立发送定时器。
+- 不修改 STM32-S3 SRPv4 或 App BLE 外层帧格式。
+- 不根据主机编译或打包结果宣称 BLE、UART、电机或车辆行为已验收。
 
 ## 控制语义
 
-### 四方向档位
+### 输入归一化
 
-设 `v = speed_percent / 100 * 800.0 mm/s`，其中 `speed_percent` 来自
-现有 `0...100` 速度滑块。轮速目标顺序固定为
-`[M1:RR, M2:RF, M3:LR, M4:LF]`：
+摇杆平面使用 SwiftUI 坐标：水平向左为负，向右为正；垂直向上为负，
+向下为正。每个轴先限制到 `[-1, 1]`，再扣除现有 `18 pt` 死区并重新
+归一化到满量程。
 
-| 摇杆状态 | M1 RR | M2 RF | M3 LR | M4 LF |
-| --- | ---: | ---: | ---: | ---: |
-| 前进 | `+v` | `+v` | `+v` | `+v` |
-| 后退 | `-v` | `-v` | `-v` | `-v` |
-| 左转原地 | `+v` | `+v` | `-v` | `-v` |
-| 右转原地 | `-v` | `-v` | `+v` | `+v` |
-| 回中/释放 | `0` | `0` | `0` | `0` |
+### 速度和转向
 
-正负号是当前软件控制约定。电机安装方向、板卡通道方向和编码器方向仍
-需要台架实测确认；若物理左右相反，只能在明确的映射层修正，不能修改
-`WHEEL_TRIM`、轮序或底层 PID 来掩盖问题。
+设速度滑块为 `speed_percent`，则最大轮速为：
 
-### 死区与状态转换
+```text
+Vmax = speed_percent / 100 * 800.0 mm/s
+v = -vertical * Vmax
+```
 
-- 保留现有 `18 pt` 拖动阈值。
-- 阈值内从有方向状态回到中心时立即发送一次全零 `0x15`，停止轮速心跳。
-- 方向档位变化时立即切换目标，并由现有发送合并逻辑发送新目标。
-- 手势结束时再次确保全零目标。
-- 摇杆控件只有在 BLE 状态为 `connected` 时可操作。
+横向输入采用幂函数曲线，中心附近保留微调空间：
 
-## 数据流
+```text
+turn_fraction = abs(horizontal) ^ 1.5
+```
+
+当前软件约定 `w > 0` 为左转，因此：
+
+```text
+horizontal < 0 -> w = +turn_fraction * Vmax / 96.5
+horizontal > 0 -> w = -turn_fraction * Vmax / 96.5
+```
+
+其中 `96.5 mm = 193.0 mm / 2`。轮速目标按差速运动学计算：
+
+```text
+right = v + w * 96.5
+left  = v - w * 96.5
+[RR, RF, LR, LF] = [right, right, left, left]
+```
+
+计算后若任一轮的绝对值超过 `Vmax`，则同时缩放左右轮，保持转弯半径不变。
+
+### 方向示例
+
+| 摇杆状态 | 操作含义 | 轮速趋势 |
+| --- | --- | --- |
+| 上 | 最大前进 | 四轮同向 |
+| 上左 | 前进缓慢左转 | 右侧更快、左侧更慢 |
+| 上左（偏移更大） | 前进急左转 | 左右差值更大 |
+| 左 | 原地左转 | 右正、左负 |
+| 下 | 最大后退 | 四轮反向 |
+| 下左 | 倒车并保持左转输入 | 右侧负速较小、左侧负速较大 |
+| 右 | 原地右转 | 右负、左正 |
+| 回中/释放 | 停止 | 四轮为零 |
+
+倒车时横向输入的极性不翻转。这符合真实遥控车“左打仍是左打”的习惯；
+由于差速车的运动几何，倒车轨迹的弯曲方向可能与前进时的视觉直觉不同，
+台架测试记录应区分“车头转向方向”和“地面轨迹方向”。
+
+## 数据流与调度
 
 ```text
 VirtualJoystick
-  -> SmartCarViewModel.applyJoystickCommand()
-  -> wheelTargets[4]
+  -> JoystickIntent(horizontal, vertical)
+  -> SmartCarViewModel.setJoystickInput()
+  -> wheelTargets[RR, RF, LR, LF]
   -> BLEManager.sendWheelSpeeds()
   -> App BLE 0x15 (4 x f32 LE)
   -> S3 command_bridge
   -> SRPv4 0x02
-  -> STM32 wheel targets / MotorBoard
+  -> STM32 MotorBoard
 ```
 
-View 只报告四方向意图；四轮映射、速度缩放和停止调用由
-`SmartCarViewModel` 负责。现有 50 ms 首次发送合并、100 ms 轮速心跳、
-断链/后台归零逻辑继续复用，不在 View 中创建新的 Timer。
+View 只负责手势和死区归一化；轮速公式、限幅、状态和发送节奏由
+`SmartCarViewModel` 负责。
+
+- 首次/变化命令继续使用约 `50 ms` 合并窗口。
+- 连续拖动事件不会反复重置同一个待发送定时器，定时器发送最新目标。
+- 稳定目标继续使用 `100 ms` 轮速心跳。
+- 回中、释放、断链、后台和终止发送全零目标并停止心跳。
+- 未连接或非有限输入不产生非零运动命令。
 
 ## 修改边界
 
@@ -84,42 +118,41 @@ View 只报告四方向意图；四轮映射、速度缩放和停止调用由
 - `IOS_APP/SmartCar_Control_MAC/Sources/SmartCar_Control_MAC/UI/ControlModeView.swift`
 - `IOS_APP/SmartCar_Control_MAC/Sources/SmartCar_Control_MAC/ViewModels/SmartCarViewModel.swift`
 
-不修改：
+保持不变：
 
-- `SmartCarProtocol` 的 App BLE 外层格式和 `0x15` payload 布局
+- `SmartCarProtocol` App BLE 外层格式和 `0x15` payload 布局
 - `ESPS3`、`STM32H757`、GPIO、UART、MotorBoard、PID 和 `WHEEL_TRIM`
-
-## 生命周期与失败处理
-
-- 未连接时不发送运动命令。
-- 回中、释放、断链、后台、终止均把四轮目标清零。
-- 非有限值不进入 `sendWheelSpeeds`；现有有限值检查继续生效。
-- 轮速心跳只在存在非零目标且 BLE 仍连接时运行。
-- App ACK、S3 转发、STM32 应用和车辆运动分别记录为独立验证层级。
+- `[M1:RR, M2:RF, M3:LR, M4:LF]` 轮序
 
 ## 验证计划
 
-### 静态验证
+### 静态和主机验证
 
-- 确认 `VirtualJoystick` 不再调用旧 `sendControl()` 作为运动路径。
-- 确认四个方向的四轮数组和轮序与本设计一致。
-- 确认中心/释放调用全零目标，且没有遗留 Timer。
+- 确认 `VirtualJoystick` 不再以主轴择一方式丢弃横向幅度。
+- 检查 `JoystickIntent` 的死区、符号、幂函数和四轮数组顺序。
+- 检查连续拖动不会产生未限频的 BLE 写入。
+- 运行 `git diff --check`。
+- 在 `IOS_APP/SmartCar_Control_MAC` 运行 `swift build`。
+- 运行 `script/build_and_run.sh --verify` 刷新并检查活动 bundle。
 
-### 主机验证
+### 台架验证
 
-- 运行 `swift build`（`IOS_APP/SmartCar_Control_MAC`）。
-- 用现有 `build_and_run.sh --verify` 刷新并启动 macOS bundle。
-- 在日志或注入式 BLE manager 中检查 `0x15` payload、方向切换和零速帧。
+轮子离地，使用低速档逐项记录：
 
-### 台架/车辆验证（本设计不代替）
+1. 前进、后退、原地左转、原地右转。
+2. 前左/前右和后左/后右的轻转、急转变化。
+3. 摇杆回中和释放后的全零帧。
+4. 断链、后台切换后的零速行为。
+5. 电机板实际正负方向、左右转向极性和轮速反馈。
 
-- 断开车轮负载，分别验证四轮正负方向。
-- 验证前进、后退、原地左转、原地右转和释放停止。
-- 检查 100 ms 内有轮速心跳、断链后目标清零、STM32 watchdog 行为。
-- 低速、额定速度和紧急停止需要独立的受控车辆测试记录。
+### 车辆验证
+
+仅在台架方向确认后进行受控低速、额定速度和紧急停止测试；分别保存
+App 日志、BLE/UART 抓包、STM32 日志和硬件测试记录。
 
 ## 风险
 
-最大剩余风险是电机板安装方向与软件正负号不一致。构建只能证明 Swift
-代码和协议编码集成；在匹配的 App/S3/STM32 映像、BLE/UART 抓包和受控
-车辆测试完成前，摇杆仍标记为 `UNVERIFIED`。
+- 电机安装方向、板卡通道方向或编码器符号可能与软件正负约定不一致。
+- `Vmax` 同时作为线速度和最大转向轮速分量，实际转弯手感需要台架调参。
+- 倒车时“车头左转”和“轨迹向左”不是同一概念，必须在验收记录中明确。
+- 主机编译只证明 Swift 集成，不证明 BLE、UART、STM32 或车辆运行。

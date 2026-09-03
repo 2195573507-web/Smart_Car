@@ -11,7 +11,6 @@ struct DualAttitudeStateSnapshot: Equatable {
     var data: DualAttitude?
     var displayStatus: AttitudeDisplayStatus = .timeout
     var lastUpdatedAt: Date?
-    var logLines: [String] = []
 }
 
 struct IMUStateSnapshot: Equatable {
@@ -76,6 +75,28 @@ struct VehicleStatusSnapshot: Equatable {
 }
 
 @MainActor
+final class DualAttitudeLogState: ObservableObject {
+    @Published private(set) var lines: [String] = []
+
+    private let capacity: Int
+
+    init(capacity: Int) {
+        self.capacity = capacity
+    }
+
+    func append(_ line: String) {
+        lines.append(line)
+        if lines.count > capacity {
+            lines.removeFirst(lines.count - capacity)
+        }
+    }
+
+    func clear() {
+        lines.removeAll(keepingCapacity: true)
+    }
+}
+
+@MainActor
 final class AttitudeState: ObservableObject {
     @Published private(set) var snapshot = AttitudeStateSnapshot()
 
@@ -84,7 +105,7 @@ final class AttitudeState: ObservableObject {
     private var timer: Timer?
 
     init() {
-        timer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
+        timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in self?.flush() }
         }
     }
@@ -128,10 +149,11 @@ final class AttitudeState: ObservableObject {
 
 @MainActor
 final class DualAttitudeState: ObservableObject {
-    private static let logInterval: TimeInterval = 0.25
-    private static let logCapacity = 200
+    private static let logInterval: TimeInterval = 1.0
+    private static let logCapacity = 60
 
     @Published private(set) var snapshot = DualAttitudeStateSnapshot(data: nil)
+    let log = DualAttitudeLogState(capacity: 60)
 
     private var pendingData: DualAttitude?
     private var pendingDate: Date?
@@ -140,7 +162,7 @@ final class DualAttitudeState: ObservableObject {
     private var timer: Timer?
 
     init() {
-        timer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) {
+        timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) {
             [weak self] _ in Task { @MainActor in self?.flush() }
         }
     }
@@ -165,6 +187,7 @@ final class DualAttitudeState: ObservableObject {
             pendingDate = nil
             lastTimestampMs = nil
             lastLogAt = nil
+            log.clear()
             snapshot = DualAttitudeStateSnapshot(data: nil)
             return
         }
@@ -177,10 +200,7 @@ final class DualAttitudeState: ObservableObject {
             next.lastUpdatedAt = pendingDate
             if let pendingDate,
                lastLogAt == nil || pendingDate.timeIntervalSince(lastLogAt!) >= Self.logInterval {
-                next.logLines.append(Self.formatLogLine(pendingData))
-                if next.logLines.count > Self.logCapacity {
-                    next.logLines.removeFirst(next.logLines.count - Self.logCapacity)
-                }
+                log.append(Self.formatLogLine(pendingData))
                 lastLogAt = pendingDate
             }
             self.pendingData = nil

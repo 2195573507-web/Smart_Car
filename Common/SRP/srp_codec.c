@@ -4,23 +4,63 @@
 
 #include "srp_crc.h"
 
+/* SRP v4 编解码与增量解析实现；创建人：待确认（当前维护人：Zhiqin）。 */
+
+/**
+ * @brief 从连续 2 字节读取一个小端无符号整数。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * @param data 至少包含 2 字节的只读缓冲；调用方必须保证非 NULL 和容量有效。
+ * @return 解码后的 uint16_t 数值。
+ * 调用方式：仅在完整 SRP header/trailer 长度已校验后读取固定字段。
+ * 线程约束：纯内存读取、可重入、不阻塞，不保留输入指针。
+ */
 static uint16_t read_u16_le(const uint8_t *data)
 {
     return (uint16_t)data[0] | ((uint16_t)data[1] << 8U);
 }
 
+/**
+ * @brief 从连续 4 字节读取一个小端无符号整数。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * @param data 至少包含 4 字节的只读缓冲；调用方必须保证非 NULL 和容量有效。
+ * @return 解码后的 uint32_t 数值。
+ * 调用方式：仅在完整 SRP header 长度已校验后读取逻辑 header。
+ * 线程约束：纯内存读取、可重入、不阻塞，不保留输入指针。
+ */
 static uint32_t read_u32_le(const uint8_t *data)
 {
     return (uint32_t)data[0] | ((uint32_t)data[1] << 8U) |
            ((uint32_t)data[2] << 16U) | ((uint32_t)data[3] << 24U);
 }
 
+/**
+ * @brief 把 uint16_t 按小端序写入连续 2 字节。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * @param data 至少可写 2 字节的缓冲；调用方必须保证非 NULL 和容量有效。
+ * @param value 待编码数值。
+ * @return 无。
+ * 调用方式：srp_encode() 写 magic、length、CRC 和 EOF 固定字段时调用。
+ * 线程约束：纯内存写入、可重入、不阻塞；同一输出区域不得并发写。
+ */
 static void write_u16_le(uint8_t *data, uint16_t value)
 {
     data[0] = (uint8_t)value;
     data[1] = (uint8_t)(value >> 8U);
 }
 
+/**
+ * @brief 把 uint32_t 按小端序写入连续 4 字节。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * @param data 至少可写 4 字节的缓冲；调用方必须保证非 NULL 和容量有效。
+ * @param value 待编码数值。
+ * @return 无。
+ * 调用方式：srp_encode() 写组合后的逻辑 header 时调用。
+ * 线程约束：纯内存写入、可重入、不阻塞；同一输出区域不得并发写。
+ */
 static void write_u32_le(uint8_t *data, uint32_t value)
 {
     data[0] = (uint8_t)value;
@@ -29,6 +69,15 @@ static void write_u32_le(uint8_t *data, uint32_t value)
     data[3] = (uint8_t)(value >> 24U);
 }
 
+/**
+ * @brief 校验逻辑帧的优先级、保留标志、payload 长度和指针组合。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * @param frame 待编码的只读逻辑帧；允许 NULL。
+ * @return 全部约束满足时返回 1，否则返回 0；不校验业务消息 ID 或 payload 内容。
+ * 调用方式：srp_encode() 在计算输出长度和访问 payload 前调用。
+ * 线程约束：纯只读判断、可重入、不阻塞；frame 在调用期间保持有效。
+ */
 static int valid_header(const srp_frame_t *frame)
 {
     return frame != NULL && frame->priority <= SRP_PRIORITY_LOG &&
@@ -37,6 +86,7 @@ static int valid_header(const srp_frame_t *frame)
            (frame->length == 0U || frame->payload != NULL);
 }
 
+/** 依据 srp_codec.h 契约编码一条完整线缆帧。 */
 int srp_encode(const srp_frame_t *frame, uint8_t *out, size_t capacity,
                uint16_t *out_length)
 {
@@ -66,12 +116,14 @@ int srp_encode(const srp_frame_t *frame, uint8_t *out, size_t capacity,
     return SRP_CODEC_OK;
 }
 
+/** 统一入口包装，保持所有传输层使用同一编码实现。 */
 int srp_encode_frame(const srp_frame_t *frame, uint8_t *out, size_t capacity,
                      uint16_t *out_length)
 {
     return srp_encode(frame, out, capacity, out_length);
 }
 
+/** 校验魔数、长度、header、CRC、EOF 并返回借用 payload 视图。 */
 int srp_decode(const uint8_t *data, size_t length, srp_frame_t *frame)
 {
     uint16_t payload_length;
@@ -117,6 +169,15 @@ int srp_decode(const uint8_t *data, size_t length, srp_frame_t *frame)
     return SRP_CODEC_OK;
 }
 
+/**
+ * @brief 把增量 parser 恢复到等待首个 magic 字节的半帧状态。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * @param parser 非 NULL 的可写解析器；不清回调、context、累计计数或字节数组。
+ * @return 无。
+ * 调用方式：初始化、公开 reset 以及完成/拒绝一帧后调用。
+ * 线程约束：无内部锁，只允许同一 parser 的单一接收 owner 调用。
+ */
 static void parser_reset(srp_parser_t *parser)
 {
     parser->state = SRP_PARSER_WAIT_MAGIC0;
@@ -124,6 +185,7 @@ static void parser_reset(srp_parser_t *parser)
     parser->expected_length = 0U;
 }
 
+/** 丢弃半帧并保留回调/累计诊断。 */
 void srp_parser_reset(srp_parser_t *parser)
 {
     if (parser != NULL) {
@@ -131,6 +193,16 @@ void srp_parser_reset(srp_parser_t *parser)
     }
 }
 
+/**
+ * @brief 在当前 parser 状态下同步上报一次解析错误。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * @param parser 非 NULL 解析器；bytes/index 作为借用错误片段传给回调。
+ * @param error 错误类型。
+ * @return 无；未注册 error_callback 时不动作，也不会自动 reset parser。
+ * 调用方式：parser_consume_byte() 记录必要诊断字段后调用，再由对应分支决定 reset。
+ * 线程约束：回调在 feed 调用栈同步执行；不得保留 bytes、递归 feed 同一 parser 或阻塞。
+ */
 static void parser_error(srp_parser_t *parser, srp_parser_error_t error)
 {
     if (parser->error_callback != NULL) {
@@ -138,6 +210,17 @@ static void parser_error(srp_parser_t *parser, srp_parser_error_t error)
     }
 }
 
+/**
+ * @brief 保存最近一次 magic/header 拒绝时的 parser 状态和触发字节。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * @param parser 非 NULL 的可写解析器。
+ * @param state 发生拒绝时的状态。
+ * @param byte 导致拒绝或用于定位 header 的字节。
+ * @return 无；只更新诊断快照，不增加错误计数或改变解析状态。
+ * 调用方式：magic、长度和完整 header 校验失败路径在 error callback 前调用。
+ * 线程约束：无锁状态写入，只允许 parser 单 owner 调用。
+ */
 static void parser_record_header_drop(srp_parser_t *parser,
                                       srp_parser_state_t state,
                                       uint8_t byte)
@@ -146,6 +229,7 @@ static void parser_record_header_drop(srp_parser_t *parser,
     parser->last_drop_byte = byte;
 }
 
+/** 初始化增量解析器及其回调上下文。 */
 void srp_parser_init(srp_parser_t *parser,
                      void (*frame_callback)(const srp_frame_t *, void *),
                      void (*error_callback)(srp_parser_error_t, const uint8_t *,
@@ -162,6 +246,17 @@ void srp_parser_init(srp_parser_t *parser,
     parser_reset(parser);
 }
 
+/**
+ * @brief 向 SRP 增量状态机消费一个字节，并在完整帧或错误时同步触发回调。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * @param parser 已初始化且非 NULL 的可写解析器。
+ * @param byte 本次输入字节。
+ * @return 无；函数更新状态、索引和统计，完成或拒绝一帧后回到 magic 搜索。
+ * 调用方式：仅由 srp_parser_feed() 按输入顺序逐字调用。
+ * 线程约束：同一 parser 不可重入或并发；frame/error 回调在当前调用栈同步执行，
+ *           frame->payload 借用 parser 内部 bytes，仅在回调期间有效。
+ */
 static void parser_consume_byte(srp_parser_t *parser, uint8_t byte)
 {
     srp_frame_t frame;
@@ -244,6 +339,7 @@ static void parser_consume_byte(srp_parser_t *parser, uint8_t byte)
     }
 }
 
+/** 消费输入字节；完整帧/错误在任务上下文回调。 */
 size_t srp_parser_feed(srp_parser_t *parser, const uint8_t *data, size_t length)
 {
     if (parser == NULL || data == NULL) {
@@ -255,6 +351,7 @@ size_t srp_parser_feed(srp_parser_t *parser, const uint8_t *data, size_t length)
     return length;
 }
 
+/** 初始化 TLV 迭代器，不复制输入。 */
 void srp_tlv_iter_init(srp_tlv_iter_t *iterator, const uint8_t *data,
                        size_t length)
 {
@@ -266,6 +363,7 @@ void srp_tlv_iter_init(srp_tlv_iter_t *iterator, const uint8_t *data,
     iterator->offset = 0U;
 }
 
+/** 读取一项 TLV 并推进 offset。 */
 bool srp_tlv_next(srp_tlv_iter_t *iterator, uint8_t *tag, uint8_t *value_length,
                   const uint8_t **value)
 {

@@ -2,12 +2,14 @@
 
 ## Current Stage
 
-The project is in infrastructure initialization. The authorized deliverables are directory governance, documentation, STM32H757 base project structure, and a CubeMX IOC baseline. No vehicle-control, sensing, SLAM, navigation, app, or ESP32 feature implementation is included.
+项目当前包含既有固件集成代码；本次新增内容仅为 S3/STM 源码注释规范、接口注释和
+编译期调试参数集中管理，不改变车辆控制、传感器、协议或硬件行为。
 
 ## Authoritative Documents
 
 | Area | Document | Purpose |
 | --- | --- | --- |
+| Development | [S3_STM_CODE_COMMENT_GUIDE.md](development/S3_STM_CODE_COMMENT_GUIDE.md) | S3/STM 中文函数注释字段和 `Common/SmartCarDebug/smartcar_debug_config.h` 调试宏入口 |
 | System | [PROJECT_ARCHITECTURE.md](PROJECT_ARCHITECTURE.md) | System chain, component ownership, and evidence limits |
 | Governance | [CODEX_WORKFLOW.md](CODEX_WORKFLOW.md) | Required task sequence and verification rules |
 | Governance | [MULTI_AGENT_RULES.md](MULTI_AGENT_RULES.md) | Three-agent responsibilities and separation of duties |

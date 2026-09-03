@@ -2,6 +2,17 @@
 
 #include <string.h>
 
+/* SRP ACK/重试与错误状态实现；创建人：待确认（当前维护人：Zhiqin）。 */
+
+/**
+ * @brief 以 TEC/REC 较大值重新计算 ACTIVE/WARNING/PASSIVE/BUS_OFF 状态。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * @param link 非 NULL 的可写链路对象。
+ * @return 无；阈值依次为 32、128、256。
+ * 调用方式：错误计数增加或减少后立即调用，保证 state 与当前计数一致。
+ * 线程约束：无内部锁；同一 link 的所有调用由外层单 owner 或 mutex 串行化。
+ */
 static void update_state(srp_link_t *link)
 {
     const uint16_t score = link->tec > link->rec ? link->tec : link->rec;
@@ -12,6 +23,16 @@ static void update_state(srp_link_t *link)
                                                : SRP_LINK_ACTIVE;
 }
 
+/**
+ * @brief 饱和增加接收错误计数 REC 并刷新链路状态。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * @param link 非 NULL 的可写链路对象。
+ * @param value 本次错误权重；加法在 UINT16_MAX 饱和。
+ * @return 无。
+ * 调用方式：无效 ACK 或 parser 错误路径调用。
+ * 线程约束：无锁修改 link；必须与 send/receive/tick/recover 串行化。
+ */
 static void add_rec(srp_link_t *link, uint16_t value)
 {
     link->rec = link->rec > UINT16_MAX - value ? UINT16_MAX
@@ -19,6 +40,16 @@ static void add_rec(srp_link_t *link, uint16_t value)
     update_state(link);
 }
 
+/**
+ * @brief 饱和增加发送错误计数 TEC 并刷新链路状态。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * @param link 非 NULL 的可写链路对象。
+ * @param value 本次错误权重；加法在 UINT16_MAX 饱和。
+ * @return 无。
+ * 调用方式：首次 transport 失败、重试失败或重试耗尽路径调用。
+ * 线程约束：无锁修改 link；必须与 send/receive/tick/recover 串行化。
+ */
 static void add_tec(srp_link_t *link, uint16_t value)
 {
     link->tec = link->tec > UINT16_MAX - value ? UINT16_MAX
@@ -26,6 +57,15 @@ static void add_tec(srp_link_t *link, uint16_t value)
     update_state(link);
 }
 
+/**
+ * @brief 在收到一条逻辑帧时把非零 REC 减一并刷新状态。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * @param link 非 NULL 的可写链路对象。
+ * @return 无；REC 已为 0 时保持全部状态不变。
+ * 调用方式：srp_link_receive() 接受非 NULL 帧后、处理 ACK/业务前调用。
+ * 线程约束：无锁修改 link；只允许链路 owner 调用。
+ */
 static void reduce_rec(srp_link_t *link)
 {
     if (link->rec != 0U) {
@@ -34,6 +74,15 @@ static void reduce_rec(srp_link_t *link)
     }
 }
 
+/**
+ * @brief 在收到成功 ACK 时把非零 TEC 减一并刷新状态。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * @param link 非 NULL 的可写链路对象。
+ * @return 无；TEC 已为 0 时保持全部状态不变。
+ * 调用方式：匹配 ACK 且 status_code 为 OK 后调用。
+ * 线程约束：无锁修改 link；只允许链路 owner 调用。
+ */
 static void reduce_tec(srp_link_t *link)
 {
     if (link->tec != 0U) {
@@ -42,6 +91,17 @@ static void reduce_tec(srp_link_t *link)
     }
 }
 
+/**
+ * @brief 按消息类型和序号查找正在等待 ACK 的槽位。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * @param link 非 NULL 链路对象。
+ * @param type 被确认消息的 8 位类型。
+ * @param sequence 被确认消息的序号。
+ * @return 匹配的内部槽指针；没有匹配时返回 NULL，调用方不得长期保存该指针。
+ * 调用方式：srp_link_receive() 解析快速响应 payload 后调用。
+ * 线程约束：无锁扫描；同一 link 必须由外层串行化。
+ */
 static srp_link_pending_t *find_pending(srp_link_t *link, uint8_t type,
                                         uint8_t sequence)
 {
@@ -55,6 +115,15 @@ static srp_link_pending_t *find_pending(srp_link_t *link, uint8_t type,
     return NULL;
 }
 
+/**
+ * @brief 查找第一个空闲 pending 槽，但不立即标记占用。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * @param link 非 NULL 链路对象。
+ * @return 空闲内部槽指针；四个槽均占用时返回 NULL。
+ * 调用方式：srp_link_send() 对 ACK_REQUIRED 消息编码前调用，编码成功后才填充并置 in_use。
+ * 线程约束：返回到置位之间没有内部锁；同一 link 必须由单 owner/外层 mutex 串行化。
+ */
 static srp_link_pending_t *reserve_pending(srp_link_t *link)
 {
     for (size_t index = 0U; index < SRP_LINK_PENDING_SLOTS; ++index) {
@@ -65,6 +134,7 @@ static srp_link_pending_t *reserve_pending(srp_link_t *link)
     return NULL;
 }
 
+/** 初始化链路对象并填充缺省 ACK/重试参数。 */
 void srp_link_init(srp_link_t *link, const srp_link_config_t *config)
 {
     if (link == NULL) {
@@ -83,6 +153,7 @@ void srp_link_init(srp_link_t *link, const srp_link_config_t *config)
     link->state = SRP_LINK_ACTIVE;
 }
 
+/** 编码、发送并在需要时登记一条待 ACK 消息。 */
 int srp_link_send(srp_link_t *link, uint8_t priority, uint8_t destination,
                   uint16_t type, uint8_t flags, const uint8_t *payload,
                   uint16_t length, uint32_t now_ms,
@@ -144,6 +215,7 @@ int srp_link_send(srp_link_t *link, uint8_t priority, uint8_t destination,
     return 0;
 }
 
+/** 发送不占用待 ACK 槽位的快速响应。 */
 int srp_link_send_fast_response(srp_link_t *link, uint8_t priority,
                                 uint8_t destination, uint8_t is_error,
                                 uint16_t ack_type, uint8_t ack_sequence,
@@ -159,6 +231,7 @@ int srp_link_send_fast_response(srp_link_t *link, uint8_t priority,
                          payload, sizeof(payload), now_ms, NULL, NULL);
 }
 
+/** 清理指定类型的所有待 ACK 项。 */
 void srp_link_cancel_message(srp_link_t *link, uint16_t type)
 {
     if (link == NULL) {
@@ -172,6 +245,7 @@ void srp_link_cancel_message(srp_link_t *link, uint16_t type)
     }
 }
 
+/** 消费一条接收帧，处理 ACK 或转交业务回调。 */
 void srp_link_receive(srp_link_t *link, const srp_frame_t *frame)
 {
     srp_frame_t local;
@@ -217,6 +291,7 @@ void srp_link_receive(srp_link_t *link, const srp_frame_t *frame)
     }
 }
 
+/** 将解析错误折算为 REC 增量并刷新链路状态。 */
 void srp_link_report_parser_error(srp_link_t *link, srp_parser_error_t error)
 {
     if (link == NULL) {
@@ -229,6 +304,7 @@ void srp_link_report_parser_error(srp_link_t *link, srp_parser_error_t error)
     }
 }
 
+/** 推进 ACK 超时、有限重试和 BUS_OFF 回调。 */
 void srp_link_tick(srp_link_t *link, uint32_t now_ms)
 {
     if (link == NULL || link->config.transport_send == NULL) {
@@ -263,6 +339,7 @@ void srp_link_tick(srp_link_t *link, uint32_t now_ms)
     }
 }
 
+/** 清除待 ACK 和错误状态，供上层重新同步。 */
 void srp_link_recover(srp_link_t *link)
 {
     if (link == NULL) {

@@ -9,7 +9,7 @@
 
 ## 当前阶段
 
-阶段 5：静态验证与交付（已完成）
+阶段 9：2026-08-31 当前 SRPv4 第 38-47 轮深化审计（已完成）
 
 ## 不可突破的边界
 
@@ -29,6 +29,10 @@
 | `DOCS/STM_S3_FULL_CODE_AUDIT_REPORT.md` | 最终综合报告、问题清单、双核建议与验证路线 | complete |
 | `.planning/stm-s3-full-audit-20260829/findings.md` | 逐轮证据账本 | complete |
 | `.planning/stm-s3-full-audit-20260829/progress.md` | 轮次、修订和验证日志 | complete |
+| `.planning/stm-s3-full-audit-20260829/round13-14-stm-current.md` | 当前 STM/CM4 详细证据 | complete |
+| `.planning/stm-s3-full-audit-20260829/round18-27-current.md` | 当前十轮深化审计详细证据 | complete |
+| `.planning/stm-s3-full-audit-20260829/round28-37-current.md` | ABI/并发/时间/内存/ISR/安全/测试与终审证据 | complete |
+| `.planning/stm-s3-full-audit-20260829/round38-47-current.md` | UB/复位/持久化/数值/生命周期/对抗预算/供应链与终审证据 | complete |
 
 ## 12 轮审计与修订
 
@@ -87,11 +91,66 @@
 - [x] 完成正式计划与总报告
 - **状态：** complete
 
+### 阶段 6：当前 SRPv4 五轮增量审计
+
+- [x] 第 13 轮：SRPv4、ACK/重试、同步、CM7 控制与安全
+- [x] 第 14 轮：CM4 启动、D2 内存、RTOS/IPC 和 owner
+- [x] 第 15 轮：S3 UART、BLE、雷达、Wi-Fi/TCP 和资源
+- [x] 第 16 轮：App-S3-STM、ROS2、控制权和失联停机
+- [x] 第 17 轮：RTOS/栈/调试配置、文档一致性和终审
+- [x] 追加正式计划/总报告，更新 findings/progress，完成 Markdown 和写入边界复核
+- **状态：** complete
+
+### 阶段 7：当前 SRPv4 第 18-27 轮深化审计
+
+- [x] 第 18 轮：活动构建图、clean checkout 可复现性、生成/忽略配置
+- [x] 第 19 轮：SRPv4 codec/link、ACK/重试、pending 生命周期和对抗输入
+- [x] 第 20 轮：STM/S3 UART、DMA/cache、stream discontinuity、背压和恢复对称性
+- [x] 第 21 轮：App-S3-CM7 运动命令所有权、租约、epoch 和最终非零准入
+- [x] 第 22 轮：MotorBoard 闭环、反馈 READY/watchdog、dt、PID/斜坡和优先停机
+- [x] 第 23 轮：传感器、标定、DualAHRS 并发、freshness、单位与数据质量
+- [x] 第 24 轮：CM7/S3 RTOS、栈/堆、watchdog、fatal path 和可观测性
+- [x] 第 25 轮：BLE 安全、session、CCC/拥塞、分片、日志与重连语义
+- [x] 第 26 轮：雷达、S3RD、Wi-Fi/TCP、ROS2 边界、序号/过期和默认安全
+- [x] 第 27 轮：双核/文档/跨域优先级终审、结论去重与证据边界
+- [x] 终稿前重拍关键源码快照，复核行号、Markdown、Git 写入边界和未验证声明
+- **状态：** complete
+
+### 阶段 8：当前 SRPv4 第 28-37 轮深化审计
+
+- [x] 第 28 轮：ABI、字节序、packed/alignment、float 和序列化边界
+- [x] 第 29 轮：跨任务锁顺序、callback 重入、共享状态与死锁
+- [x] 第 30 轮：tick/DWT/序号/时间戳回绕、单调性和 freshness 算术
+- [x] 第 31 轮：返回值、ACK 关联、命令覆盖、副作和错误传播
+- [x] 第 32 轮：缓冲区/对象生命周期、栈/堆/PSRAM、拷贝和复杂度上界
+- [x] 第 33 轮：ISR/回调上下文、中断优先级、临界区、DMA/cache 和最坏延迟
+- [x] 第 34 轮：秘密、secure boot/flash encryption、日志隐私、BLE/TCP 暴露和默认安全
+- [x] 第 35 轮：App/UI 操作状态、命令反馈真实性、失焦/退出/重连和误操作
+- [x] 第 36 轮：测试/产品源对齐、CI、覆盖空白、fault injection 和证据可复现性
+- [x] 第 37 轮：跨域终审、风险去重、独立验收门和文档一致性
+- [x] 终稿前重拍关键源码哈希，检查行号、链接、章节、状态、`git diff --check` 和写入边界
+- **状态：** complete
+
+### 阶段 9：当前 SRPv4 第 38-47 轮深化审计
+
+- [x] 第 38 轮：编译器诊断、C/C++/Swift 未定义行为、格式与转换边界
+- [x] 第 39 轮：复位原因、掉电/棕断、watchdog、启动残留和安全恢复
+- [x] 第 40 轮：NVS/OTA/Flash/文件持久化、原子提交、磨损和 rollback
+- [x] 第 41 轮：控制/姿态数值鲁棒性、单位、饱和、NaN/Inf 和离散化
+- [x] 第 42 轮：多传感器时序、相位/时钟、标定来源、版本与恢复质量门
+- [x] 第 43 轮：重复初始化、重连、失败回滚、任务/锁/队列/socket 生命周期
+- [x] 第 44 轮：SRP/App/S3RD/MotorBoard/日志解析器的对抗预算与重同步上界
+- [x] 第 45 轮：计数器、诊断快照、状态名称、reset 语义和可观测性真实性
+- [x] 第 46 轮：工具链/依赖/许可证/子模块/供应链来源和发布可追溯性
+- [x] 第 47 轮：跨域根因去重、停止门更新、CM4 结论和全文一致性
+- [x] 终稿前重拍非 secret 关键源码哈希，检查行号、链接、状态、secret 0 命中、`git diff --check` 和 audit-only 写入边界
+- **状态：** complete
+
 ## 发现分级
 
 | 等级 | 定义 |
 |---|---|
-| Critical | 可直接破坏安全控制、内存完整性或核心通信，且存在现实触发路径 |
+| Critical | 可直接破坏安全控制、内存完整性或核心通信，或确认活动秘密已进入公开/受跟踪仓库与产物并需立即轮换 |
 | High | 可能导致失控、死锁、任务饿死、持续错误输出或关键恢复失败 |
 | Medium | 明显降低可靠性、实时性、效率、可维护性或扩展安全性 |
 | Low | 局部质量、可观测性、文档或一致性问题，短期运行影响有限 |
@@ -117,3 +176,12 @@
 |---|---:|---|
 | `create_goal` 报告已有未结束目标 | 1 | 读取目标状态，确认系统已自动创建本次审计目标，不再重复创建 |
 | 根级规划文件属于旧任务 | 1 | 新建独立作用域，不覆盖根级文件，也不写 `.planning/.active_plan` |
+| 误用无效 exec cell 等待协作任务 | 多次 | 停止等待该 cell，改用协作任务状态/消息；未修改任何工程文件 |
+| 第 35 轮补丁标题与占位标题不一致 | 1 | 补丁原子拒绝；读取准确上下文后改用小范围替换，无部分写入 |
+| 凭据集合复核使用了错误的 gateway 历史路径 | 1 | 子命令停止且未输出秘密；用 `rg --files` 定位准确路径后以全引号脱敏结构和内存集合重新验证 |
+| 发现标题统计命令的 shell 引号包含反引号 | 1 | zsh 在搜索前拒绝；改用不含反引号的锚定模式，未写文件 |
+| 最终状态搜索在 `rg` 单行模式误用 `\n` | 1 | 搜索被拒绝且未写文件；改为分别检查 task plan、progress 和新章节区段 |
+| 第 46 轮初查使用不存在的 `CM7/cmake/gcc-arm-none-eabi.cmake` | 1 | `nl` 报路径不存在且未写文件；按 preset 指向改读 `STM32H757/gcc-arm-none-eabi.cmake` |
+| 第 46 轮组合 `rg` 仍包含不存在的 `CM7/cmake` | 2 | 搜索部分返回后报错；后续命令只列显式存在文件，不再复用该路径 |
+| 仓库无 `.gitmodules`，`git config --file` 返回 1 | 1 | 结合 `git ls-files .gitmodules` 为空记录为“无子模块”，不重复调用失败命令 |
+| 写后复核时 `imu_calibration.c` 再次漂移 | 1 | 废止14:01 provisional manifest，恢复阶段9为in_progress，重读标定合同并等待新静止窗口 |

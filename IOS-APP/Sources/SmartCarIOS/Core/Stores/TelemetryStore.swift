@@ -1,0 +1,26 @@
+import SmartCarAppCore
+
+typealias AttitudeStateSnapshot = SmartCarAppCore.AttitudeStateSnapshot
+typealias DualAttitudeStateSnapshot = SmartCarAppCore.DualAttitudeStateSnapshot
+typealias IMUStateSnapshot = SmartCarAppCore.IMUStateSnapshot
+typealias RadarAvailability = SmartCarAppCore.RadarAvailability
+typealias RadarStateSnapshot = SmartCarAppCore.RadarStateSnapshot
+typealias WheelSpeedStateSnapshot = SmartCarAppCore.WheelSpeedStateSnapshot
+typealias CalibrationStateSnapshot = SmartCarAppCore.CalibrationStateSnapshot
+typealias CalibrationAvailability = SmartCarAppCore.CalibrationAvailability
+typealias DualIMUStateSnapshot = SmartCarAppCore.DualIMUStateSnapshot
+typealias VehicleStatusSnapshot = SmartCarAppCore.VehicleStatusSnapshot
+typealias AttitudeState = SmartCarAppCore.AttitudeState
+typealias DualAttitudeState = SmartCarAppCore.DualAttitudeState
+typealias IMUState = SmartCarAppCore.IMUState
+typealias RadarState = SmartCarAppCore.RadarState
+typealias WheelSpeedState = SmartCarAppCore.WheelSpeedState
+typealias ChassisTelemetrySnapshot = SmartCarAppCore.ChassisTelemetrySnapshot
+typealias ChassisTelemetryState = SmartCarAppCore.ChassisTelemetryState
+typealias StaticCalibrationStateSnapshot = SmartCarAppCore.StaticCalibrationStateSnapshot
+typealias StaticCalibrationState = SmartCarAppCore.StaticCalibrationState
+typealias CalibrationState = SmartCarAppCore.CalibrationState
+typealias DualIMUState = SmartCarAppCore.DualIMUState
+typealias VehicleStatusState = SmartCarAppCore.VehicleStatusState
+typealias TelemetryStore = SmartCarAppCore.TelemetryStore
+

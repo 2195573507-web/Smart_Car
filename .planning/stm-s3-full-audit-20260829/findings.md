@@ -199,3 +199,215 @@
 - 审计主范围：`STM32H757/`、`ESPS3/`、`Common/SCBP_CAN/`、`Common/SmartCarLog/`
 - 接口上下文：仅在验证跨模块契约时读取 App/ROS2/工具侧，不扩展为其全量审计。
 - 正式计划：`DOCS/STM_S3_FULL_CODE_AUDIT_PLAN.md`。
+
+## 2026-08-31 当前 SRPv4 第 13-17 轮增量证据
+
+### 快照和前提
+
+- 分支 `codex/s3-stm-cn-comments`，HEAD `f703453727a136d15ff7cacea4530beab6e9c08a`。
+- CM7 和 S3 当前 live CMake 共享 `Common/SRP/{srp_crc,srp_wire,srp_codec,srp_link}.c`；活动 STM-S3 合同是 SRPv4。
+- 工作区有大量并行未提交改动。本审计仅写审计 Markdown，不回滚、不归因、不提交。
+- 本次未构建、未运行主机测试、未烧录、未读 option bytes、未做 UART/BLE/Wi-Fi/目标板/车辆验收。
+
+### 第 13 轮：SRPv4、CM7 控制与安全
+
+- `chassis_task_start()` 除声明/定义外无调用者；`CHASSIS_SPEED_CMD`/`CHASSIS_HEADING_CMD` 可保存目标和 ACK，但 10 ms 底盘任务不运行。
+- `WHEEL_SPEED_CMD` 在同步后直达 `motor_board_set_target_wheel_speeds()`，后者仅查 finite/范围；新非零命令可在姿态门撤销后清掉 forced-stop。
+- MotorBoard 无 WAIT_FEEDBACK/READY、MSPD 时间戳和 200 ms feedback watchdog；PID 仍固定 `dt=0.05 s`。
+- `motor_board_force_stop()` 依赖普通 512 B USART6 TX FIFO；队列满时 zero-PWM 可丢失，已排队旧 PWM 可先发。
+- CM7 fault/assert/stack/malloc 致命路径最终关中断并永久停机，没有 IWDG/WWDG 或独立执行器 disable/brake。
+- DualAHRS `s_dual` 由低优先级 BMI task 分步写，gate/chassis/telemetry 无锁读多字段和 64-bit 时间戳。
+- PA9 依次被 USART1/TIM1 重配，PA10 依次被 USART1/LF_INT1 重配；最终 owner 与启动注释不一致。
+- SRPv4 codec/header/注册表/boot-info 锁边界一致；ACK/ERROR 接收仍只要求 payload `>=4`，不查精确长度、reserved 和 flag 一致性。当前 host 测试主要覆盖 codec，没有 link ACK/重试/BUS_OFF 状态测试。
+- 详细证据见 `round13-14-stm-current.md`。
+
+### 第 14 轮：CM4 启动、D2 内存、RTOS/IPC 和 owner
+
+- CM4 无条件等 HSEM0，CM7 没有释放；CM4 醒后仅 `HAL_Init()` 和空循环。
+- CM4 Reset_Handler 在进入 HSEM 等待前已经初始化 `.data/.bss`。CM4 `0x10000000` 与 CM7 DMA `0x30000000` 是 D2 物理别名；旧 map 还显示 `uwTick` 在 DMA 前 512 B 范围内的等价偏移。
+- 两核无 `.shared`、版本化 mailbox、cache clean/invalidate 规则、heartbeat、age timeout 或 reset epoch。
+- CM4 source list 无 FreeRTOS/OpenAMP/watchdog/业务源，SVC/PendSV 空，无已集成 CM4F port；startup 还错标 `.cpu cortex-m7`。
+- SPI/I2C、IMU、DualAHRS、姿态门、USART2/6、MotorBoard 和最终 zero-PWM 必须继续属于 CM7。CM4 第一阶段只能是 no-op/heartbeat 和低风险诊断消费者。
+
+### 第 15 轮：S3 UART、BLE、雷达、Wi-Fi/TCP 和资源
+
+- BLE 断连回调只清 motion pending 并置 stop flag，没有清 BLE RX 队列或撤销 V2 session。service 先发 zero，再消费断连前旧队列，因此非零命令可在 stop 后再次下发。
+- FFE1 是普通 write 权限，当前无 BLE 加密/配对/peer 授权强制；V1 写入不要求 FFE2 CCC 或 V2 session。
+- `S3 SYSTEM READY` 在 UART/BLE/radar/uplink/service 失败后仍可打印，不等价于系统能力就绪。
+- UART 硬件错误会设 discontinuity，软件 ring/mutex 丢字节只计数，service 不会立即 reset parser。
+- FFE2/FFE3 多生产者直接分片 send-indicate，无 TX 锁/队列和 congestion 状态机；MTU 23 下多片日志可交错。
+- TCP connect/backoff/burst 有界，但已连接 socket 持续 WAIT 无 deadline/keepalive/pending stale 重检。
+- S3 task stack 单位是 bytes：STM RX 3072、radar UART 4096、service 16384、uplink 6144；部分 HWM 日志错标为 words。
+- Kconfig 默认关闭 uplink，当前本机 ignored `sdkconfig` 已开；ignored 凭据头内容未复制到审计文档。S3RD type 2 仍是实验 ID。
+
+### 第 16 轮：App-S3-STM、ROS2、控制权与失联
+
+- 控制页红色急停调用 `emergencyStop() -> send(.stop)`，不清 wheel target、不停 100 ms heartbeat。该帧是 V1 `CONTROL 0x01 / STOP 0x01`，S3 无该 type 分支并返回 rejected；App 不展示该拒绝。
+- `BRAKE -> emergencyWheelBrake() -> sendZeroWheelSpeeds()`、摇杆回中、失焦/隐藏和主动断连是不同的有效零四轮路径。
+- App 编解码固定 V1，完全未使用 S3 已实现的 V2 500 ms heartbeat、3 s TTL、sequence 去重和 valid-for。S3 独立 SRP heartbeat 会继续维持 CM7 链路，它不能代替 App motion lease。
+- ROS2 bridge 只发 `/scan` 和 `/diagnostics`；telemetry type 2 只做诊断，无 `/odom`、`/cmd_vel`、控制 subscription 或 `controller_manager`。默认 `transport: unconfigured`，是安全边界而不是缺陷。
+
+### 第 17 轮：RTOS、调试配置、文档与终审
+
+- CM7 RTOS health 表使用不存在的 `uart_link/protocol`，漏 `attitude_gate/motor_board/chassis_task`；找不到任务只保持 0 且无 missing 标志，日志又未输出全部槽位。
+- CM7 在创建 `srp_uart/s3_service/attitude_gate` 和启动 scheduler 前打印 `RTOS READY/SYSTEM READY`；S3 对大多数初始化失败也仍打印 READY。
+- `Common/SmartCarDebug/` 当前未跟踪，但 CM7/S3 已直接 include。普通 `cmake -D<name>=<value>` 只建 cache 变量；当前只有显式 `target_compile_definitions()` 的少数开关真正进 compiler。`SMARTCAR_SCHEDULER_PROBE` 当前无源码使用点。
+- `.codex/MEMORY.md`、`PROJECT_STATUS.md`、`DOCS/architecture/system.md`、`DOCS/esp32s3/ble.md`、`DOCS/ros2/ros2.md`、`DOCS/code_map.md` 仍混有旧协议、BMI paused、BLE relay 未连接、ROS2 无 runtime 和不存在的 shared App V2 路径。
+- `git diff --check` 在终稿前的只读快照无输出；最终文档修订后需再次执行。
+
+### 当前停止条件
+
+- 在 App 急停、S3 断连队列、end-to-end motion lease、CM7 统一非零准入、MotorBoard feedback watchdog/优先 stop 和 CPU hang 独立停机证据取得前，不进入车辆运动验收。
+- 在 CM4 option bytes、启动握手、物理内存分区、CM4F RTOS、IPC/cache/reset 和故障注入全部通过前，继续保持 CM7-only。
+- 静态审计完成不代表当前脏源码已构建，也不代表已烧录或完成 UART/BLE/Wi-Fi/目标板/车辆验收。
+
+## 2026-08-31 第 18-27 轮深化审计摘要
+
+### 快照与覆盖
+
+- 分支 `codex/s3-stm-cn-comments`，HEAD `f703453727a136d15ff7cacea4530beab6e9c08a`；当前结论基于未提交脏工作树，不是 release tag。
+- 详细证据见 `round18-27-current.md`；终稿前 16 个关键 SRP/S3/ROS2/CM7/App 源文件通过 SHA-256 稳定性复核。
+- 本十轮没有构建、测试、烧录、读 option bytes、抓 UART/BLE/TCP、连目标板或运行车辆。
+
+### 十轮新证据
+
+| 轮次 | 新证据/独立修正 |
+|---:|---|
+| 18 | `Common/SmartCarDebug` 未跟踪；S3 fresh target 未固定，IDF 可回落 `esp32`；uplink 启用态无 tracked secret 模板；死 CMake/cache 和重复 BSP test |
+| 19 | S3 BUS_OFF 没有 stop 屏障；transport failure 不受 3 次 retry 限制；ACK 过宽/无 epoch；ACK-required 无 replay cache；callback 重入和 parser 半帧超时缺失 |
+| 20 | S3 `uart_write_bytes()` TX ring 入队用 IDF `portMAX_DELAY`；recover 不清旧 TX；CM7 worker 可在不取 TX mutex 时 abort/deinit HAL handle；两端 discontinuity 不完整 |
+| 21 | BLE disconnect/V2 HELLO 未绑 connection epoch；V2 valid-for 只防排队过期，不终止已执行目标；零 chassis 命令只清本地状态 |
+| 22 | MotorBoard FAILED/未 RUNNING 不拦非零；无 MSPD feedback watchdog；PID 当前固定 50 ms dt；普通 FIFO/RX re-arm/IRQ 无法构成可靠物理 stop |
+| 23 | DualAHRS publish 层仍无原子快照；BMI failure 会 freshness 锁车但无 dynamic recovery；BMI gyro-Z 单轴翻转与共用刚体变换注释矛盾 |
+| 24 | S3 service 一 tick 实为 10 ms；task WDT 只监 idle task 且不 panic；关键任务未注册 progress watchdog；两端 partial-start 缺统一 admission/回滚 |
+| 25 | App 在 GATT service/characteristic/CCC 前即设 connected 并启用控制；disconnect zero 没等 `.withResponse`；S3 GATT `1032` 超 IDF 公开 `517`；BLE ready/TX 状态分散 |
+| 26 | live TCP 无 TLS/认证，CRC 不是 MAC；单静默 client 可占 listener；S3 pending 旧包到 host 后按新 receive time 通过 stale 门；S3 timestamp 未映射 ROS time |
+| 27 | operator/session/transport/feedback 四类 lease 被明确分层；当前无 end-to-end motion lease；车辆、release、SRP/UART、BLE、ROS2 live、CM4 分别设立停止门 |
+
+### 新增高优先级链路
+
+- `S3 BUS_OFF -> 100 ms recover -> 重新 sync` 可早于 CM7 `200 ms` 失联强停，而 S3 BUS_OFF callback 未发 zero/未清 motion/session。
+- `srp_link_recover()` 清 pending 不回调，S3 `s_motion_tx_in_flight` 可永久卡住；transport failure 又不增 retry_count。
+- S3 所谓 100 ms UART TX 上限不覆盖 IDF TX-ring 入队；旧 motion/ACK 可在 recover 后继续物理发送。
+- App “connected”不等于 command/telemetry ready，“transmitted”不等于 GATT/S3/STM 交付；主动 disconnect 前 zero 也无完成屏障。
+- MotorBoard lifecycle state 不参与非零准入，MSPD 停流无 watchdog，CPU fault 时普通 UART IRQ stop 无法保证。
+
+### 关闭、纠偏与仍开放项
+
+- **关闭：** LSM303 DRDY 掩码已正确；姿态 freshness 已持续撤销 ready；BLE RX callback/当前 telemetry relay 已连接；`data[7]/data[6]` 是 SRPv4 priority/type；CM7 DMA buffer 位于 DMA 可达 D2 SRAM。
+- **纠偏：** 不得笼统称“整个 IMU 链无锁”，manager/calibration/boot 已有各自 mutex；开放问题是 DualAHRS publish 层。
+- **重开：** 当前 MotorBoard 使用固定 `dt=0.05 s`，历史“动态 dt 完成”不适用当前工作树。
+- **仍开放：** CM4 D2 别名/HSEM/RTOS/IPC；App 急停/lease；CM7 direct wheel gate；DualAHRS snapshot；BLE 授权/拥塞；canonical 文档漂移。
+
+### 十轮后的停止条件
+
+- 车辆运动前 P0：急停、BLE epoch、operator lease、CM7 统一非零 gate、MotorBoard RUNNING/feedback/priority stop、CPU fault 独立停机。
+- 可复现发布前 P0：clean checkout 调试头、S3 target、uplink 模板、CMake/cache/admission 关闭。
+- ROS2 live/自主前 P0：TCP 认证/对端完整性、client/frame deadline、source age/time mapping 和 S3RD schema 联合冻结；否则保持 `unconfigured`/replay/PoC。
+- CM4 启用前 P0：option bytes、HSEM boot-ready/timeout、物理内存分区、CM4F RTOS、mailbox/cache/reset/heartbeat 和 CM7 单核回退。
+
+## 2026-08-31 第 28-37 轮深化审计摘要
+
+### 快照与边界
+
+- 分支/HEAD 仍为 `codex/s3-stm-cn-comments` / `f703453727a136d15ff7cacea4530beab6e9c08a`，但同一 HEAD 下并行脏源码在审计期间继续演化；启动 status 147 项，终稿前一度增至 151 项。
+- 详细证据见 `round28-37-current.md`。本轮只修改审计 Markdown，没有修改、格式化、回滚、提交或 push 固件/App/config/generated/secret/build 文件。
+- 未执行 build、host test、烧录、eFuse/option-byte 读取、UART/BLE/TCP 抓取、RTOS/WCET 量测、目标板或车辆验收。
+
+### 十轮独立结论
+
+| 轮次 | 核心结果 |
+|---:|---|
+| 28 | App 缺 0x29/0x2C type；logical SRP struct 受 pack(4)；S3RD 三份常量/CRC；binary32 合同不完整 |
+| 29 | BLE callback 跨 owner 写 motion；MotorBoard 长 critical；link callback 重入；BLE 多字段无 epoch snapshot |
+| 30 | DWT 多回绕漏高位；V2 sequence 不支持 32-bit wrap；boot zero-sentinel；多数短 deadline 已 wrap-safe |
+| 31 | PID/SYS_CONFIG 共用 callback context/baud；motion overwrite 无 superseded；V1/fast ACK/log 返回值语义不足 |
+| 32 | ROS resync 近 O(n²)且 payload max 过大；App queue/disk 无界；CM7 raw-log 调试栈风险 |
+| 33 | UART2/USART6 同级 ISR/WCET + task critical；FFE3 CCC 可向自身 BTC queue 无限等待回投；raw diagnostics 整段关 IRQ |
+| 34 | 活动凭据进入公开 GitHub/产物/历史；release 未锁 secure boot/flash encryption；BLE/App 身份未认证；日志隐私 |
+| 35 | physical connected 解锁控制；STOP/计数不代表执行；PID 无 sequence/timeout；terminate zero 无 barrier |
+| 36 | App 必需 `SessionLogWriter.swift` 未跟踪；无 App test target/仓库 CI；motion/fault 主链无项目测试 |
+| 37 | 36 项去重为 1 Critical/10 High；建立 S0/R0/P0/M0/T0/N0/D0/V0 门；CM4 建议不变 |
+
+### Critical：秘密事件
+
+- ignored 活动 Wi-Fi 凭据的一组值与 tracked 历史文件完全相同；GitHub 当前元数据确认仓库是 PUBLIC，公开默认分支包含引入秘密的初始提交。
+- 两个 tracked Wi-Fi 文件至少含五组唯一凭据对；三份 tracked shared header 还重复保存一组非占位 SoftAP 凭据。活动 SSID/password 两个字段均能在现有 S3 ELF/BIN 中匹配。
+- 所有比较只输出路径、条目数、相等/命中关系；账本、计划和报告均不保存 SSID/password、可逆编码或可用于复原的内容。
+- 必须先在网络侧轮换/撤销并审计未知客户端；history rewrite/远端 ref 清理需单独授权和多方协调，不能替代轮换，本轮没有执行。
+
+### 去重后的 High 根因
+
+- **owner/transaction：** BLE disconnect callback 跨 owner 写 motion；PID/SYS_CONFIG 共用可变 callback context。
+- **BLE progress：** FFE3 CCC 在 BTC task 内同步 flush，默认 MTU 23 和足够积压可填满容量 100 的自身 queue 并进入无限等待。
+- **firmware/device trust：** 当前配置未启 secure boot/flash encryption/NVS encryption；FFE1 不要求 encrypted/MITM/peer authorization；官方 App 只按 name/公开 UUID 选车。
+- **operator truth：** App 以 physical connected 解锁控制；红色 STOP 无效，非 PID 命令无分阶段结果。
+- **release/test：** App 必需源未跟踪，安全控制主链无项目测试或 tracked CI。
+
+### 明确关闭/保留
+
+- 锁定 STM HAL 的 IDLE/TC/error callback 在项目 callback 前已恢复 READY/unlock；关闭“re-arm 必然因 HAL BUSY/内部锁失败”，保留 ISR WCET/RX inactive gap。
+- CM7-only UART2 DMA 当前 line alignment、D2 placement、pre-arm/actual invalidate 和 barrier 完整；关闭当前 cache/可达性误报，保留 CM4 D2 物理别名覆盖。
+- live TCP 无 TLS/auth、单 client、source-time/freshness 问题沿用第 26 轮，不重复计为第 34 轮新 High；tracked 默认 uplink off 和 ROS `unconfigured` 仍是保护。
+- 轮序 `[M1:RR,M2:RF,M3:LR,M4:LF]`、193.0 mm、trim、符号和安全门继续冻结；第 28-36 轮没有支持提前启用 CM4 的证据。
+
+### 独立停止门
+
+- S0：轮换/撤销秘密并扫描 all refs/objects/artifacts/caches。
+- R0：clean archive App/S3/CM7、固定 target/security profile、工具链/config/source/artifact 可追溯。
+- P0/M0：严格 ACK/replay/epoch/context；有效急停、operator lease、CM7 final gate、MotorBoard READY/feedback/priority stop/CPU-fault stop。
+- T0：ISR/critical WCET、HWM、heap、queue/ring waterline 长时实测。
+- N0：ROS2 live 认证、新鲜度、deadline、source time/epoch 和线性 assembler；否则保持 `unconfigured`。
+- D0：CM4 boot/物理内存/CM4F RTOS/mailbox/cache/reset/heartbeat/单核回退；否则保持 CM7-only。
+- V0：前置门通过且匹配镜像完成架空轮、低速台架、受控实车签收后，才可声明车辆 READY。
+
+## 2026-08-31 第 38-47 轮深化审计摘要
+
+### 快照与覆盖
+
+- 起始快照：2026-08-31 04:54:08 CST，`codex/s3-stm-cn-comments` / `f703453727a136d15ff7cacea4530beab6e9c08a` / status 151项。
+- 详细证据见 `round38-47-current.md`；本轮只写审计Markdown，不修改/回滚/提交源码、App、配置、secret、generated或build。
+- 第38-46轮共33项：0新增Critical、2 High、5 High/Medium组合；第34轮公开secret Critical仍开放。
+
+### 十轮结论
+
+| 轮次 | 新证据/独立关闭 |
+|---:|---|
+| 38 | fault strict-alias、ROS窄化/索引、C/C++ header、当前不可达vendor lock UB、诊断profile |
+| 39 | peer boot epoch/re-arm、early physical stop、reset cause、retained fault交付 |
+| 40 | NVS整擦、OTA rollback owner、16/32 MB分区表、session日志原子完成 |
+| 41 | heading min-wheel保持差速却改变平均applied v |
+| 42 | BMI/LSM timestamp/quality保护；内部cal result无活动端到端合同；新odometry wheel/yaw时刻不一致 |
+| 43 | STM UART/uplink/service init失败rollback与commit |
+| 44 | MotorBoard通用ACK不绑定当前step；Swift control parser无上限/O(n²) |
+| 45 | wheel source freshness、ONLINE/READY反向语义、counter/snapshot/log loss |
+| 46 | ROS/GCC锁定、LICENSE/SBOM、YDLidar来源、CubeMX/Swift generator provenance |
+| 47 | 八根因族去重、停止门更新、冻结合同和CM4结论 |
+
+### 带High等级根因
+
+- **Reset/re-arm：** peer无boot epoch，CM7单独重启不使BLE断开，旧App heartbeat可在zero后未经新授权恢复非零。
+- **Earliest stop：** physical zero晚于clock/GPIO/USART6，VOS/PLL/UART早期hang没有板端watchdog/enable-brake证据。
+- **Control numeric：** heading min-wheel给两侧同加偏置，低速requested v可能被显著提升。
+- **Lifecycle：** S3 STM UART task失败残留driver/mutex；uplink中后段失败残留network/event资源。
+- **Response correlation：** MotorBoard任意OK/ACK/Set文本可推进当前配置step，未绑定事务。
+- **Feedback truth：** MSPD停流后最后wheel数组仍50 ms重发，App receipt time把旧值伪装为新鲜。
+
+### 关键Medium与关闭项
+
+- NVS整区擦、双OTA无owner/rollback、旧分区表误选和App session截断不可辨识属于release/persistence门；当前没有项目OTA入口。
+- 标定内部timestamp/motion/quality/leveling gate存在；Common/CM7/S3无cal-result发送合同，App 0x25 decoder孤立，内部结果与provenance均无法对外验收。
+- S3 App/SRP C parser固定容量线性、App log parser有上限；Swift control parser无上限且坏候选前删。
+- App ONLINE可与SRP sync相反，Radar/TCP READY只表示本地阶段，多项counter无epoch/出口，radar snapshot失败伪装零值。
+- IDF lock、YDLidar version/license、CMSIS/HAL/FreeRTOS许可和无submodule是保护；ROS image/apt、CM7 GCC、generator、vendor import与artifact-specific SBOM未锁。
+- 当前HAL ReceiveToIdle READY顺序和CM7 UART DMA cache边界继续关闭；CM4 D2 alias、旧motion/secret安全链继续开放。
+
+### 停止门更新
+
+- S0不变：先轮换公开secret；history cleanup另行授权。
+- R0加入immutable toolchain/image/deps/vendor/generator、NVS/partition/OTA/log、LICENSE/NOTICE/SBOM。
+- P0加入peer boot epoch、精确MotorBoard ACK、parser budget与strict C/C++ build。
+- M0加入earliest hardware stop/reset re-arm、applied-v合同与feedback source freshness。
+- T0加入O0/Os/sanitizer、init失败资源守恒和snapshot有效性。
+- N0加入ROS参数硬边界/immutable image/source-time；D0/V0增加reset epoch/brownout/不自动rearm证据。
+- CM4推荐不变：CM7-only -> CM4 no-op+heartbeat/boot epoch -> 低风险服务；sensor/UART/MotorBoard/safety owner不迁移。

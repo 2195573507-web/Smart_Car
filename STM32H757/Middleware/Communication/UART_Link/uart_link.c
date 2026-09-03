@@ -12,14 +12,12 @@
 #include "srp_codec.h"
 #include "srp_registry.h"
 #include "cm7_raw_diag.h"
+#include "smartcar_debug_config.h"
 
-#ifndef SMARTCAR_RAW_DIAGNOSTICS
-#define SMARTCAR_RAW_DIAGNOSTICS 0
-#endif
+/* CM7 USART2 DMA 链路实现；创建人：待确认（当前维护人：Zhiqin）。 */
 
 #define UART_LINK_TASK_STACK_WORDS UINT16_C(1024)
 #define UART_LINK_TASK_PRIORITY (tskIDLE_PRIORITY + 2U)
-#define UART_LINK_STACK_MONITOR_PERIOD_MS UINT32_C(5000)
 #define UART_LINK_IRQ_PRIORITY UINT32_C(5)
 #define UART_LINK_DCACHE_LINE_SIZE UINT32_C(32)
 #define UART_LINK_TX_TIMEOUT_MS UINT32_C(50)
@@ -82,6 +80,16 @@ static TaskHandle_t s_uart_link_task_handle;
 
 static void uart_link_clear_error_flags(void);
 
+/**
+ * @brief 在调用方已经进入临界区时把字节写入 RX ring，满时逐字丢弃最旧数据。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * @param data 至少包含 length 字节的只读输入；length>0 时必须非 NULL。
+ * @param length 待写字节数。
+ * @return 本次丢弃的旧字节数；只要发生过丢弃，overflow_count 本次仅增加一次。
+ * 调用方式：当前仅 ring_push_from_isr() 在 FROM_ISR 临界区内调用。
+ * 线程约束：函数本身不加锁；调用方必须屏蔽与 ring 读写竞争的上下文，禁止无保护调用。
+ */
 static uint16_t ring_push_locked(const uint8_t *data, uint16_t length)
 {
     uint16_t dropped = 0U;
@@ -103,6 +111,16 @@ static uint16_t ring_push_locked(const uint8_t *data, uint16_t length)
     return dropped;
 }
 
+/**
+ * @brief 按 32 字节 cache line 扩展地址范围并使 D-cache 内容失效。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * @param data DMA 缓冲或其片段起始地址；NULL 时返回。
+ * @param length 字节数；0 时返回。
+ * @return 无；对齐后范围可能包含 data 前后同一 cache line 的邻接字节。
+ * 调用方式：启动 DMA 前使整个 RX buffer 失效，RX event 读取 DMA 数据前再次失效有效片段。
+ * 线程约束：直接执行 SCB cache 维护，可在任务或 UART HAL 回调上下文调用；缓冲必须按 cache 规则隔离。
+ */
 static void dcache_invalidate(const uint8_t *data, uint16_t length)
 {
     uintptr_t start;
@@ -122,6 +140,15 @@ static void dcache_invalidate(const uint8_t *data, uint16_t length)
                                  (int32_t)(aligned_end - aligned_start));
 }
 
+/**
+ * @brief 采集 RX DMA/DMAMUX、PA3 GPIO 和 NDTR 的无锁诊断快照。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * 传入参数：无。
+ * @return 无；TX DMA 在阻塞兼容路径固定记录为 0，快照不证明物理线路正确。
+ * 调用方式：DMA 配置、重装、RX callback 和 IRQ 转发边界调用。
+ * 线程约束：任务和 ISR 都可写这些 volatile 字段，不提供多字段原子一致性，仅用于诊断。
+ */
 static void uart_link_snapshot_dma_state(void)
 {
     const DMA_Stream_TypeDef *rx_stream =
@@ -148,6 +175,16 @@ static void uart_link_snapshot_dma_state(void)
     }
 }
 
+/**
+ * @brief 校验完整候选缓冲的 SRP magic、长度上限、精确总长、header、CRC 和 EOF。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * @param data 只读完整帧候选；允许 NULL。
+ * @param length 候选字节数，必须不超过 SRP_MAX_FRAME_SIZE。
+ * @return srp_decode() 完整通过时返回 1，否则返回 0。
+ * 调用方式：阻塞 TX 前防御性验证编码结果，以及本地启动 self-test 使用。
+ * 线程约束：纯内存解码、可重入、不阻塞；decoded payload 仅在函数内借用。
+ */
 static uint8_t uart_link_is_valid_frame(const uint8_t *data, uint16_t length)
 {
     uint16_t payload_length;
@@ -171,6 +208,16 @@ static uint8_t uart_link_is_valid_frame(const uint8_t *data, uint16_t length)
     return srp_decode(data, length, &decoded) == SRP_CODEC_OK ? 1U : 0U;
 }
 
+/**
+ * @brief 在内存中编码并解码固定 16 字节 CMD_SYNC_REQ，验证本地 SRP codec。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * 传入参数：无。
+ * @return 无；失败增加 HAL error 诊断计数，成功/失败均只写日志。
+ * 调用方式：USART2 DMA RX 首次武装后由 uart_link_init() 调用一次；不调用 uart_link_send()，
+ *           不在物理 UART2 上发送任何字节，实际同步仍由 S3 发起。
+ * 线程约束：使用静态编码缓冲，仅单线程启动上下文调用；会使用日志队列，禁止 ISR。
+ */
 static void uart_link_startup_self_test(void)
 {
     static const uint8_t payload[SRP_PAYLOAD_CMD_SYNC_REQ_SIZE] = {
@@ -206,6 +253,15 @@ static void uart_link_startup_self_test(void)
     LOG_INFO(line);
 }
 
+/**
+ * @brief 根据 PCLK1、prescaler、oversampling 和 BRR 估算 USART2 实际波特率并记录配置。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * 传入参数：无；要求 s_handle 已由 HAL_UART_Init() 成功配置且 Instance 有效。
+ * @return 无；PCLK/BRR 为 0 时 actual/error 保持 0，只提供诊断，不改变时钟或 UART。
+ * 调用方式：每次 uart_link_configure_uart() 成功后调用并输出两条 INFO 日志。
+ * 线程约束：读取 RCC/UART 寄存器并格式化日志，仅启动/恢复任务调用，禁止 ISR。
+ */
 static void uart_link_log_clock_diagnostics(void)
 {
     const uint32_t pclk = HAL_RCC_GetPCLK1Freq();
@@ -270,6 +326,16 @@ static void uart_link_log_clock_diagnostics(void)
     LOG_INFO(line);
 }
 
+/**
+ * @brief 在 HAL RX event 上下文把 DMA 字节复制到软件 ring 并更新时间/计数。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * @param data DMA 接收片段；NULL 时返回。
+ * @param length 有效字节数；0 时返回。
+ * @return 无；ring 满时覆盖最旧字节并累计 drop，不解析 SRP、不写日志。
+ * 调用方式：只由 HAL_UARTEx_RxEventCallback() 在重装下一次 DMA 前调用。
+ * 线程约束：HAL callback/ISR 上下文；先做 cache invalidate，再进入 FROM_ISR 临界区，禁止任务直接调用。
+ */
 static void ring_push_from_isr(const uint8_t *data, uint16_t length)
 {
     UBaseType_t mask;
@@ -287,6 +353,15 @@ static void ring_push_from_isr(const uint8_t *data, uint16_t length)
     taskEXIT_CRITICAL_FROM_ISR(mask);
 }
 
+/**
+ * @brief 初始化 DMA1 Stream0 为 USART2 RX 的高优先级 normal-mode 字节传输并校验 DMAMUX。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * 传入参数：无；要求 s_handle 已指向 USART2。
+ * @return HAL DMA 初始化且 DMAMUX request 回读为 DMA_REQUEST_USART2_RX 时返回 1，否则 0。
+ * 调用方式：首次初始化和任务上下文 recovery 在 UART 配置成功后调用；失败会记录有界日志。
+ * 线程约束：重置/链接全局 DMA handle 并访问 RCC/HAL，仅启动或恢复 owner 调用，禁止 ISR/并发调用。
+ */
 static uint8_t uart_link_configure_dma(void)
 {
     __HAL_RCC_DMA1_CLK_ENABLE();
@@ -325,6 +400,15 @@ static uint8_t uart_link_configure_dma(void)
     return 1U;
 }
 
+/**
+ * @brief 把 DMA1 Stream0 与 USART2 NVIC 优先级设为 5 并启用两个中断。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * 传入参数：无。
+ * @return 无。
+ * 调用方式：DMA/UART handle 均配置完成后、启动 ReceiveToIdle 前调用；recovery 重新配置后也调用。
+ * 线程约束：直接修改 NVIC，仅启动/恢复任务 owner 调用，禁止 ISR 或并发外设重配置。
+ */
 static void uart_link_enable_irqs(void)
 {
     HAL_NVIC_SetPriority(DMA1_Stream0_IRQn, UART_LINK_IRQ_PRIORITY, 0U);
@@ -333,6 +417,15 @@ static void uart_link_enable_irqs(void)
     HAL_NVIC_EnableIRQ(USART2_IRQn);
 }
 
+/**
+ * @brief 以当前 s_baud_rate 配置 USART2 为 8N1、TX/RX、无流控、16 倍采样并启用 FIFO。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * 传入参数：无。
+ * @return HAL_UART_Init 成功后返回 1，失败返回 0；FIFO threshold API 的返回值当前不传播。
+ * 调用方式：首次初始化和 recovery 在 DMA 配置前调用；成功后清线路错误并输出时钟诊断。
+ * 线程约束：访问 HAL/UART/GPIO MSP 与日志队列，仅启动/恢复任务调用，禁止 ISR/并发调用。
+ */
 static uint8_t uart_link_configure_uart(void)
 {
     s_handle.Instance = UART_LINK_USART;
@@ -359,6 +452,16 @@ static uint8_t uart_link_configure_uart(void)
     return 1U;
 }
 
+/**
+ * @brief 武装一次 UART2 normal-mode ReceiveToIdle DMA 事务并关闭 half-transfer 中断。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * 传入参数：无；使用固定 512 字节、32 字节对齐的 s_dma_rx。
+ * @return HAL 接受事务时返回 1；失败清 active、累计 HAL/rearm failure 并返回 0。
+ * 调用方式：启动/恢复任务以及 HAL RX/error callback 都会调用；active 在 HAL 调用前先置 1，
+ *           防止已挂起 IDLE/error 回调把首帧误判为未武装。
+ * 线程约束：任务与 HAL callback 共享无锁状态，调用序列由 HAL RxState/recovering 约束；禁止任意并发调用。
+ */
 static uint8_t uart_link_start_dma_receive(void)
 {
     HAL_StatusTypeDef status;
@@ -384,6 +487,15 @@ static uint8_t uart_link_start_dma_receive(void)
     return 1U;
 }
 
+/**
+ * @brief 保留已经 BUSY_RX 的有效事务，否则尝试重新武装 ReceiveToIdle DMA。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * 传入参数：无。
+ * @return active 且 HAL RxState 为 BUSY_RX，或重新武装成功时返回 1；否则 0。
+ * 调用方式：本地 codec self-test 后确认测试过程没有意外丢失 RX 事务。
+ * 线程约束：启动任务调用；不会替换 callback 已经重装的事务，禁止 ISR 手工调用。
+ */
 static uint8_t uart_link_ensure_dma_receive(void)
 {
     /* The raw startup marker precedes DMA setup by design.  This helper keeps
@@ -395,6 +507,15 @@ static uint8_t uart_link_ensure_dma_receive(void)
     return uart_link_start_dma_receive();
 }
 
+/**
+ * @brief 清除 USART2 ORE/NE/PE/FE 硬件标志，不修改 HAL ErrorCode 或软件统计。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * 传入参数：无；要求 s_handle 已指向有效 USART2 实例。
+ * @return 无。
+ * 调用方式：UART 配置、DMA 重装、每次阻塞 TX 和 HAL error callback 的恢复边界调用。
+ * 线程约束：任务和 HAL callback 都可调用寄存器清标志；调用方负责与 deinit/reconfigure 串行化。
+ */
 static void uart_link_clear_error_flags(void)
 {
     __HAL_UART_CLEAR_FLAG(&s_handle,
@@ -402,6 +523,15 @@ static void uart_link_clear_error_flags(void)
                               UART_CLEAR_FEF);
 }
 
+/**
+ * @brief 在 FreeRTOS 临界区丢弃软件 RX ring 并清除 TX active 标志。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * 传入参数：无。
+ * @return 无；不清累计统计、last_rx_time 或 s_tx_active_length，也不操作 DMA/UART 硬件。
+ * 调用方式：recovery 已禁 IRQ并 abort/deinit UART/DMA 后、重新配置前调用。
+ * 线程约束：任务上下文临界区；运行期调用会丢 RX 数据，只允许 recovery owner。
+ */
 static void uart_link_reset_state(void)
 {
     taskENTER_CRITICAL();
@@ -412,6 +542,7 @@ static void uart_link_reset_state(void)
     taskEXIT_CRITICAL();
 }
 
+/** 清理排队/在途 TX，使同步响应优先。 */
 void uart_link_flush_tx(void)
 {
     if (s_tx_mutex != NULL &&
@@ -425,6 +556,7 @@ void uart_link_flush_tx(void)
     }
 }
 
+/** 初始化 USART2 DMA、互斥量和错误快照。 */
 void uart_link_init(void)
 {
     (void)memset(&s_handle, 0, sizeof(s_handle));
@@ -496,11 +628,13 @@ void uart_link_init(void)
     }
 }
 
+/** 返回 UART/DMA 就绪标志，不代表 SRP 会话已同步。 */
 uint8_t uart_link_is_ready(void)
 {
     return s_ready;
 }
 
+/** 返回最近一次 RX 字节的 HAL tick。 */
 uint32_t uart_link_get_last_rx_time(void)
 {
     uint32_t last_rx_time;
@@ -511,6 +645,7 @@ uint32_t uart_link_get_last_rx_time(void)
     return last_rx_time;
 }
 
+/** 任务上下文阻塞发送 SRP 帧；输入缓冲只需保持到函数返回。 */
 HAL_StatusTypeDef uart_link_send(const uint8_t *data, uint16_t length)
 {
     HAL_StatusTypeDef status;
@@ -579,6 +714,7 @@ tx_done:
     return status;
 }
 
+/** 从软件 RX ring 复制字节；不在此处解析 SRP。 */
 size_t uart_link_read(uint8_t *data, size_t capacity)
 {
     size_t length;
@@ -597,6 +733,7 @@ size_t uart_link_read(uint8_t *data, size_t capacity)
     return length;
 }
 
+/** 复制 DMA/UART 统计快照。 */
 void uart_link_get_stats(uart_link_stats_t *stats)
 {
     if (stats == NULL) {
@@ -639,6 +776,7 @@ void uart_link_get_stats(uart_link_stats_t *stats)
     taskEXIT_CRITICAL();
 }
 
+/** 清理 UART/DMA 状态并重新启动接收；上层需重新同步。 */
 void uart_link_recover(void)
 {
     uint8_t restart_ok = 0U;
@@ -678,6 +816,7 @@ void uart_link_recover(void)
     s_recovering = 0U;
 }
 
+/** 在无在途发送且双方已协商时切换波特率。 */
 HAL_StatusTypeDef uart_link_set_baud_rate(uint32_t baud_rate)
 {
     if (baud_rate == 0U || s_ready == 0U) {
@@ -688,6 +827,16 @@ HAL_StatusTypeDef uart_link_set_baud_rate(uint32_t baud_rate)
     return s_ready != 0U ? HAL_OK : HAL_ERROR;
 }
 
+/**
+ * @brief 处理 USART2 ReceiveToIdle normal-mode 完成/IDLE 事件，复制字节并立即重装下一事务。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（HAL 回调契约补充）。
+ * @param huart HAL 回调 handle；仅地址等于内部 s_handle 时处理。
+ * @param size s_dma_rx 中本次有效字节数，允许 0，不得超过 512。
+ * @return 无；handle/active/size 不符时累计 reject 并返回，重装失败置 restart_requested。
+ * 调用方式：由 HAL_UARTEx/USART2-DMA IRQ 调用栈同步触发；数据复制后通知 UART worker。
+ * 线程约束：ISR/HAL callback 上下文；只执行 cache/ring/计数/rearm/通知，不解析 SRP、不写普通日志。
+ */
 void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t size)
 {
     BaseType_t higher_priority_task_woken = pdFALSE;
@@ -716,6 +865,16 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t size)
     portYIELD_FROM_ISR(higher_priority_task_woken);
 }
 
+/**
+ * @brief 保留的 USART2 DMA TX 完成兼容回调，清 active 并唤醒 worker。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（HAL 回调契约补充）。
+ * @param huart HAL 回调 handle；仅地址等于内部 s_handle 时处理。
+ * @return 无。
+ * 调用方式：只有 HAL DMA TX 路径会触发；当前 uart_link_send() 使用阻塞 HAL_UART_Transmit，
+ *           正常发送统计在任务返回路径更新，不依赖本回调。
+ * 线程约束：ISR/HAL callback 上下文；只更新 volatile 计数/状态并 FromISR 通知任务。
+ */
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 {
     if (huart == &s_handle) {
@@ -732,6 +891,15 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
     }
 }
 
+/**
+ * @brief 处理 USART2 HAL 错误，清线路标志、保存诊断并优先现场重装 RX DMA。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（HAL 回调契约补充）。
+ * @param huart HAL 回调 handle；仅地址等于内部 s_handle 时处理。
+ * @return 无；RxState 已 READY 且未 recovery 时尝试立即 rearm，失败则置 restart_requested。
+ * 调用方式：由 HAL_UART_IRQHandler/error abort 完成路径同步触发，并唤醒 UART worker 输出日志或恢复。
+ * 线程约束：ISR/HAL callback 上下文；不执行完整 deinit/reconfigure 或普通日志，错误文本交给任务处理。
+ */
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 {
     if (huart == &s_handle) {
@@ -768,6 +936,7 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
     }
 }
 
+/** DMA RX IRQ 转发入口，仅由中断处理函数调用。 */
 void uart_link_handle_dma_rx_irq(void)
 {
     ++s_dma_rx_irq_count;
@@ -775,11 +944,13 @@ void uart_link_handle_dma_rx_irq(void)
     HAL_DMA_IRQHandler(&s_rx_dma);
 }
 
+/** DMA TX IRQ 转发入口，仅由中断处理函数调用。 */
 void uart_link_handle_dma_tx_irq(void)
 {
     /* DMA1 Stream1 TX is intentionally unused in the compatibility path. */
 }
 
+/** USART2 IRQ 转发入口，仅由中断处理函数调用。 */
 void uart_link_handle_usart_irq(void)
 {
     ++s_usart_irq_count;
@@ -787,6 +958,15 @@ void uart_link_handle_usart_irq(void)
     HAL_UART_IRQHandler(&s_handle);
 }
 
+/**
+ * @brief 输出 UART worker 栈水位、RX/TX/DMA/IRQ/PA3 的两条低频诊断摘要。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * 传入参数：无。
+ * @return 无；快照只反映 RAM/寄存器观察值，不证明 UART 物理链路或 SRP 同步成功。
+ * 调用方式：uart_link_task 按 UART_LINK_STACK_MONITOR_PERIOD_MS 周期调用。
+ * 线程约束：任务上下文，进入短临界区复制统计并使用较大栈缓冲/日志队列，禁止 ISR。
+ */
 static void uart_link_log_stack(void)
 {
     uart_link_stats_t stats;
@@ -835,6 +1015,15 @@ static void uart_link_log_stack(void)
     LOG_INFO(line);
 }
 
+/**
+ * @brief 原子取走 HAL error callback 保存的最近错误码并在任务上下文输出 WARN。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * 传入参数：无。
+ * @return 无；没有 pending 错误时不输出，读取后清 s_error_log_pending。
+ * 调用方式：UART worker 每轮 recovery 之后调用，把 ISR 日志工作移出回调。
+ * 线程约束：使用短 FreeRTOS 临界区与日志队列，仅 UART worker 调用，禁止 ISR。
+ */
 static void uart_link_log_isr_diagnostics(void)
 {
     uint8_t error_pending;
@@ -857,6 +1046,7 @@ static void uart_link_log_isr_diagnostics(void)
     }
 }
 
+/** UART 链路任务：重装 DMA、搬运错误状态和低频诊断。 */
 void uart_link_task(void *argument)
 {
     uint32_t last_stack_monitor_ms;
@@ -877,6 +1067,7 @@ void uart_link_task(void *argument)
     }
 }
 
+/** 创建唯一 UART 链路任务；重复调用保持幂等。 */
 void uart_link_task_start(void)
 {
     if (s_uart_link_task_handle != NULL ||

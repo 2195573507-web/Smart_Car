@@ -32,6 +32,7 @@ and handling guidance, is the [File List in the document audit](DOCUMENT_AUDIT_R
 | App/tools | [macOS App](docs/app/mac-control-app.md), [logger](docs/debug/logger.md) |
 | ROS2 | [ROS2](docs/ros2/ros2.md) |
 | Mapping | [code map](docs/code_map.md) |
+| S3/STM 源码规范 | [中文注释与调试参数规范](DOCS/development/S3_STM_CODE_COMMENT_GUIDE.md)、[统一调试宏头](Common/SmartCarDebug/smartcar_debug_config.h) |
 
 ## History and Reference
 

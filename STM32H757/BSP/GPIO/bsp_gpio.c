@@ -1,5 +1,7 @@
 #include "bsp_gpio.h"
 
+/* GPIO BSP 实现；创建人：待确认（当前维护人：Zhiqin）。 */
+
 #include "main.h"
 
 typedef struct {
@@ -23,6 +25,16 @@ static const bsp_gpio_map_t gpio_map[BSP_GPIO_COUNT] = {
     [BSP_GPIO_AT2_BIN2] = {GPIOB, GPIO_PIN_15, 1U}
 };
 
+/**
+ * @brief 校验 BSP GPIO 枚举和输出地址，并返回对应的内部引脚映射。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * @param pin 待校验的 BSP GPIO 枚举，必须位于 0..BSP_GPIO_COUNT-1。
+ * @param[out] entry 非 NULL 的映射输出地址；成功时指向只读 gpio_map 项，失败时不改写。
+ * @return BSP_STATUS_OK，或在 pin 越界、entry 为 NULL 时返回 BSP_STATUS_INVALID_ARG。
+ * 调用方式：仅由本文件读、写和翻转入口在访问 HAL GPIO 前调用；返回映射不转移端口所有权。
+ * 线程约束：纯查表，不阻塞、不使用 mutex；函数自身可在 ISR 调用栈执行，但引脚所有权和后续 HAL 操作约束由外层接口负责。
+ */
 static bsp_status_t gpio_validate(bsp_gpio_pin_t pin, const bsp_gpio_map_t **entry)
 {
     if ((pin < 0) || (pin >= BSP_GPIO_COUNT) || (entry == NULL)) {
@@ -32,6 +44,7 @@ static bsp_status_t gpio_validate(bsp_gpio_pin_t pin, const bsp_gpio_map_t **ent
     return BSP_STATUS_OK;
 }
 
+/** 初始化项目 GPIO 映射。 */
 bsp_status_t bsp_gpio_init(void)
 {
     GPIO_InitTypeDef config = {0};
@@ -72,6 +85,7 @@ bsp_status_t bsp_gpio_init(void)
     return BSP_STATUS_OK;
 }
 
+/** 写入一个已拥有 GPIO 的逻辑电平。 */
 bsp_status_t bsp_gpio_write(bsp_gpio_pin_t pin, bsp_gpio_level_t level)
 {
     const bsp_gpio_map_t *entry;
@@ -87,6 +101,7 @@ bsp_status_t bsp_gpio_write(bsp_gpio_pin_t pin, bsp_gpio_level_t level)
     return BSP_STATUS_OK;
 }
 
+/** 读取一个 GPIO 逻辑电平。 */
 bsp_status_t bsp_gpio_read(bsp_gpio_pin_t pin, bsp_gpio_level_t *level)
 {
     const bsp_gpio_map_t *entry;
@@ -99,6 +114,7 @@ bsp_status_t bsp_gpio_read(bsp_gpio_pin_t pin, bsp_gpio_level_t *level)
     return BSP_STATUS_OK;
 }
 
+/** 翻转一个可写 GPIO。 */
 bsp_status_t bsp_gpio_toggle(bsp_gpio_pin_t pin)
 {
     const bsp_gpio_map_t *entry;

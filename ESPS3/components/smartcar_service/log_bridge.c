@@ -8,9 +8,11 @@
 #include "freertos/task.h"
 #include "s3_ble.h"
 #include "smartcar_log.h"
+#include "smartcar_debug_config.h"
+
+/* STM->S3 日志桥实现；创建人：待确认（当前维护人：Zhiqin）。 */
 
 #define LOG_BRIDGE_PAYLOAD_HEADER_SIZE 8U
-#define LOG_BRIDGE_MIN_INTERVAL_MS 50U
 #define LOG_BRIDGE_MIN_INTERVAL_TICKS \
     ((TickType_t)((((uint32_t)LOG_BRIDGE_MIN_INTERVAL_MS * configTICK_RATE_HZ) + \
                   999U) / 1000U))
@@ -22,6 +24,15 @@ static TickType_t s_last_stm_log_tick;
 static uint32_t s_suppressed_count;
 static bool s_stm_log_rate_initialized;
 
+/**
+ * @brief 为收到的 STM32 日志生成限频本地标记，并汇报此前被抑制的数量。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（函数契约补充）。
+ * 传入参数：无。
+ * @return 返回值：无（void）。
+ * 调用方式：仅在 log_bridge_handle() 接受 STM32 来源日志后同步调用；20 Hz 窗口内只累计抑制计数。
+ * 线程约束：使用无锁静态 tick/计数状态并调用 ESP_LOG，只允许 smartcar_service 单任务 owner；禁止 ISR、GATT 回调或并发调用。
+ */
 static void log_bridge_emit_stm_log_marker(void)
 {
     const TickType_t now = xTaskGetTickCount();
@@ -43,6 +54,15 @@ static void log_bridge_emit_stm_log_marker(void)
     ESP_LOGI(TAG, "STM_LOG_RX");
 }
 
+/**
+ * @brief 校验 SRP LOG payload，重编码为独立日志帧并尝试通过 BLE FFE3 转发。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（函数契约补充）。
+ * @param frame 已通过 SRP 解码的只读逻辑帧；payload 只在调用期间借用，frame 允许为 NULL。
+ * @return 返回值：无（void）；类型、长度或字段非法时丢弃并记录警告，BLE 未就绪或提交失败时当前实现忽略返回值，可能静默丢弃。
+ * 调用方式：只由 smartcar_service 在分发 SRP_MSG_ID_LOG 时调用；成功编码不等于 App 已收到通知。
+ * 线程约束：使用静态输出缓冲和无锁限频状态，只允许服务任务单 owner；会调用日志和 BLE 栈，禁止 ISR、GATT 回调或其他任务并发调用。
+ */
 void log_bridge_handle(const srp_frame_t *frame)
 {
     size_t legacy_length = 0U;

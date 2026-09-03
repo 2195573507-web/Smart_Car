@@ -18,6 +18,9 @@
 #include "srp_codec.h"
 #include "srp_wire.h"
 #include "uart_link.h"
+#include "smartcar_debug_config.h"
+
+/* CM7 S3 SRP 服务实现；创建人：待确认（当前维护人：Zhiqin）。 */
 
 #define S3_SERVICE_STACK_WORDS UINT16_C(1024)
 #define S3_SERVICE_PRIORITY (tskIDLE_PRIORITY + 2U)
@@ -25,10 +28,8 @@
 #define S3_SERVICE_BUS_OFF_RECOVERY_MS UINT32_C(100)
 #define S3_SERVICE_LINK_LOCK_MS UINT32_C(20)
 #define S3_SERVICE_BAUD_SWITCH_GUARD_MS UINT32_C(20)
-#define S3_SERVICE_STACK_MONITOR_PERIOD_MS UINT32_C(5000)
 #define S3_SERVICE_S3_FRAME_TIMEOUT_MS UINT32_C(200)
 #define S3_SERVICE_PERIODIC_STATUS_PERIOD_MS UINT32_C(50)
-#define S3_SERVICE_TELEMETRY_LOG_PERIOD_MS UINT32_C(1000)
 
 typedef enum {
     S3_SERVICE_WAIT_FOR_HOST = 0U,
@@ -80,6 +81,15 @@ static uint32_t s_periodic_status_attempt_count;
 static int s_periodic_status_last_result;
 static uint32_t s_task_last_loop_duration_ms;
 
+/**
+ * @brief 判断消息 ID 是否属于未同步时必须拒绝的运动命令集合。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * @param message_id SRP 消息类型；当前覆盖四轮、单轮、主缩放、底盘速度和目标航向。
+ * @return 属于上述五类时 true，否则 false。
+ * 调用方式：业务帧回调在 HOST_SYNCED 检查前调用，不校验 payload。
+ * 线程约束：纯数值分类、可重入、不阻塞。
+ */
 static bool s3_service_is_motion_message(uint16_t message_id)
 {
     return message_id == SRP_MSG_ID_MOTOR_CMD ||
@@ -89,6 +99,15 @@ static bool s3_service_is_motion_message(uint16_t message_id)
            message_id == SRP_MSG_ID_CHASSIS_HEADING_CMD;
 }
 
+/**
+ * @brief 判断消息 ID 是否走独立 telemetry-session 准入门。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * @param message_id SRP 消息类型。
+ * @return IMU/姿态/标定/电源/轮速/底盘/闭环/雷达状态返回 true，其他返回 false。
+ * 调用方式：s3_service_send_locked() 选择遥测门或普通 HOST_SYNCED 门时调用。
+ * 线程约束：纯 switch、可重入、不阻塞。
+ */
 static bool s3_service_is_telemetry_message(uint16_t message_id)
 {
     switch (message_id) {
@@ -106,6 +125,16 @@ static bool s3_service_is_telemetry_message(uint16_t message_id)
     }
 }
 
+/**
+ * @brief 检查已建立的 telemetry session 是否仍有 UART ready 且 link 非 BUS_OFF。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * 传入参数：无。
+ * @return session active 且底层可用时 true；否则 false。
+ * 调用方式：遥测发送准入和 50 ms 周期状态发送前调用；控制 freshness 超时本身不会清该 session，
+ *           但 UART not-ready/BUS_OFF 会把 active 永久清零，直到新的同步请求重新建立。
+ * 线程约束：读 UART/link 状态并可能写 session 标志，只允许 S3 service owner 或持锁发送路径调用。
+ */
 static bool s3_service_telemetry_session_is_available(void)
 {
     if (s_telemetry_session_active == 0U) {
@@ -119,6 +148,16 @@ static bool s3_service_telemetry_session_is_available(void)
     return true;
 }
 
+/**
+ * @brief 遍历 SYS_CONFIG TLV，提取唯一 4 字节 baud tag 并校验 SRP 白名单。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * @param frame 只读 TLV SRP 帧；必须有 payload、TLV 标志且长度至少 2。
+ * @param baud_rate 可写输出；不得为 NULL。
+ * @return 恰好一个 baud tag 且值为 921600 或 115200 时 true；结构/重复/长度/白名单失败返回 false。
+ * 调用方式：处理 SYS_CONFIG 前调用；未知 tag 被跳过，false 时 baud_rate 可能已写入不受支持值，调用方必须丢弃。
+ * 线程约束：只读借用 frame payload、修改 iterator/输出局部状态，可重入、不阻塞。
+ */
 static bool s3_service_decode_baudrate(const srp_frame_t *frame,
                                        uint32_t *baud_rate)
 {
@@ -150,12 +189,30 @@ static bool s3_service_decode_baudrate(const srp_frame_t *frame,
                      *baud_rate == SRP_BAUDRATE_DEBUG);
 }
 
+/**
+ * @brief 以最多 20 ms 有限等待获取非递归 SRP link mutex。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * 传入参数：无。
+ * @return mutex 存在且在 deadline 内取得时返回 1，否则 0。
+ * 调用方式：普通任务发送和 s3_service_step() 进入 parser/link 前调用；已持锁回调不得再次调用。
+ * 线程约束：可能阻塞当前 FreeRTOS 任务最多 S3_SERVICE_LINK_LOCK_MS，禁止 ISR 和实时硬中断路径。
+ */
 static uint8_t s3_service_link_lock(void)
 {
     return s_link_mutex != NULL &&
            xSemaphoreTake(s_link_mutex, pdMS_TO_TICKS(S3_SERVICE_LINK_LOCK_MS)) == pdTRUE;
 }
 
+/**
+ * @brief 在 mutex 已创建时释放 SRP link mutex。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * 传入参数：无。
+ * @return 无；mutex 为 NULL 时不动作，不验证当前任务是否为 owner。
+ * 调用方式：每个成功 s3_service_link_lock() 的普通任务路径恰好调用一次。
+ * 线程约束：FreeRTOS 任务上下文；禁止 ISR、未持锁释放或递归锁协议。
+ */
 static void s3_service_link_unlock(void)
 {
     if (s_link_mutex != NULL) {
@@ -163,6 +220,17 @@ static void s3_service_link_unlock(void)
     }
 }
 
+/**
+ * @brief 将 srp_link 的完整 SRP 帧交给 STM USART2 阻塞发送接口。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（关键静态函数契约补充）。
+ * @param data 只读完整 wire 帧，仅在回调期间借用。
+ * @param length data 的实际字节数。
+ * @param context link 配置上下文，当前忽略，允许 NULL。
+ * @return uart_link_send() 返回 HAL_OK 时为 0，否则为 -1。
+ * 调用方式：由 srp_link send/tick 在服务任务及已持链路锁的调用栈同步触发。
+ * 线程约束：底层最多等待 TX mutex 和 HAL UART 两段超时；不得保留 data、递归取 s_link_mutex 或从 ISR 调用。
+ */
 static int s3_service_transport_send(const uint8_t *data, uint16_t length,
                                      void *context)
 {
@@ -170,6 +238,15 @@ static int s3_service_transport_send(const uint8_t *data, uint16_t length,
     return uart_link_send(data, length) == HAL_OK ? 0 : -1;
 }
 
+/**
+ * @brief 处理 srp_link BUS_OFF 电平回调，关闭会话、双层清零目标并安排 UART 恢复。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（关键静态函数契约补充）。
+ * @param context link 配置上下文，当前忽略，允许 NULL。
+ * @return 无；本地 latch 已置位时幂等返回，避免 tick 重复执行强停。
+ * 调用方式：由 srp_link_tick() 在 s3_service_step() 持锁路径同步触发。
+ * 线程约束：会调用 MotorBoard 排队、UART 恢复和日志，只允许服务 owner；禁止 ISR/并发调用。
+ */
 static void s3_service_on_bus_off(void *context)
 {
     bool force_stop_ok;
@@ -197,10 +274,21 @@ static void s3_service_on_bus_off(void *context)
     LOG_ERROR("SRP BUS_OFF; UART2 recovery requested\r\n");
 }
 
+/* 已持有 s_link_mutex 时发送 SRP 消息，避免递归加锁。 */
 static int s3_service_send_locked(uint8_t priority, uint16_t message_id,
                                   uint8_t flags, const uint8_t *payload,
                                   uint8_t length);
 
+/**
+ * @brief 直接构造并发送 RSP_BOOT_INFO，作为 WAIT_FOR_HOST 状态唯一同步准入响应。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（关键静态函数契约补充）。
+ * @param request_sequence 原样回显 CMD_SYNC_REQ 的序号。
+ * @param verbose 非零时记录成功诊断，零时只记录失败。
+ * @return 0 表示 srp_link/物理 UART 接受；非零保持 WAIT_FOR_HOST。
+ * 调用方式：仅由 s3_service_handle_sync_req() 在 parser 回调中调用，必须先发送成功再发布 HOST_SYNCED。
+ * 线程约束：调用时外层已经持有非递归 s_link_mutex；本函数直接调用 srp_link_send，严禁再次取该锁。
+ */
 static int s3_service_send_boot_info(uint8_t request_sequence, uint8_t verbose)
 {
     const uint8_t payload[SRP_PAYLOAD_RSP_BOOT_INFO_SIZE] = {
@@ -264,6 +352,15 @@ static int s3_service_send_boot_info(uint8_t request_sequence, uint8_t verbose)
     return result;
 }
 
+/**
+ * @brief 严格校验 CMD_SYNC_REQ v4 payload，先发送 BOOT_INFO 成功后再发布 HOST_SYNCED。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（关键静态函数契约补充）。
+ * @param frame 已校验 CRC 的借用 SRP 帧；NULL 或版本/保留字段错误会拒绝。
+ * @return true 表示响应物理发送接口已接受且会话已提升；false 保持 WAIT_FOR_HOST。
+ * 调用方式：仅由 s3_service_on_frame() 处理 0x08 时调用，payload 不得跨调用保存。
+ * 线程约束：外层 parser/service 已持有 s_link_mutex；会阻塞 UART，禁止递归取锁或从 ISR 调用。
+ */
 static bool s3_service_handle_sync_req(const srp_frame_t *frame)
 {
     const bool valid = frame != NULL &&
@@ -332,6 +429,19 @@ static bool s3_service_handle_sync_req(const srp_frame_t *frame)
     return true;
 }
 
+/**
+ * @brief 在已持 s_link_mutex 时执行会话/BUS_OFF 准入并调用 srp_link_send()。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（关键静态函数契约补充）。
+ * @param priority SRP 优先级。
+ * @param message_id 消息类型；遥测使用独立 session 可用性门，其他业务要求 HOST_SYNCED。
+ * @param flags SRP 标志。
+ * @param payload 只读 payload，长度非零时不得为 NULL，只在调用期间读取。
+ * @param length payload 字节数。
+ * @return 0 表示 link/transport 接受；-1 表示会话门关闭，其他负值来自 link。
+ * 调用方式：只由已经成功获取 s_link_mutex 的服务发送/回调路径调用。
+ * 线程约束：不得自行取/释放 mutex；可能进入阻塞 UART，禁止 ISR 和无锁调用。
+ */
 static int s3_service_send_locked(uint8_t priority, uint16_t message_id,
                                   uint8_t flags, const uint8_t *payload,
                                   uint8_t length)
@@ -352,6 +462,17 @@ static int s3_service_send_locked(uint8_t priority, uint16_t message_id,
                           flags, payload, length, HAL_GetTick(), NULL, NULL);
 }
 
+/**
+ * @brief 在已持链路锁的 parser 回调中发送不进入重试队列的快速 ACK/NACK。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（关键静态函数契约补充）。
+ * @param request 被响应的借用 SRP 帧；NULL 时返回。
+ * @param is_error 非零设置 ERROR 标志。
+ * @param status_code SRP 快速响应状态码。
+ * @return 无；底层发送结果当前不向调用方返回。
+ * 调用方式：仅 s3_service_on_frame() 在外层持有 s_link_mutex 时调用。
+ * 线程约束：直接复用 link scratch 并可能阻塞 UART，禁止递归加锁、ISR 或并发调用。
+ */
 static void s3_service_send_response_locked(const srp_frame_t *request,
                                             uint8_t is_error,
                                             uint8_t status_code)
@@ -364,6 +485,16 @@ static void s3_service_send_response_locked(const srp_frame_t *request,
         request->type, request->sequence, status_code, HAL_GetTick());
 }
 
+/**
+ * @brief 分发 S3->STM 业务帧，执行同步、参数校验、安全准入和必要 ACK。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（关键静态函数契约补充）。
+ * @param frame srp_link 借用逻辑帧；允许 NULL，payload 只在回调期间有效。
+ * @param context link 配置上下文，当前忽略，允许 NULL。
+ * @return 无；未同步运动帧拒绝，未知 ACK_REQUIRED 消息返回 INVALID_PARAM。
+ * 调用方式：由 srp_link_receive() 在 s3_service_step() parser 路径同步触发。
+ * 线程约束：外层已经持有非递归 s_link_mutex；不得再次加锁、保留 payload 或从其他上下文调用。
+ */
 static void s3_service_on_frame(const srp_frame_t *frame, void *context)
 {
     const uint8_t ack_required = frame == NULL ? 0U :
@@ -545,6 +676,16 @@ static void s3_service_on_frame(const srp_frame_t *frame, void *context)
     }
 }
 
+/**
+ * @brief 更新已同步链路 freshness，并把 parser 完整帧交给 srp_link ACK/业务分发。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（关键静态函数契约补充）。
+ * @param frame parser 借用逻辑帧；允许 NULL，payload 仅在当前 feed 调用有效。
+ * @param context parser 上下文，当前忽略，允许 NULL。
+ * @return 无。
+ * 调用方式：由 srp_parser_feed() 在 s3_service_step() 已持锁路径同步触发。
+ * 线程约束：同一 parser/link 单 owner；不得递归加锁、保留 frame 或并发调用。
+ */
 static void s3_service_on_parsed_frame(const srp_frame_t *frame, void *context)
 {
     (void)context;
@@ -558,6 +699,18 @@ static void s3_service_on_parsed_frame(const srp_frame_t *frame, void *context)
     srp_link_receive(&s_link, frame);
 }
 
+/**
+ * @brief 记录 parser 错误，并把非 MAGIC 搜索噪声折算为 link REC。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（关键静态函数契约补充）。
+ * @param error parser 错误类型。
+ * @param data 错误候选缓冲，当前不读取，可能为 NULL。
+ * @param length 候选缓冲字节数，用于诊断日志。
+ * @param context parser 上下文，当前忽略。
+ * @return 无；本回调不执行 UART 恢复，BUS_OFF/恢复由服务 step 统一处理。
+ * 调用方式：由 srp_parser_feed() 在已持 s_link_mutex 的服务任务中同步触发。
+ * 线程约束：修改 parser/link 计数并写日志；禁止递归锁、ISR 或并发调用。
+ */
 static void s3_service_on_parser_error(srp_parser_error_t error,
                                        const uint8_t *data, size_t length,
                                        void *context)
@@ -589,6 +742,15 @@ static void s3_service_on_parser_error(srp_parser_error_t error,
     LOG_WARN(s_line);
 }
 
+/**
+ * @brief 输出 S3 service 栈水位、parser/link/同步/停机/UART 和周期遥测诊断。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * 传入参数：无。
+ * @return 无；更新历史最小 free words，统计只作快照，不证明物理链路或远端执行。
+ * 调用方式：s3_service_task 按 5000 ms 周期调用，连续复用模块级 s_line 输出多条日志。
+ * 线程约束：服务任务单 owner；会进入 UART stats 临界区并执行 snprintf/日志队列，禁止 ISR/并发调用。
+ */
 static void s3_service_log_stack(void)
 {
     uart_link_stats_t uart_stats;
@@ -662,6 +824,7 @@ static void s3_service_log_stack(void)
     LOG_DEBUG(s_line);
 }
 
+/** 初始化 SRP parser/link、互斥量和服务状态。 */
 void s3_service_init(void)
 {
     const srp_link_config_t config = {
@@ -724,6 +887,7 @@ void s3_service_init(void)
     imu_boot_manager_set_transport(s3_service_send_boot_message);
 }
 
+/** 任务上下文发送一条 SRP 消息，统一经过同步/BUS_OFF 门控。 */
 int s3_service_send_message(uint8_t priority, uint16_t message_id, uint8_t flags,
                             const uint8_t *payload, uint8_t length)
 {
@@ -737,6 +901,16 @@ int s3_service_send_message(uint8_t priority, uint16_t message_id, uint8_t flags
     return result;
 }
 
+/**
+ * @brief 构造固定 11 字节 IMU_CAL_STATUS 作为传输心跳，并累计发送/丢弃结果。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * 传入参数：无。
+ * @return 无；telemetry session 不可用或发送失败只更新 result/drop 计数。
+ * 调用方式：S3 service 任务每 50 ms 调用；这里只映射 boot phase/sample/error，
+ *           不替代 IMU worker 的详细标定状态生产者，payload[1] 保持 0。
+ * 线程约束：服务任务上下文；读取 boot 快照并通过公开发送 API取得 link mutex，禁止 ISR/并发调用。
+ */
 static void s3_service_send_periodic_status(void)
 {
     uint8_t payload[SRP_PAYLOAD_IMU_CAL_STATUS_SIZE] = {0};
@@ -778,6 +952,7 @@ static void s3_service_send_periodic_status(void)
     }
 }
 
+/** 发送启动阶段允许的消息（包括 BOOT_INFO）。 */
 void s3_service_send_boot_message(uint16_t message_id, uint8_t flags,
                                   const uint8_t *payload, uint8_t length)
 {
@@ -785,6 +960,7 @@ void s3_service_send_boot_message(uint16_t message_id, uint8_t flags,
                                   payload, length);
 }
 
+/** 发送 IMU 遥测 payload；只读复制，不改变采样状态。 */
 void s3_service_send_imu_telemetry(const uint8_t *payload, uint8_t length)
 {
     if (payload == NULL || length != SRP_PAYLOAD_IMU_TELEMETRY_SIZE) {
@@ -795,6 +971,7 @@ void s3_service_send_imu_telemetry(const uint8_t *payload, uint8_t length)
                                   SRP_FLAG_STREAM_DATA, payload, length);
 }
 
+/** 发送 DualAHRS 姿态遥测。 */
 void s3_service_send_dual_attitude(const uint8_t *payload, uint8_t length)
 {
     if (payload == NULL || length != SRP_PAYLOAD_DUAL_AHRS_SIZE ||
@@ -807,11 +984,17 @@ void s3_service_send_dual_attitude(const uint8_t *payload, uint8_t length)
                                   SRP_FLAG_STREAM_DATA, payload, length);
 }
 
+/** 发送底盘状态遥测。 */
 void s3_service_send_chassis_state(const uint8_t *payload, uint8_t length)
 {
+    float values[4];
+
     if (payload == NULL || length != SRP_PAYLOAD_CHASSIS_STATE_SIZE ||
-        payload[0] != SRP_CHASSIS_STATE_SCHEMA || payload[2] != 0U ||
-        payload[3] != 0U) {
+        payload[0] != SRP_CHASSIS_STATE_SCHEMA ||
+        (payload[1] & (uint8_t)~SRP_CHASSIS_STATE_FLAGS_MASK) != 0U ||
+        payload[2] != 0U || payload[3] != 0U ||
+        !srp_wire_read_f32_array_le(&payload[8], 16U, values, 4U) ||
+        values[3] < 0.0f) {
         return;
     }
     (void)s3_service_send_message(SRP_PRIORITY_TELEMETRY,
@@ -819,6 +1002,7 @@ void s3_service_send_chassis_state(const uint8_t *payload, uint8_t length)
                                   SRP_FLAG_STREAM_DATA, payload, length);
 }
 
+/** 发送轮控制状态遥测。 */
 void s3_service_send_wheel_control_status(const uint8_t *payload, uint8_t length)
 {
     if (payload == NULL || length != SRP_PAYLOAD_WHEEL_CONTROL_STATUS_SIZE ||
@@ -833,12 +1017,14 @@ void s3_service_send_wheel_control_status(const uint8_t *payload, uint8_t length
                                   SRP_FLAG_STREAM_DATA, payload, length);
 }
 
+/** 发送 SRP 日志 payload；失败只计数，不阻塞控制任务。 */
 int s3_service_send_log(const uint8_t *payload, uint8_t length)
 {
     return s3_service_send_message(SRP_PRIORITY_LOG, SRP_MSG_ID_LOG,
                                    SRP_FLAG_STREAM_DATA, payload, length);
 }
 
+/** 单次服务迭代：搬运 RX、推进 parser/link tick 和周期状态。 */
 void s3_service_step(void)
 {
     const size_t length = uart_link_read(s_step_bytes, sizeof(s_step_bytes));
@@ -919,6 +1105,7 @@ void s3_service_step(void)
     }
 }
 
+/** FreeRTOS S3 服务任务入口；argument 当前预留。 */
 void s3_service_task(void *argument)
 {
     TickType_t last_wake;
@@ -971,6 +1158,7 @@ void s3_service_task(void *argument)
     }
 }
 
+/** 创建唯一 S3 服务任务；重复调用保持幂等。 */
 void s3_service_start(void)
 {
     s3_service_init();
@@ -992,6 +1180,7 @@ void s3_service_start(void)
     }
 }
 
+/** 返回是否完成有效 CMD_SYNC_REQ 握手。 */
 uint8_t s3_service_is_synced(void)
 {
     return (uint8_t)(s_initialized != 0U &&

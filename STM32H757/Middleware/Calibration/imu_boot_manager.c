@@ -1,5 +1,7 @@
 #include "imu_boot_manager.h"
 
+/* 双 IMU 启动/标定状态机实现；创建人：待确认（当前维护人：Zhiqin）。 */
+
 #include <stdio.h>
 #include <string.h>
 
@@ -61,6 +63,16 @@ static dual_imu_boot_state_t s_boot;
 static SemaphoreHandle_t s_mutex;
 #endif
 
+/**
+ * @brief 获取启动状态机互斥量，保护 `s_boot` 的复合读写。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * 传入参数：无。
+ * @return 无返回值；非 FreeRTOS 构建或互斥量未创建时直接返回。
+ * 调用方式：在访问 `s_boot` 前调用，并与 `unlock_boot()` 成对。
+ * 线程约束：仅限任务上下文；FreeRTOS 下可按 `portMAX_DELAY`
+ * 永久阻塞，不可在 ISR 调用，也不可在同一任务重入获取非递归互斥量。
+ */
 static void lock_boot(void)
 {
 #if defined(IMU_MANAGER_USE_FREERTOS)
@@ -70,6 +82,16 @@ static void lock_boot(void)
 #endif
 }
 
+/**
+ * @brief 释放由当前任务持有的启动状态机互斥量。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * 传入参数：无。
+ * @return 无返回值；非 FreeRTOS 构建或互斥量未创建时直接返回。
+ * 调用方式：仅在成功执行 `lock_boot()` 的路径末尾成对调用。
+ * 线程约束：仅限当前持锁任务，不可在 ISR 中调用；释放路径不等待、正常情况下不阻塞。
+ * 函数不检查所有权，未持锁或跨任务释放属于调用方错误。
+ */
 static void unlock_boot(void)
 {
 #if defined(IMU_MANAGER_USE_FREERTOS)
@@ -79,6 +101,16 @@ static void unlock_boot(void)
 #endif
 }
 
+/**
+ * @brief 在 FreeRTOS 构建中按需创建启动状态机互斥量。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * 传入参数：无。
+ * @return 无返回值；创建失败时 `s_mutex` 保持 `NULL`，本函数不上报错误。
+ * 调用方式：由初始化、复位或注册传输回调的公共入口在首次持锁前调用。
+ * 线程约束：需在调度器可用的任务上下文串行调用，不可在 ISR 中调用；
+ * 本函数不等待其他锁，但可执行 FreeRTOS 堆分配；自身无创建锁，并发首次调用可能重复分配内核对象。
+ */
 static void ensure_boot_mutex(void)
 {
 #if defined(IMU_MANAGER_USE_FREERTOS)
@@ -88,11 +120,32 @@ static void ensure_boot_mutex(void)
 #endif
 }
 
+/**
+ * @brief 使用有符号差值判断 32 位毫秒时钟是否到达截止点。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * @param[in] now_ms 当前单调毫秒计数，允许 `uint32_t` 回绕。
+ * @param[in] deadline_ms 与 `now_ms` 同一时钟域的截止时间。
+ * @return 已到达或越过截止点返回 1，否则返回 0。
+ * 调用方式：用于启动、自检和静态标定状态机的周期超时判定。
+ * 线程约束：纯计算、不阻塞、不访问共享状态，可在 ISR 调用；时间间隔必须小于 `INT32_MAX` 毫秒。
+ */
 static uint8_t time_reached(uint32_t now_ms, uint32_t deadline_ms)
 {
     return (int32_t)(now_ms - deadline_ms) >= 0 ? 1U : 0U;
 }
 
+/**
+ * @brief 将已用时间换算为限制在 0..100 的阶段进度。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * @param[in] now_ms 当前单调毫秒时间。
+ * @param[in] start_ms 阶段起始毫秒时间。
+ * @param[in] duration_ms 阶段总时长，0 表示直接视为完成。
+ * @return 向下取整的进度百分数；时长为 0 或已超时返回 100。
+ * 调用方式：由 `update_progress_locked()` 根据当前阶段时间计算进度。
+ * 线程约束：纯计算、不阻塞，可在 ISR 调用；调用方保证两个时间来自同一 32 位单调时钟。
+ */
 static uint8_t elapsed_percent(uint32_t now_ms, uint32_t start_ms,
                                uint32_t duration_ms)
 {
@@ -106,6 +159,18 @@ static uint8_t elapsed_percent(uint32_t now_ms, uint32_t start_ms,
     return (uint8_t)(percent > 100U ? 100U : percent);
 }
 
+/**
+ * @brief 按时间线性折算兼容协议展示用的虚拟样本数。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * @param[in] now_ms 当前单调毫秒时间。
+ * @param[in] start_ms 静态窗口起始毫秒时间。
+ * @param[in] duration_ms 窗口总时长，0 表示立即达到总量。
+ * @param[in] total 兼容层对外展示的样本总数。
+ * @return 限制在 0..`total` 的虚拟样本数，不代表实际采集数。
+ * 调用方式：由状态查询在静态窗口中生成冻结的旧协议计数。
+ * 线程约束：纯计算、不阻塞，可在 ISR 调用；调用方负责时钟域一致性。
+ */
 static uint32_t virtual_sample_count(uint32_t now_ms, uint32_t start_ms,
                                      uint32_t duration_ms, uint32_t total)
 {
@@ -117,6 +182,15 @@ static uint32_t virtual_sample_count(uint32_t now_ms, uint32_t start_ms,
     return count > total ? total : (uint32_t)count;
 }
 
+/**
+ * @brief 将 IMU 启动错误枚举映射为简短诊断字符串。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * @param[in] error 当前 `imu_error_t` 错误值。
+ * @return 指向只读静态字符串；未知值与 `IMU_ERROR_NONE` 均返回 `"NONE"`。
+ * 调用方式：由日志路径和状态查询生成人类可读原因；调用方不得修改或释放返回指针。
+ * 线程约束：纯查表、可重入、不阻塞，不访问共享状态，可在 ISR 调用。
+ */
 static const char *imu_error_name(imu_error_t error)
 {
     switch (error) {
@@ -133,6 +207,15 @@ static const char *imu_error_name(imu_error_t error)
     }
 }
 
+/**
+ * @brief 将非空启动诊断文本以 INFO 级别交给现有日志服务。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * @param[in] text 仅在本次调用期间借用的 NUL 结尾文本；`NULL` 时静默忽略。
+ * @return 无返回值；本层不上报日志裁剪、队列满或输出失败。
+ * 调用方式：由启动状态转换和质量摘要函数同步调用。
+ * 线程约束：仅限任务上下文，不可在 ISR 中调用；实时性和阻塞性取决于日志后端。
+ */
 static void boot_log(const char *text)
 {
     if (text != NULL) {
@@ -140,6 +223,15 @@ static void boot_log(const char *text)
     }
 }
 
+/**
+ * @brief 读取静态标定质量快照并格式化为一条 INFO 日志。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * 传入参数：无。
+ * @return 无返回值；格式化超长时由 `snprintf()` 截断，日志失败不会上报。
+ * 调用方式：静态窗口结束后调用，输出配置频率、实际样本数、最小样本数和质量标志。
+ * 线程约束：仅限任务上下文；内部获取标定互斥量并可在日志后端阻塞，不可在 ISR 或持有标定锁时调用。
+ */
 static void boot_log_static_quality(void)
 {
     char line[SMARTCAR_LOG_MAX_PAYLOAD + 1U];
@@ -162,6 +254,15 @@ static void boot_log_static_quality(void)
     boot_log(line);
 }
 
+/**
+ * @brief 读取 BMI323 与 LSM303 水平标定状态并分别输出诊断日志。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * 传入参数：无。
+ * @return 无返回值；格式化或日志输出失败均不向上传递。
+ * 调用方式：静态标定结果被冻结后调用，用于记录 `valid`、本地重力、倾角和回退原因。
+ * 线程约束：仅限任务上下文；内部读取 IMU 管理器共享快照并可在锁/日志后端阻塞，不可在 ISR 调用。
+ */
 static void boot_log_leveling(void)
 {
     char line[SMARTCAR_LOG_MAX_PAYLOAD + 1U];
@@ -181,6 +282,16 @@ static void boot_log_leveling(void)
     boot_log(line);
 }
 
+/**
+ * @brief 检查静态标定后的水平化状态是否允许主姿态链继续。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * 传入参数：无。
+ * @return BMI323 水平化有效、无回退且重力范整在 9.4..10.2 m/s^2 时返回 1；
+ * 否则返回 0。LSM303 降级只记录日志，当前实现仍返回 1。
+ * 调用方式：静态标定完成后，在进入 READY 前作为主传感器门禁。
+ * 线程约束：仅限任务上下文；内部读取共享快照，可在锁或 LSM303 降级日志后端阻塞，不可在 ISR 调用。
+ */
 static uint8_t leveling_states_are_ready(void)
 {
     imu_leveling_state_t bmi = {0};
@@ -203,6 +314,16 @@ static uint8_t leveling_states_are_ready(void)
     return 1U;
 }
 
+/**
+ * @brief 依据双 IMU 阶段和静态窗口标志刷新旧版兼容状态。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * 传入参数：无。
+ * @return 无返回值；未识别阶段按 `IMU_BOOT_INIT` 处理。
+ * 调用方式：阶段或静态标定子状态变化后，在持有启动锁时调用。
+ * 线程约束：调用者必须已持有 `s_mutex` 或处于非 FreeRTOS 串行环境；
+ * 函数不再获取锁、不阻塞，不可独立从 ISR 调用。
+ */
 static void update_compat_state_locked(void)
 {
     switch (s_boot.dual.phase) {
@@ -232,6 +353,15 @@ static void update_compat_state_locked(void)
     }
 }
 
+/**
+ * @brief 根据当前生命周期阶段更新总进度、分传感器进度与诊断标志。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * @param[in] now_ms 与阶段起始时间同域的当前单调毫秒值。
+ * @return 无返回值；IDLE/FAILED 不重算总进度，但仍刷新分路进度与标志。
+ * 调用方式：由阶段切换、复位和周期步进逻辑在更改状态后调用。
+ * 线程约束：调用者必须已持有启动状态锁；函数只做定长计算，不阻塞、不可在 ISR 独立调用。
+ */
 static void update_progress_locked(uint32_t now_ms)
 {
     uint8_t phase_progress = 0U;
@@ -295,6 +425,16 @@ static void update_progress_locked(uint32_t now_ms)
     }
 }
 
+/**
+ * @brief 在持锁条件下结束前一阶段并初始化新阶段计时与进度。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * @param[in] phase 目标生命周期阶段；超出 `IMU_PHASE_COUNT` 时不写入阶段计时数组。
+ * @param[in] now_ms 阶段边界的单调毫秒时间。
+ * @return 无返回值；同时清除 LSM/BMI 阶段完成标志并刷新兼容状态。
+ * 调用方式：状态机需进入 INIT、SELF_TEST、STATIC_CALIBRATION、READY 或 FAILED 时调用。
+ * 线程约束：调用者必须已持有启动状态锁；函数不重复加锁、不阻塞，不可从 ISR 调用。
+ */
 static void enter_phase_locked(imu_phase_t phase, uint32_t now_ms)
 {
     const imu_phase_t previous = s_boot.dual.phase;
@@ -317,6 +457,16 @@ static void enter_phase_locked(imu_phase_t phase, uint32_t now_ms)
     update_progress_locked(now_ms);
 }
 
+/**
+ * @brief 在持锁条件下进入不可运动的失败阶段并冻结原进度。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * @param[in] error 要锁定到 `s_boot.dual.error` 的失败原因。
+ * @param[in] now_ms 失败发生时的单调毫秒时间。
+ * @return 无返回值；已处于 FAILED 时保留首个错误并直接返回。
+ * 调用方式：各启动、自检、静态窗口失败分支在持锁期间调用。
+ * 线程约束：调用者必须已持有启动状态锁；函数不执行传输或日志，不阻塞，不可从 ISR 调用。
+ */
 static void fail_locked(imu_error_t error, uint32_t now_ms)
 {
     const uint8_t progress = s_boot.dual.overall_progress;
@@ -329,6 +479,19 @@ static void fail_locked(imu_error_t error, uint32_t now_ms)
     s_boot.dual.overall_progress = progress;
 }
 
+/**
+ * @brief 复制已注册的传输回调，解锁后同步交付一条 SRP 消息。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * @param[in] message_id SRP v4 消息 ID。
+ * @param[in] flags SRP 帧标志，由上层选择流或需 ACK 语义。
+ * @param[in] payload 仅在回调执行期间借用的负载；`length` 非 0 时必须指向可读内存。
+ * @param[in] length 负载字节数。
+ * @return 未注册回调返回 0；已调用回调返回 1。由于回调无返回值，1 不证明实际发送成功。
+ * 调用方式：由状态、事件和 BOOT_READY 封装函数在不持有启动锁时调用。
+ * 线程约束：仅限任务上下文，不可在 ISR 调用；内部短暂获取启动锁，回调在锁外同步执行，
+ * 阻塞性由回调实现决定，回调不得在返回后保留栈上 `payload` 指针。
+ */
 static uint8_t send_message(uint16_t message_id, uint8_t flags,
                             const uint8_t *payload, uint8_t length)
 {
@@ -344,6 +507,16 @@ static uint8_t send_message(uint16_t message_id, uint8_t flags,
     return 1U;
 }
 
+/**
+ * @brief 将 32 位无符号数按小端序列化为 4 字节。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * @param[out] destination 至少 4 字节的可写目标区，不得为 `NULL`。
+ * @param[in] value 待序列化的 32 位值。
+ * @return 无返回值；不检查空指针或容量。
+ * 调用方式：构造 11 字节 `IMU_CAL_STATUS` 负载的样本计数字段时调用。
+ * 线程约束：纯内存写入、不阻塞，可在 ISR 调用；目标缓冲区的并发所有权由调用者保证。
+ */
 static void put_u32_le(uint8_t *destination, uint32_t value)
 {
     destination[0] = (uint8_t)(value & UINT32_C(0xFF));
@@ -352,6 +525,15 @@ static void put_u32_le(uint8_t *destination, uint32_t value)
     destination[3] = (uint8_t)(value >> 24U);
 }
 
+/**
+ * @brief 将当前双 IMU 生命周期投影为旧版 0x0202 标定阶段值。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * 传入参数：无。
+ * @return `SRP_IMU_CAL_STAGE_*` 阶段值；IDLE/INIT/SELF_TEST 和未知阶段投影为等待雷达就绪。
+ * 调用方式：由 `send_cal_status()` 在组装兼容负载时调用。
+ * 线程约束：调用者必须已持有启动状态锁；函数不加锁、不阻塞，不可独立从 ISR 调用。
+ */
 static uint8_t legacy_cal_stage_locked(void)
 {
     switch (s_boot.dual.phase) {
@@ -374,6 +556,16 @@ static uint8_t legacy_cal_stage_locked(void)
     }
 }
 
+/**
+ * @brief 构造并尝试发送当前 11 字节 `IMU_CAL_STATUS` 兼容负载。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * 传入参数：无。
+ * @return 无返回值；未注册传输回调或底层发送失败均被静默丢弃。
+ * 调用方式：由 `imu_boot_manager_step()` 按 200 ms 节流标志在锁外调用。
+ * 线程约束：仅限任务上下文；内部多次获取启动锁并同步执行可阻塞的传输回调，
+ * 因此不可在 ISR 或已持有启动锁时调用。
+ */
 static void send_cal_status(void)
 {
     imu_boot_status_t status = {0};
@@ -393,6 +585,15 @@ static void send_cal_status(void)
                        payload, (uint8_t)sizeof(payload));
 }
 
+/**
+ * @brief 将单字节标定事件以需 ACK 的 SRP 消息交给传输回调。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * @param[in] event_id `SRP_MSG_ID_CAL_EVENT` 的单字节事件 ID。
+ * @return 无返回值；传输回调缺失或发送失败不会上报，本函数也不等待 ACK。
+ * 调用方式：静态窗口完成后用 `SRP_CAL_EVENT_STATIC_DONE` 调用。
+ * 线程约束：仅限任务上下文，不可在 ISR 调用；局部负载仅在同步回调期间有效，阻塞性由传输回调决定。
+ */
 static void send_cal_event(uint8_t event_id)
 {
     const uint8_t payload[1] = {event_id};
@@ -400,6 +601,15 @@ static void send_cal_event(uint8_t event_id)
                        payload, (uint8_t)sizeof(payload));
 }
 
+/**
+ * @brief 尝试发送需 ACK 的 `BOOT_READY`，通知 S3 可进入零 PWM 同步流程。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * 传入参数：无。
+ * @return 无返回值；未注册回调或发送失败不会上报，本函数不等待 S3 ACK。
+ * 调用方式：初次进入静态标定阶段及等待期间按 500 ms 周期重发。
+ * 线程约束：仅限任务上下文；局部 2 字节负载仅在同步回调期间有效，回调可阻塞，不可在 ISR 调用。
+ */
 static void send_stm_boot_ready(void)
 {
     const uint8_t payload[2] = {(uint8_t)WAIT_SYNC, 0U};
@@ -407,6 +617,15 @@ static void send_stm_boot_ready(void)
                        payload, (uint8_t)sizeof(payload));
 }
 
+/**
+ * @brief 在持锁条件下初始化静态标定阶段、重试计数和同步超时。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * @param[in] now_ms 进入静态标定阶段时的单调毫秒值。
+ * @return 无返回值；清除窗口/结果标志，并将 BOOT_READY 下次重发时间设为 500 ms 后。
+ * 调用方式：SELF_TEST 窗口同时观察到两路有效样本后调用。
+ * 线程约束：调用者必须已持有启动状态锁；函数不发送帧、不阻塞，不可从 ISR 调用。
+ */
 static void enter_static_phase_locked(uint32_t now_ms)
 {
     enter_phase_locked(IMU_PHASE_STATIC_CALIBRATION, now_ms);
@@ -420,6 +639,7 @@ static void enter_static_phase_locked(uint32_t now_ms)
     update_progress_locked(now_ms);
 }
 
+/** 复位状态机到初始阶段并清除一次性事件。 */
 void imu_boot_manager_reset(void)
 {
     imu_boot_transport_callback_t transport;
@@ -441,12 +661,14 @@ void imu_boot_manager_reset(void)
     imu_calibration_start();
 }
 
+/** 初始化互斥量、状态和阶段计时。 */
 void imu_boot_manager_init(void)
 {
     imu_boot_manager_reset();
     boot_log("DUAL_IMU_BOOT IDLE");
 }
 
+/** 注册跨芯片状态发送回调；回调只应复制/入队。 */
 void imu_boot_manager_set_transport(imu_boot_transport_callback_t callback)
 {
     ensure_boot_mutex();
@@ -455,6 +677,7 @@ void imu_boot_manager_set_transport(imu_boot_transport_callback_t callback)
     unlock_boot();
 }
 
+/** 推进一次启动/标定状态机，并执行有限超时处理。 */
 void imu_boot_manager_step(void)
 {
     const uint64_t now_us = imu_time_now_us();
@@ -702,6 +925,7 @@ void imu_boot_manager_step(void)
     }
 }
 
+/** 在采样阶段消费最新原始快照。 */
 void imu_boot_manager_update(const imu_raw_data_t *raw_data)
 {
     const uint32_t now_ms = imu_time_now_ms();
@@ -728,6 +952,7 @@ void imu_boot_manager_update(const imu_raw_data_t *raw_data)
     unlock_boot();
 }
 
+/** 处理 S3 雷达 PWM READY 事件；无效状态不会跳过生命周期。 */
 uint8_t imu_boot_manager_on_radar_pwm_ready(uint8_t speed)
 {
     uint8_t accepted = 0U;
@@ -758,6 +983,7 @@ imu_boot_state_t imu_boot_manager_get_state(void)
     return state;
 }
 
+/** 复制兼容启动状态摘要。 */
 void imu_boot_manager_get_status(imu_boot_status_t *status)
 {
     if (status == NULL) {
@@ -794,6 +1020,7 @@ void imu_boot_manager_get_status(imu_boot_status_t *status)
     unlock_boot();
 }
 
+/** 复制双 IMU 阶段和计时摘要。 */
 void imu_boot_manager_get_dual_status(dual_imu_manager_t *status)
 {
     if (status == NULL) {
@@ -804,6 +1031,7 @@ void imu_boot_manager_get_dual_status(dual_imu_manager_t *status)
     unlock_boot();
 }
 
+/** 读取指定阶段时间区间。 */
 uint8_t imu_boot_manager_get_phase_timing(imu_phase_t phase,
                                           imu_phase_timing_t *timing)
 {
@@ -816,6 +1044,7 @@ uint8_t imu_boot_manager_get_phase_timing(imu_phase_t phase,
     return 1U;
 }
 
+/** 查询是否到达 IMU_READY。 */
 uint8_t imu_boot_manager_is_ready(void)
 {
     uint8_t ready;
@@ -826,6 +1055,7 @@ uint8_t imu_boot_manager_is_ready(void)
     return ready;
 }
 
+/** 查询是否到达 IMU_ERROR。 */
 uint8_t imu_boot_manager_is_error(void)
 {
     uint8_t failed;
@@ -836,6 +1066,7 @@ uint8_t imu_boot_manager_is_error(void)
     return failed;
 }
 
+/** 读取当前生命周期进度百分数。 */
 uint8_t imu_boot_manager_get_progress(void)
 {
     uint8_t progress;
@@ -846,6 +1077,7 @@ uint8_t imu_boot_manager_get_progress(void)
     return progress;
 }
 
+/** 读取已接受标定样本数。 */
 uint32_t imu_boot_manager_get_sample_count(void)
 {
     imu_boot_status_t status = {0};
@@ -854,6 +1086,7 @@ uint32_t imu_boot_manager_get_sample_count(void)
     return status.sample_count;
 }
 
+/** 读取目标标定样本总数。 */
 uint32_t imu_boot_manager_get_sample_total(void)
 {
     imu_boot_status_t status = {0};

@@ -7,6 +7,7 @@
 | BLE | [ble.md](docs/esp32s3/ble.md) | `ESPS3/components/s3_ble`, App `BLE/` | `s3_ble_init`, `BLEManager` |
 | UART | [uart.md](docs/protocol/uart.md) | STM `UART_Link`, S3 `stm_uart` | `uart_link_task`, `stm_uart_task` |
 | Protocol | [protocol.md](docs/protocol/protocol.md) | STM/S3 `Common/SRP`, App BLE model | `srp_encode_frame`, `srp_parser_feed`, `SmartCarProtocol.Parser.feed` |
+| Debug configuration | [S3/STM 注释规范](DOCS/development/S3_STM_CODE_COMMENT_GUIDE.md) | `Common/SmartCarDebug` | Compile-time diagnostic switches and bounded log settings |
 | IMU | [imu-pipeline.md](docs/imu/imu-pipeline.md) | `STM32H757/Middleware/Sensor` | `imu_init`, `imu_update` |
 | LSM303 | [lsm303.md](docs/imu/lsm303.md) | `STM32H757/Drivers/IMU/LSM303` | `lsm303_init`, `lsm303_read_acc/mag` |
 | BMI323 | [bmi323.md](docs/imu/bmi323.md) | `STM32H757/Drivers/IMU/BMI323` | `bmi323_init_diag` |
@@ -16,6 +17,7 @@
 | Radar | [radar.md](docs/radar/radar.md) | `ESPS3/main/radar`, `radar_control` | `radar_uart_init`, `radar_parser_feed` |
 | Motor | [motor.md](docs/motor/motor.md) | `STM32H757/Drivers/Motor` | `motor.c` placeholder API |
 | Encoder | [encoder.md](docs/motor/encoder.md) | `STM32H757/Drivers/Encoder` | `encoder.c` placeholder API |
+| Odometry | [Odometry README](STM32H757/Middleware/Odometry/README.md) | `STM32H757/Middleware/Odometry` | `chassis_odometry_update` |
 | Logger | [logger.md](docs/debug/logger.md) | `Tools/SmartCar_Logger_MAC` | `LoggerSession`, `SmartCarLogParser` |
 | Boot | [boot.md](docs/stm32/boot.md) | `STM32H757/Middleware/Boot` | `boot_log_start`, `boot_log` |
 | FreeRTOS | [freertos.md](docs/stm32/freertos.md) | `STM32H757/Middleware/FreeRTOS`, task code | `vTaskStartScheduler` |

@@ -1,6 +1,7 @@
 #include "s3_ble.h"
 
 #include <stdbool.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "esp_bt.h"
@@ -10,13 +11,20 @@
 #include "esp_gatts_api.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
+#include "s3_ble_log_tx.h"
 #include "smartcar_log.h"
+
+/* S3 BLE GATT 实现；创建人：待确认（当前维护人：Zhiqin）。 */
 
 #define S3_BLE_DEVICE_NAME "SmartCar_S3"
 #define S3_BLE_MAX_RX_LEN 1032U
 #define S3_BLE_ADV_CONFIG_FLAG BIT0
 #define S3_BLE_SCAN_RSP_CONFIG_FLAG BIT1
+#define S3_BLE_LOG_TX_TASK_STACK_SIZE 3072U
+#define S3_BLE_LOG_TX_TASK_PRIORITY (tskIDLE_PRIORITY + 1U)
+#define S3_BLE_LOG_TX_CHUNK_DELAY_TICKS 1U
 
 /* UUID bytes use the little-endian representation required by Bluedroid. */
 static const uint8_t s_service_uuid[ESP_UUID_LEN_128] = {
@@ -40,7 +48,8 @@ static const char *TAG = "S3_BLE";
 static const uint16_t s_primary_service_uuid = ESP_GATT_UUID_PRI_SERVICE;
 static const uint16_t s_character_declaration_uuid = ESP_GATT_UUID_CHAR_DECLARE;
 static const uint16_t s_client_config_uuid = ESP_GATT_UUID_CHAR_CLIENT_CONFIG;
-static const uint8_t s_rx_property = ESP_GATT_CHAR_PROP_BIT_WRITE;
+static const uint8_t s_rx_property =
+    ESP_GATT_CHAR_PROP_BIT_WRITE | ESP_GATT_CHAR_PROP_BIT_WRITE_NR;
 static const uint8_t s_tx_property = ESP_GATT_CHAR_PROP_BIT_NOTIFY;
 static const uint8_t s_log_property = ESP_GATT_CHAR_PROP_BIT_NOTIFY;
 static const uint8_t s_ccc_initial_value[2] = {0x00, 0x00};
@@ -60,7 +69,7 @@ enum {
 
 static uint16_t s_handles[IDX_COUNT];
 static esp_gatt_if_t s_gatts_if = ESP_GATT_IF_NONE;
-static uint16_t s_conn_id;
+static volatile uint16_t s_conn_id;
 
 typedef struct {
     bool connected;
@@ -74,8 +83,8 @@ static bool s_initialized;
 static uint8_t s_adv_config_done;
 static bool s_service_ready;
 static bool s_adv_start_requested;
-static uint16_t s_att_mtu = 23U;
-static volatile uint32_t s_ble_notify_fail_count;
+static volatile uint16_t s_att_mtu = 23U;
+static uint32_t s_ble_notify_fail_count;
 static s3_ble_rx_callback_t s_rx_callback;
 static void *s_rx_callback_context;
 static portMUX_TYPE s_rx_callback_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -83,65 +92,135 @@ static s3_ble_ready_callback_t s_ready_callback;
 static void *s_ready_callback_context;
 static s3_ble_disconnect_callback_t s_disconnect_callback;
 static void *s_disconnect_callback_context;
+static s3_ble_log_tx_t s_log_tx;
+static portMUX_TYPE s_log_tx_lock = portMUX_INITIALIZER_UNLOCKED;
+static TaskHandle_t s_log_tx_task;
+static bool s_log_tx_context_initialized;
+static bool s_disconnect_info_valid;
+static bool s_prev_disconnect_report_pending;
+static uint8_t s_last_disconnect_reason;
+static uint32_t s_disconnect_count;
 
-/* Keep boot and early bring-up events until the FFE3 subscriber is ready. */
-#define S3_LOG_PENDING_CAPACITY 48U
-typedef struct {
-    smartcar_log_level_t level;
-    uint32_t timestamp_ms;
-    uint8_t length;
-    char text[SMARTCAR_LOG_MAX_PAYLOAD + 1U];
-} s3_pending_log_t;
-
-static s3_pending_log_t s_pending_logs[S3_LOG_PENDING_CAPACITY];
-static uint8_t s_pending_log_head;
-static uint8_t s_pending_log_tail;
-static uint8_t s_pending_log_count;
-static portMUX_TYPE s_pending_log_lock = portMUX_INITIALIZER_UNLOCKED;
-
-static esp_err_t s3_ble_log_send_text(smartcar_log_level_t level,
-                                      uint32_t timestamp_ms,
-                                      const char *text, uint8_t text_length)
+/**
+ * @brief 对一个 32 位诊断计数执行饱和加一，保持 UINT32_MAX 不回绕。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（函数契约补充）。
+ * @param value 非 NULL 可写计数指针；函数不保存该指针。
+ * @return 无。
+ * 调用方式：仅供本文件在记录通知失败或断开事件时调用。
+ * 线程约束：函数自身不加锁；当前调用点均位于 s_log_tx_lock 临界区，禁止脱离同步直接并发调用或用于 ISR。
+ */
+static void s3_ble_saturating_increment(uint32_t *value)
 {
-    uint8_t frame[SMARTCAR_LOG_MAX_FRAME_SIZE];
-    size_t frame_length = 0U;
+    if (*value != UINT32_MAX) {
+        ++(*value);
+    }
+}
+
+/**
+ * @brief 向已创建的 FFE3 TX worker 发送一次无负载任务通知。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（函数契约补充）。
+ * 传入参数：无。
+ * @return 无；worker 尚未创建时静默返回。
+ * 调用方式：日志入队以及连接、CCC、拥塞状态变化后调用，使 worker 重新评估发送条件。
+ * 线程约束：使用 xTaskNotifyGive()，可从普通任务或当前 GATT 回调上下文调用，不阻塞；禁止硬件 ISR。
+ */
+static void s3_ble_log_tx_wake(void)
+{
+    TaskHandle_t task = s_log_tx_task;
+
+    if (task != NULL) {
+        (void)xTaskNotifyGive(task);
+    }
+}
+
+/**
+ * @brief FFE3 的唯一 GATT TX owner，按状态机串行发送完整日志帧的全部分片。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（函数契约补充）。
+ * @param context 固定为 NULL，当前不使用。
+ * @return 不返回。
+ * 调用方式：s3_ble_init() 只创建一个实例；由入队和 GATT 状态变化通知唤醒，READY 时提交 FFE3 notification。
+ * 线程约束：最低业务优先级任务；无通知时无限阻塞，只在本函数调用 FFE3 send_indicate，状态访问使用短临界区，
+ *           每个成功分片后让出一个 tick；禁止其他线程直接发送 FFE3 以免帧分片交织。
+ */
+static void s3_ble_log_tx_worker(void *context)
+{
+    (void)context;
+
+    for (;;) {
+        (void)ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        for (;;) {
+            s3_ble_log_tx_chunk_t chunk;
+            s3_ble_log_tx_prepare_result_t prepare_result;
+            uint16_t conn_id;
+            uint16_t max_payload;
+
+            portENTER_CRITICAL(&s_log_tx_lock);
+            max_payload = s_att_mtu > 3U ? (uint16_t)(s_att_mtu - 3U) : 20U;
+            prepare_result = s3_ble_log_tx_prepare_chunk(&s_log_tx,
+                                                         max_payload,
+                                                         &chunk);
+            conn_id = s_conn_id;
+            portEXIT_CRITICAL(&s_log_tx_lock);
+
+            if (prepare_result != S3_BLE_LOG_TX_PREPARE_READY) {
+                break;
+            }
+
+            const esp_err_t ret = esp_ble_gatts_send_indicate(
+                s_gatts_if, conn_id, s_handles[IDX_LOG_VALUE],
+                chunk.length, chunk.data, false);
+
+            portENTER_CRITICAL(&s_log_tx_lock);
+            (void)s3_ble_log_tx_complete_chunk(&s_log_tx, chunk.token,
+                                               ret == ESP_OK);
+            if (ret != ESP_OK) {
+                s3_ble_saturating_increment(&s_ble_notify_fail_count);
+            }
+            portEXIT_CRITICAL(&s_log_tx_lock);
+
+            if (ret != ESP_OK) {
+                break;
+            }
+            vTaskDelay((TickType_t)S3_BLE_LOG_TX_CHUNK_DELAY_TICKS);
+        }
+    }
+}
+
+/**
+ * @brief 将一段 S3 文本编码为调用方拥有的完整独立日志帧。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（函数契约补充）。
+ * @param level 日志级别，调用方应保证不大于 SMARTCAR_LOG_LEVEL_ERROR。
+ * @param timestamp_ms 写入日志包络的毫秒时间戳。
+ * @param text 只读文本字节，至少在本函数返回前有效；不要求由本函数读取 NUL 终止符。
+ * @param text_length 要编码的文本字节数，不得超过 SMARTCAR_LOG_MAX_PAYLOAD。
+ * @param frame 至少 SMARTCAR_LOG_MAX_FRAME_SIZE 字节的可写缓冲。
+ * @param frame_length 成功时写入完整帧长度。
+ * @return 编码成功返回 ESP_OK，否则返回 ESP_FAIL。
+ * 调用方式：由 s3_ble_log_emit() 调用，随后复制进固定 FFE3 队列。
+ * 线程约束：纯编码，不调用 Bluedroid；普通任务或有界 GATT 标记生成路径可调用。
+ */
+static esp_err_t s3_ble_log_encode_text(smartcar_log_level_t level,
+                                        uint32_t timestamp_ms,
+                                        const char *text,
+                                        uint8_t text_length,
+                                        uint8_t *frame,
+                                        uint16_t *frame_length)
+{
+    size_t encoded_length = 0U;
 
     if (smartcar_log_encode(SMARTCAR_LOG_SOURCE_S3, level,
                             timestamp_ms,
                             (const uint8_t *)text, text_length,
-                            frame, sizeof(frame), &frame_length) != SMARTCAR_LOG_OK) {
+                            frame, SMARTCAR_LOG_MAX_FRAME_SIZE,
+                            &encoded_length) != SMARTCAR_LOG_OK) {
         return ESP_FAIL;
     }
-    return s3_ble_log_notify_send(frame, (uint16_t)frame_length);
-}
-
-static void s3_ble_log_flush_pending(void)
-{
-    for (;;) {
-        s3_pending_log_t pending;
-
-        if (!s_ble_state.connected || !s_ble_state.log_notify_enabled) {
-            return;
-        }
-        portENTER_CRITICAL(&s_pending_log_lock);
-        if (s_pending_log_count == 0U) {
-            portEXIT_CRITICAL(&s_pending_log_lock);
-            return;
-        }
-        pending = s_pending_logs[s_pending_log_tail];
-        portEXIT_CRITICAL(&s_pending_log_lock);
-
-        if (s3_ble_log_send_text(pending.level, pending.timestamp_ms,
-                                 pending.text,
-                                 pending.length) != ESP_OK) {
-            return;
-        }
-        portENTER_CRITICAL(&s_pending_log_lock);
-        s_pending_log_tail = (uint8_t)((s_pending_log_tail + 1U) %
-                                       S3_LOG_PENDING_CAPACITY);
-        --s_pending_log_count;
-        portEXIT_CRITICAL(&s_pending_log_lock);
-    }
+    *frame_length = (uint16_t)encoded_length;
+    return ESP_OK;
 }
 
 static const esp_ble_adv_params_t s_adv_params = {
@@ -186,6 +265,15 @@ static const esp_ble_adv_data_t s_scan_rsp_data = {
     .flag = ESP_BLE_ADV_FLAG_GEN_DISC | ESP_BLE_ADV_FLAG_BREDR_NOT_SPT,
 };
 
+/**
+ * @brief 根据连接和 FFE2 CCC 状态更新 ready，并同步发出由 false 到 true 的边沿回调。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（函数契约补充）。
+ * 传入参数：无。
+ * @return 返回值：无（void）。
+ * 调用方式：由 GATTS 连接、断开和 FFE2 CCC 写事件调用；FFE3 日志 CCC 不参与 ready 计算。
+ * 线程约束：运行于 Bluedroid GATT 回调上下文；回调指针无锁读取并在当前栈同步执行，注册必须与事件安全协调，回调不得阻塞或直接控制硬件。
+ */
 static void update_ready_state(void)
 {
     const bool ready = s_ble_state.connected && s_ble_state.notify_enabled;
@@ -197,8 +285,16 @@ static void update_ready_state(void)
     }
 }
 
-/* GATT owns the write buffer. The receiver must synchronously copy it into
- * its queue, but callback registration itself can race BLE initialization. */
+/**
+ * @brief 校验一次 FFE1 写入，并把 GATT 借用缓冲同步交给当前注册消费者。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（函数契约补充）。
+ * @param data Bluedroid GATT 拥有的只读写入缓冲，仅在上层 GATT 回调期间有效。
+ * @param length 本次写入字节数；0 或大于 S3_BLE_MAX_RX_LEN 时丢弃。
+ * @return 返回值：无（void）；无消费者或参数非法时静默丢弃。
+ * 调用方式：只由 gatts_event_handler() 的非 prepare FFE1 写事件调用；消费者必须在返回前复制或入队。
+ * 线程约束：运行于 GATT 回调上下文；仅在短临界区复制回调指针/上下文，回调在解锁后同步执行，不得阻塞、保留 data 或直接驱动硬件。
+ */
 static void s3_ble_dispatch_rx_write(const uint8_t *data, size_t length)
 {
     s3_ble_rx_callback_t callback;
@@ -268,6 +364,15 @@ static const esp_gatts_attr_db_t s_gatt_db[IDX_COUNT] = {
     },
 };
 
+/**
+ * @brief 在服务表和两份广播数据均配置完成后，至多提交一次可连接广播启动请求。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（函数契约补充）。
+ * 传入参数：无。
+ * @return 返回值：无（void）；同步提交失败时清除请求标志并记录错误，等待后续事件重试。
+ * 调用方式：由 GAP 数据配置完成、GATT 服务就绪和断开事件路径调用；实际启动结果由 GAP 完成事件确认。
+ * 线程约束：运行于 Bluedroid GAP/GATT 回调上下文，读写无锁 BLE 状态并调用 GAP API；禁止 ISR 或其他任务并发调用。
+ */
 static void start_advertising_if_ready(void)
 {
     if (s_service_ready &&
@@ -283,6 +388,16 @@ static void start_advertising_if_ready(void)
     }
 }
 
+/**
+ * @brief 处理广播数据配置和广播启动完成事件，维护广播提交状态。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（函数契约补充）。
+ * @param event Bluedroid GAP 事件类型；未识别事件被忽略。
+ * @param param Bluedroid 借用的事件参数，仅在回调期间有效；受支持事件下应为非 NULL。
+ * @return 返回值：无（void）。
+ * 调用方式：由 esp_ble_gap_register_callback() 注册后由 Bluedroid 同步回调；本函数不保留 param。
+ * 线程约束：运行于协议栈回调上下文，可能继续提交广播和写日志；必须快速返回，禁止阻塞、ISR 调用或业务任务直接调用。
+ */
 static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param)
 {
     switch (event) {
@@ -307,6 +422,17 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param
     }
 }
 
+/**
+ * @brief 处理 GATT 注册、服务表、连接、断开、写入和 MTU 事件并维护 FFE1/FFE2/FFE3 状态。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（函数契约补充）。
+ * @param event Bluedroid GATTS 事件类型；未处理事件被忽略。
+ * @param gatts_if 当前 GATT server interface，注册事件时保存到模块状态。
+ * @param param Bluedroid 借用的事件联合体，仅在回调期间有效；受支持事件下应为非 NULL。
+ * @return 返回值：无（void）；属性表失败仅记录并返回，部分注册配置使用 ESP_ERROR_CHECK，失败会触发系统 abort/reset 语义。
+ * 调用方式：由 esp_ble_gatts_register_callback() 注册后由 Bluedroid 调用；写入路径会同步调用已注册业务回调。
+ * 线程约束：协议栈回调上下文；不得保留 param/write.value，断开/ready/RX 回调必须快速返回；FFE3 事件只更新状态、生成有限标记并唤醒 worker，不执行通知循环。
+ */
 static void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if,
                                 esp_ble_gatts_cb_param_t *param)
 {
@@ -344,8 +470,12 @@ static void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_
         s_ble_state.notify_enabled = false;
         s_ble_state.log_notify_enabled = false;
         update_ready_state();
+        portENTER_CRITICAL(&s_log_tx_lock);
         s_att_mtu = 23U;
         s_conn_id = param->connect.conn_id;
+        s3_ble_log_tx_set_connected(&s_log_tx, true);
+        portEXIT_CRITICAL(&s_log_tx_lock);
+        s3_ble_log_tx_wake();
         ESP_LOGI(TAG, "[S3_BLE] CLIENT CONNECTED");
         ESP_LOGI(TAG, "conn_id=%u", (unsigned)param->connect.conn_id);
         ESP_LOGI(TAG, "addr=" ESP_BD_ADDR_STR,
@@ -356,6 +486,14 @@ static void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_
         s_ble_state.notify_enabled = false;
         s_ble_state.log_notify_enabled = false;
         update_ready_state();
+        portENTER_CRITICAL(&s_log_tx_lock);
+        s_disconnect_info_valid = true;
+        s_prev_disconnect_report_pending = true;
+        s_last_disconnect_reason = param->disconnect.reason;
+        s3_ble_saturating_increment(&s_disconnect_count);
+        s3_ble_log_tx_set_connected(&s_log_tx, false);
+        portEXIT_CRITICAL(&s_log_tx_lock);
+        s3_ble_log_tx_wake();
         if (s_disconnect_callback != NULL) {
             s_disconnect_callback(s_disconnect_callback_context);
         }
@@ -377,20 +515,64 @@ static void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_
                    param->write.len >= sizeof(uint16_t)) {
             const uint16_t ccc = (uint16_t)param->write.value[0] |
                                  ((uint16_t)param->write.value[1] << 8);
-            s_ble_state.log_notify_enabled = (ccc & 0x0001U) != 0U;
-            if (s_ble_state.log_notify_enabled) {
+            const bool enabled = (ccc & 0x0001U) != 0U;
+
+            if (enabled) {
+                bool report_previous_disconnect;
+                uint8_t previous_reason;
+                uint32_t previous_count;
+                char previous_disconnect_log[64];
+
+                /* Queue markers while CCC is still false so the worker cannot race them. */
                 (void)s3_ble_log_emit(SMARTCAR_LOG_LEVEL_INFO, "BOOT");
                 if (s_ble_state.connected) {
                     (void)s3_ble_log_emit(SMARTCAR_LOG_LEVEL_INFO,
                                           "BLE_CONNECTED");
                 }
-                s3_ble_log_flush_pending();
+
+                portENTER_CRITICAL(&s_log_tx_lock);
+                report_previous_disconnect = s_prev_disconnect_report_pending;
+                previous_reason = s_last_disconnect_reason;
+                previous_count = s_disconnect_count;
+                portEXIT_CRITICAL(&s_log_tx_lock);
+
+                if (report_previous_disconnect) {
+                    const int written = snprintf(
+                        previous_disconnect_log, sizeof(previous_disconnect_log),
+                        "BLE_PREV_DISC reason=0x%02X count=%lu",
+                        (unsigned)previous_reason, (unsigned long)previous_count);
+                    if (written > 0 && (size_t)written < sizeof(previous_disconnect_log) &&
+                        s3_ble_log_emit(SMARTCAR_LOG_LEVEL_WARN,
+                                        previous_disconnect_log) == ESP_OK) {
+                        portENTER_CRITICAL(&s_log_tx_lock);
+                        if (s_disconnect_count == previous_count &&
+                            s_last_disconnect_reason == previous_reason) {
+                            s_prev_disconnect_report_pending = false;
+                        }
+                        portEXIT_CRITICAL(&s_log_tx_lock);
+                    }
+                }
             }
+            s_ble_state.log_notify_enabled = enabled;
+            portENTER_CRITICAL(&s_log_tx_lock);
+            s3_ble_log_tx_set_ccc_enabled(&s_log_tx, enabled);
+            portEXIT_CRITICAL(&s_log_tx_lock);
+            s3_ble_log_tx_wake();
         }
         break;
     case ESP_GATTS_MTU_EVT:
         if (param->mtu.mtu >= 23U) {
+            portENTER_CRITICAL(&s_log_tx_lock);
             s_att_mtu = param->mtu.mtu;
+            portEXIT_CRITICAL(&s_log_tx_lock);
+        }
+        break;
+    case ESP_GATTS_CONGEST_EVT:
+        if (param->congest.conn_id == s_conn_id) {
+            portENTER_CRITICAL(&s_log_tx_lock);
+            s3_ble_log_tx_set_congested(&s_log_tx, param->congest.congested);
+            portEXIT_CRITICAL(&s_log_tx_lock);
+            s3_ble_log_tx_wake();
         }
         break;
     default:
@@ -398,12 +580,25 @@ static void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_
     }
 }
 
+/**
+ * @brief 初始化 BLE controller/Bluedroid，注册 GATT/GAP 回调并提交应用注册。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（函数契约补充）。
+ * 传入参数：无。
+ * @return ESP_OK 表示初始化步骤和异步 app 注册已提交；否则返回首个 ESP-IDF 错误，函数不执行完整回滚。
+ * 调用方式：由 app_main 启动路径调用；成功后的重复调用直接返回 ESP_OK，但服务表/广播 ready 仍需等待异步回调。
+ * 线程约束：仅启动任务串行调用；可能分配 controller/Bluedroid 资源，禁止 ISR/GATT 回调或并发初始化，返回成功不证明客户端已连接。
+ */
 esp_err_t s3_ble_init(void)
 {
     esp_err_t ret;
 
     if (s_initialized) {
         return ESP_OK;
+    }
+    if (!s_log_tx_context_initialized) {
+        s3_ble_log_tx_init(&s_log_tx);
+        s_log_tx_context_initialized = true;
     }
     ret = esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT);
     if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
@@ -434,6 +629,13 @@ esp_err_t s3_ble_init(void)
     if (ret != ESP_OK) {
         return ret;
     }
+    if (s_log_tx_task == NULL &&
+        xTaskCreate(s3_ble_log_tx_worker, "ble_log_tx",
+                    S3_BLE_LOG_TX_TASK_STACK_SIZE, NULL,
+                    S3_BLE_LOG_TX_TASK_PRIORITY,
+                    &s_log_tx_task) != pdPASS) {
+        return ESP_ERR_NO_MEM;
+    }
     ret = esp_ble_gatts_app_register(0);
     if (ret != ESP_OK) {
         return ret;
@@ -444,6 +646,17 @@ esp_err_t s3_ble_init(void)
     return ESP_OK;
 }
 
+/**
+ * @brief 按当前 ATT MTU 分片并向 FFE2 提交一条状态/控制响应通知流。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（函数契约补充）。
+ * @param data 只读完整 App 帧；每次 Bluedroid 提交调用返回前必须保持有效。
+ * @param len 完整 App 帧长度，范围为 1..S3_BLE_MAX_RX_LEN（当前为 1032 字节）。
+ * @return 全部分片提交成功返回 ESP_OK；参数或未就绪返回对应错误，底层分片失败返回其错误并增加失败计数。
+ * 调用方式：服务任务编码 App 帧后调用；使用无确认 notification，ESP_OK 不代表客户端收到或重组完成；
+ *           当前只由底层返回值反映拥塞，本函数没有独立的 FFE2 拥塞状态门。
+ * 线程约束：读取无锁连接/MTU 状态并调用 GATT API；禁止硬件 ISR，避免多个任务并发发送导致分片交织，断开可与发送竞争。
+ */
 esp_err_t s3_ble_notify_send(const uint8_t *data, uint16_t len)
 {
     if (data == NULL || len == 0U || len > S3_BLE_MAX_RX_LEN) {
@@ -466,7 +679,9 @@ esp_err_t s3_ble_notify_send(const uint8_t *data, uint16_t len)
                                                     (uint8_t *)&data[offset],
                                                     false);
         if (ret != ESP_OK) {
-            ++s_ble_notify_fail_count;
+            portENTER_CRITICAL(&s_log_tx_lock);
+            s3_ble_saturating_increment(&s_ble_notify_fail_count);
+            portEXIT_CRITICAL(&s_log_tx_lock);
             return ret;
         }
         offset = (uint16_t)(offset + chunk_len);
@@ -474,40 +689,54 @@ esp_err_t s3_ble_notify_send(const uint8_t *data, uint16_t len)
     return ESP_OK;
 }
 
+/**
+ * @brief 校验并复制一条完整 SmartCarLog 帧到固定 FFE3 优先级队列。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（函数契约补充）。
+ * @param data 只读 smartcar_log 完整帧；每次提交调用返回前必须有效。
+ * @param len 待发完整日志帧字节数，范围为 1..SMARTCAR_LOG_MAX_FRAME_SIZE。
+ * @return 完整帧成功复制入队返回 ESP_OK；参数、长度、CRC 或字段非法返回 ESP_ERR_INVALID_ARG。
+ * 调用方式：所有 FFE3 生产者只调用本接口；ESP_OK 不表示 worker 已发送或 App 已收到。
+ * 线程约束：短 portMUX 临界区内最多复制 108 字节，无 RTOS 等待；支持多任务生产者，禁止 ISR。
+ */
 esp_err_t s3_ble_log_notify_send(const uint8_t *data, uint16_t len)
 {
-    if (data == NULL || len == 0U || len > S3_BLE_MAX_RX_LEN) {
+    smartcar_log_record_t record;
+    s3_ble_log_tx_priority_t priority;
+    bool enqueued;
+
+    if (data == NULL || len == 0U || len > SMARTCAR_LOG_MAX_FRAME_SIZE ||
+        smartcar_log_decode(data, len, &record) != SMARTCAR_LOG_OK) {
         return ESP_ERR_INVALID_ARG;
     }
-    if (!s_initialized || !s_ble_state.connected ||
-        !s_ble_state.log_notify_enabled) {
-        return ESP_ERR_INVALID_STATE;
-    }
 
-    const uint16_t max_payload = s_att_mtu > 3U ? (uint16_t)(s_att_mtu - 3U) : 20U;
-    uint16_t offset = 0U;
-    while (offset < len) {
-        uint16_t chunk_len = (uint16_t)(len - offset);
-        if (chunk_len > max_payload) {
-            chunk_len = max_payload;
-        }
-        const esp_err_t ret = esp_ble_gatts_send_indicate(s_gatts_if,
-                                                            s_conn_id,
-                                                            s_handles[IDX_LOG_VALUE],
-                                                            chunk_len,
-                                                            (uint8_t *)&data[offset],
-                                                            false);
-        if (ret != ESP_OK) {
-            ++s_ble_notify_fail_count;
-            return ret;
-        }
-        offset = (uint16_t)(offset + chunk_len);
+    priority = record.level >= SMARTCAR_LOG_LEVEL_WARN
+                   ? S3_BLE_LOG_TX_PRIORITY_CRITICAL
+                   : S3_BLE_LOG_TX_PRIORITY_NORMAL;
+    portENTER_CRITICAL(&s_log_tx_lock);
+    enqueued = s3_ble_log_tx_enqueue(&s_log_tx, priority, data, len);
+    portEXIT_CRITICAL(&s_log_tx_lock);
+    if (!enqueued) {
+        return ESP_ERR_INVALID_ARG;
     }
+    s3_ble_log_tx_wake();
     return ESP_OK;
 }
 
+/**
+ * @brief 截断并编码一条 S3 来源日志，再复制进固定 FFE3 优先级队列。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（函数契约补充）。
+ * @param level 日志级别，必须不大于 SMARTCAR_LOG_LEVEL_ERROR。
+ * @param text NUL 结尾只读文本；NULL 或空字符串无效，超过协议上限时只取前 SMARTCAR_LOG_MAX_PAYLOAD 字节。
+ * @return 参数非法返回 ESP_ERR_INVALID_ARG；编码/入队成功返回 ESP_OK，队满时丢各自队列最旧帧并仍接收新帧。
+ * 调用方式：普通任务调用；本模块在 FFE3 CCC GATT 事件中只用它生成有限标记，不直接发送。
+ * 线程约束：编码在临界区外，入队只复制完整帧；无 BLE 等待，禁止硬件 ISR。
+ */
 esp_err_t s3_ble_log_emit(smartcar_log_level_t level, const char *text)
 {
+    uint8_t frame[SMARTCAR_LOG_MAX_FRAME_SIZE];
+    uint16_t frame_length = 0U;
     size_t text_length = 0U;
 
     if (text == NULL) {
@@ -523,62 +752,169 @@ esp_err_t s3_ble_log_emit(smartcar_log_level_t level, const char *text)
         return ESP_ERR_INVALID_ARG;
     }
 
-    if (!s_initialized || !s_ble_state.connected ||
-        !s_ble_state.log_notify_enabled) {
-        esp_err_t result = ESP_OK;
-
-        portENTER_CRITICAL(&s_pending_log_lock);
-        if (s_pending_log_count >= S3_LOG_PENDING_CAPACITY) {
-            result = ESP_ERR_NO_MEM;
-        } else {
-            s3_pending_log_t *pending = &s_pending_logs[s_pending_log_head];
-            pending->level = level;
-            pending->timestamp_ms = (uint32_t)esp_log_timestamp();
-            pending->length = (uint8_t)text_length;
-            memcpy(pending->text, text, text_length);
-            pending->text[text_length] = '\0';
-            s_pending_log_head = (uint8_t)((s_pending_log_head + 1U) %
-                                           S3_LOG_PENDING_CAPACITY);
-            ++s_pending_log_count;
-        }
-        portEXIT_CRITICAL(&s_pending_log_lock);
-        return result;
+    if (s3_ble_log_encode_text(level, (uint32_t)esp_log_timestamp(),
+                               text, (uint8_t)text_length,
+                               frame, &frame_length) != ESP_OK) {
+        return ESP_FAIL;
     }
-    return s3_ble_log_send_text(level, (uint32_t)esp_log_timestamp(),
-                                text, (uint8_t)text_length);
+    return s3_ble_log_notify_send(frame, frame_length);
 }
 
+/**
+ * @brief 以 INFO 级别编码一条 S3 诊断文本并复制进 FFE3 普通队列。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（函数契约补充）。
+ * @param text NUL 结尾只读文本；NULL/空文本无效，超长文本按公共日志接口截断。
+ * @return 完整继承 s3_ble_log_emit() 的参数、编码和入队结果；ESP_OK 仅表示已入队。
+ * 调用方式：启动、雷达和服务任务记录 INFO 事件时调用；实际发送由唯一 FFE3 worker 完成。
+ * 线程约束：同 s3_ble_log_emit()；禁止硬件 ISR，不得用日志路径阻塞控制心跳或安全动作。
+ */
 esp_err_t s3_log_info(const char *text)
 {
     return s3_ble_log_emit(SMARTCAR_LOG_LEVEL_INFO, text);
 }
 
+/**
+ * @brief 以 WARN 级别编码一条 S3 诊断文本并复制进 FFE3 关键队列。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（函数契约补充）。
+ * @param text NUL 结尾只读文本；NULL/空文本无效，超长文本按公共日志接口截断。
+ * @return 完整继承 s3_ble_log_emit() 的参数、编码和入队结果；队满覆盖关键队列最旧帧仍返回 ESP_OK。
+ * 调用方式：任务上下文记录可恢复异常；不能代替状态机故障状态或重试策略。
+ * 线程约束：同 s3_ble_log_emit()；禁止硬件 ISR，避免在持有控制锁时调用。
+ */
 esp_err_t s3_log_warn(const char *text)
 {
     return s3_ble_log_emit(SMARTCAR_LOG_LEVEL_WARN, text);
 }
 
+/**
+ * @brief 以 ERROR 级别编码一条 S3 诊断文本并复制进 FFE3 关键队列。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（函数契约补充）。
+ * @param text NUL 结尾只读文本；NULL/空文本无效，超长文本按公共日志接口截断。
+ * @return 完整继承 s3_ble_log_emit() 的参数、编码和入队结果；ESP_OK 不表示手机已收到。
+ * 调用方式：任务上下文记录错误；日志成功不能代替急停、故障恢复或持久故障状态。
+ * 线程约束：同 s3_ble_log_emit()；禁止硬件 ISR，不得让日志失败阻断安全路径。
+ */
 esp_err_t s3_log_error(const char *text)
 {
     return s3_ble_log_emit(SMARTCAR_LOG_LEVEL_ERROR, text);
 }
 
+/**
+ * @brief 查询连接存在且客户端已打开 FFE2 CCC 的无锁 ready 快照。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（函数契约补充）。
+ * 传入参数：无。
+ * @return true 仅表示当前本地连接和 FFE2 CCC 条件满足；不证明会话有效或对端已收到通知。
+ * 调用方式：服务任务发送前或低频诊断读取；不能作为控制会话唯一准入条件。
+ * 线程约束：volatile 无锁读取、不阻塞，可与 GATT 状态更新竞争；禁止据此绕过服务层安全门。
+ */
 bool s3_ble_is_ready(void)
 {
     return s_ble_state.ready;
 }
 
+/**
+ * @brief 查询 BLE 已初始化、已连接且客户端已打开 FFE3 CCC 的无锁快照。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（函数契约补充）。
+ * 传入参数：无。
+ * @return 三项本地条件同时满足时为 true；不保证下一次 GATT 提交一定成功。
+ * 调用方式：低频诊断读取；日志生产者始终只复制完整帧入固定队列。
+ * 线程约束：无锁、不阻塞，可与 GATT 连接/CCC 更新竞争；禁止硬件 ISR 依赖该快照执行发送。
+ */
 bool s3_ble_is_log_ready(void)
 {
     return s_initialized && s_ble_state.connected &&
            s_ble_state.log_notify_enabled;
 }
 
-uint32_t s3_ble_get_notify_fail_count(void)
+/**
+ * @brief 在统一临界区内复制 FFE3 队列和 TX 累计统计，读取不清零。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（函数契约补充）。
+ * @param stats 非 NULL 调用方输出；成功时写入完整快照，不保存指针。
+ * @return 复制成功返回 ESP_OK；stats 为 NULL 返回 ESP_ERR_INVALID_ARG。
+ * 调用方式：任务低频读取本地日志发送健康度；成功不表示对端收到任何帧。
+ * 线程约束：短暂持有 s_log_tx_lock，不阻塞等待 BLE；禁止硬件 ISR。
+ */
+esp_err_t s3_ble_get_log_notify_stats(s3_ble_log_notify_stats_t *stats)
 {
-    return s_ble_notify_fail_count;
+    s3_ble_log_tx_stats_t snapshot;
+
+    if (stats == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    portENTER_CRITICAL(&s_log_tx_lock);
+    s3_ble_log_tx_get_stats(&s_log_tx, &snapshot);
+    portEXIT_CRITICAL(&s_log_tx_lock);
+
+    stats->queued = snapshot.queued;
+    stats->sent_frames = snapshot.sent_frames;
+    stats->sent_chunks = snapshot.sent_chunks;
+    stats->drop_normal = snapshot.drop_normal;
+    stats->drop_critical = snapshot.drop_critical;
+    stats->send_fail = snapshot.send_fail;
+    stats->congest_events = snapshot.congest_events;
+    stats->partial_drop = snapshot.partial_drop;
+    stats->current_depth = snapshot.current_depth;
+    stats->high_watermark = snapshot.high_watermark;
+    return ESP_OK;
 }
 
+/**
+ * @brief 在统一临界区内复制最近一次 GATT 断开原因和饱和累计次数。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（函数契约补充）。
+ * @param info 非 NULL 调用方输出；成功时写入 valid、原始 reason 和累计 count，不保存指针。
+ * @return 复制成功返回 ESP_OK；info 为 NULL 返回 ESP_ERR_INVALID_ARG。
+ * 调用方式：任务低频诊断读取；valid=false 时不得解释 reason 字段。
+ * 线程约束：短暂持有 s_log_tx_lock，不清零状态；禁止硬件 ISR。
+ */
+esp_err_t s3_ble_get_disconnect_info(s3_ble_disconnect_info_t *info)
+{
+    if (info == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    portENTER_CRITICAL(&s_log_tx_lock);
+    info->valid = s_disconnect_info_valid;
+    info->reason = s_last_disconnect_reason;
+    info->count = s_disconnect_count;
+    portEXIT_CRITICAL(&s_log_tx_lock);
+    return ESP_OK;
+}
+
+/**
+ * @brief 读取 FFE2/FFE3 底层通知提交失败的累计诊断计数。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（函数契约补充）。
+ * 传入参数：无。
+ * @return 自启动以来 FFE2/FFE3 GATT 提交失败的饱和快照，读取不清零；前置错误和队列 drop 不计入。
+ * 调用方式：仅作低频健康诊断，不能用该值确认某一通知成功或失败。
+ * 线程约束：短临界区读取；禁止从 ISR 用作控制判据。
+ */
+uint32_t s3_ble_get_notify_fail_count(void)
+{
+    uint32_t count;
+
+    portENTER_CRITICAL(&s_log_tx_lock);
+    count = s_ble_notify_fail_count;
+    portEXIT_CRITICAL(&s_log_tx_lock);
+    return count;
+}
+
+/**
+ * @brief 注册或清除 FFE2 ready 边沿回调，并在当前已 ready 时同步补发一次。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（函数契约补充）。
+ * @param callback ready 回调；NULL 表示清除。
+ * @param context 原样借用并传给 callback，不转移所有权；允许 NULL，生命周期须覆盖注册期及在途回调。
+ * @return 当前实现固定返回 ESP_OK。
+ * 调用方式：优先在 BLE 初始化/连接前注册；若调用时已经 ready，回调会在本函数返回前同步执行。
+ * 线程约束：注册字段无锁更新；边沿回调通常在 GATT 上下文，同步补发则在注册调用者上下文，回调不得阻塞且不得假定固定线程。
+ */
 esp_err_t s3_ble_set_ready_callback(s3_ble_ready_callback_t callback,
                                     void *context)
 {
@@ -590,6 +926,16 @@ esp_err_t s3_ble_set_ready_callback(s3_ble_ready_callback_t callback,
     return ESP_OK;
 }
 
+/**
+ * @brief 注册或清除 GATT 断开同步回调。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（函数契约补充）。
+ * @param callback 断开回调；NULL 表示清除。
+ * @param context 原样借用并传给 callback，不转移所有权；允许 NULL，生命周期须覆盖注册期。
+ * @return 当前实现固定返回 ESP_OK。
+ * 调用方式：由 smartcar_service 初始化阶段注册；回调只应撤销会话/置位或入队，真正停机由服务任务完成。
+ * 线程约束：注册字段无锁更新，应与 GATT 事件串行；回调运行于 Bluedroid GATT 上下文，禁止阻塞或直接驱动硬件。
+ */
 esp_err_t s3_ble_set_disconnect_callback(s3_ble_disconnect_callback_t callback,
                                          void *context)
 {
@@ -598,11 +944,31 @@ esp_err_t s3_ble_set_disconnect_callback(s3_ble_disconnect_callback_t callback,
     return ESP_OK;
 }
 
+/**
+ * @brief 兼容旧调用方的 FFE2 发送包装，行为等同 s3_ble_notify_send()。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（函数契约补充）。
+ * @param data 只读完整 App 帧，发送提交期间有效。
+ * @param len 待发字节数，范围为 1..S3_BLE_MAX_RX_LEN。
+ * @return 原样返回 s3_ble_notify_send() 的参数、状态或底层提交结果。
+ * 调用方式：仅供历史调用点迁移；新代码使用主接口并处理失败。
+ * 线程约束：继承主接口约束；禁止硬件 ISR，并避免并发通知分片交织。
+ */
 esp_err_t s3_ble_send(const uint8_t *data, uint16_t len)
 {
     return s3_ble_notify_send(data, len);
 }
 
+/**
+ * @brief 原子替换或清除唯一 FFE1 写入消费者及其上下文。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（函数契约补充）。
+ * @param callback FFE1 同步消费者；NULL 表示清除当前消费者。
+ * @param context 原样借用并传给 callback，不转移所有权；允许 NULL。
+ * @return 当前实现固定返回 ESP_OK。
+ * 调用方式：smartcar_service 创建 RX 队列后注册；消费者必须在回调返回前复制 GATT 数据。
+ * 线程约束：指针对在 portMUX 临界区内更新；已被 GATT 路径快照的旧回调仍可能在本函数返回后执行，释放旧 context 前必须自行协调，禁止 ISR 注册。
+ */
 esp_err_t s3_ble_register_rx_callback(s3_ble_rx_callback_t callback,
                                       void *context)
 {
@@ -613,6 +979,16 @@ esp_err_t s3_ble_register_rx_callback(s3_ble_rx_callback_t callback,
     return ESP_OK;
 }
 
+/**
+ * @brief 兼容旧名称的 FFE1 消费者注册包装。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（函数契约补充）。
+ * @param callback FFE1 同步消费者；NULL 表示清除。
+ * @param context 回调借用上下文，允许 NULL，不转移所有权。
+ * @return 原样返回 s3_ble_register_rx_callback()，当前固定为 ESP_OK。
+ * 调用方式：仅供旧调用点兼容，新代码使用 s3_ble_register_rx_callback()。
+ * 线程约束：继承主注册接口的临界区和在途回调生命周期约束；禁止 ISR 注册。
+ */
 esp_err_t s3_ble_set_rx_callback(s3_ble_rx_callback_t callback, void *context)
 {
     return s3_ble_register_rx_callback(callback, context);

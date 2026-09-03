@@ -4,6 +4,14 @@
 > 当前 UART2 活动协议已迁移到 `Common/SRP/`；本文中的旧协议名称和路径
 > 仅用于解释当时的审计证据，不得作为现行实现或构建依据。
 
+> 2026-08-31 已针对当前 SRPv4 工作树启动第 13-17 轮增量审计，
+> 方法、范围和完成条件见第 11 节。冲突时以该增量计划和当前源码为准。
+
+> 用户随后要求再增加 10 轮；第 18-27 轮深化计划见第 12 节。
+> 用户再次增加 10 轮；第 28-37 轮深化计划见第 13 节。
+> 用户继续增加 10 轮；第 38-47 轮深化计划见第 14 节。
+> 它不替换旧快照，但对当前脏工作树的结论优先级最高。
+
 > 日期：2026-08-29  
 > 审计对象：当前工作树 `STM32H757/`、`ESPS3/` 及其实际共享协议依赖  
 > 审计性质：只读静态审计与目标架构规划  
@@ -101,7 +109,7 @@
 
 | 等级 | 判定标准 |
 |---|---|
-| Critical | 可现实触发不受控运动、系统性内存破坏或绕过最终安全权 |
+| Critical | 可现实触发不受控运动、系统性内存破坏、绕过最终安全权，或确认活动秘密已进入受跟踪仓库/历史并需立即轮换 |
 | High | 可能导致死锁、持续错误输出、关键任务饿死、失联不停车或关键恢复失败 |
 | Medium | 明显降低实时性、可靠性、效率、扩展安全性或长期可维护性 |
 | Low | 局部一致性、诊断、测试或文档质量问题 |
@@ -247,3 +255,138 @@
 - 双核建议说明“为何最优、依赖哪些未测数据、如何迁移和如何回退”。
 - 总报告明确列出审计排除项、未执行的构建/硬件测试和残余风险。
 - 最终 Git 状态证明本任务没有修改任何源代码。
+
+## 11. 2026-08-31 当前 SRPv4 五轮增量审计
+
+### 11.1 快照与边界
+
+- 分支：`codex/s3-stm-cn-comments`。
+- 基准 HEAD：`f703453727a136d15ff7cacea4530beab6e9c08a`。
+- 当前活动 STM-S3 UART2 合同：`Common/SRP/` 的 SRPv4；旧 `Common/SCBP_CAN/` 结论只保留为历史。
+- 工作区已有大量其他任务的未提交修改；增量审计不回滚、不归因、不提交。
+- 仅允许修改本审计 Markdown；不构建、不烧录、不连接 UART/BLE/Wi-Fi、不运行车辆。
+
+### 11.2 第 13-17 轮
+
+| 轮次 | 主题 | 核心输出 | 状态 |
+|---:|---|---|---|
+| 13 | SRPv4、ACK/重试、同步、CM7 控制与安全 | 活动构建图、chassis/MotorBoard/姿态门和链路状态 | complete |
+| 14 | CM4 启动、D2 内存、RTOS/IPC 和 owner | 双核启用阻断项、物理别名与迁移边界 | complete |
+| 15 | S3 UART、BLE、雷达、Wi-Fi/TCP 和资源 | 断连顺序、RX 不连续、BLE 拥塞、TCP deadline 和本机配置 | complete |
+| 16 | App-S3-STM、ROS2、控制权与失联停机 | 急停编码、V1/V2 租约、失联链和 ROS2 安全边界 | complete |
+| 17 | RTOS/栈/调试配置、文档一致性与终审 | 任务清单、可复现构建、文档漂移和最终边界检查 | complete |
+
+### 11.3 增量完成条件
+
+- 每轮都回到当前源码/CMake/Kconfig/链接脚本并标注静态证据等级。
+- 所有 High 项都给出修改位置、原因、最小内容、潜在影响和分层验证方法，但本轮不实施。
+- 总报告追加当前 SRPv4 章节，不把迁移前 SCBP 章节伪装成现行事实。
+- 执行 Markdown `git diff --check`、路径/行号复核和最终写入边界检查。
+- 终稿明确未执行构建、烧录、目标板、UART/BLE/Wi-Fi 和车辆验收。
+
+## 12. 2026-08-31 当前 SRPv4 第 18-27 轮深化审计
+
+### 12.1 方法与边界
+
+- 快照仍为分支 `codex/s3-stm-cn-comments`、HEAD `f703453727a136d15ff7cacea4530beab6e9c08a`；终稿前重查关键脏源码哈希和行号。
+- 每轮需有独立输入、新证据、旧结论修正或关闭记录；不以重复第 13-17 轮文字充数。
+- 允许读取锁定的 ESP-IDF 5.5.4 依赖源来验证 API 语义，但不审计第三方库本身的通用正确性。
+- 仍只修改审计 Markdown；不构建、测试、烧录、抓包、连接设备或运行车辆。
+
+### 12.2 第 18-27 轮
+
+| 轮次 | 主题 | 独立核心输出 | 状态 |
+|---:|---|---|---|
+| 18 | 构建图/clean checkout | 未跟踪头、S3 target、secret 模板、死 CMake/cache、重复 BSP test | complete |
+| 19 | SRPv4 对抗输入 | BUS_OFF stop/recover、retry 上限、ACK/epoch/replay、callback 重入、半帧超时 | complete |
+| 20 | STM/S3 UART/DMA | S3 无界 TX 入队、两端 discontinuity、CM7 recover/TX 并发、回滚/诊断 | complete |
+| 21 | motion owner/lease | App 急停、BLE connection epoch、V1/V2 deadman、CM7 统一 gate、chassis 启动 | complete |
+| 22 | MotorBoard 闭环 | RUNNING 门、MSPD watchdog、动态 dt、物理优先 stop 和冻结轮序/几何 | complete |
+| 23 | 传感器/DualAHRS | atomic snapshot、BMI dynamic health/recovery、sensor-to-body 合同、旧 IMU 结论关闭 | complete |
+| 24 | RTOS/资源/watchdog | S3 10 ms 调度粒度、task WDT 覆盖、两端 partial-start admission | complete |
+| 25 | BLE/session/TX | App GATT-ready 盲控窗口、with-response 完成、GATT 1032/517 合同、BLE lifecycle/TX owner | complete |
+| 26 | radar/S3RD/ROS2 | TCP 认证/DoS、跨端 stale 漏洞、S3/ROS 时钟合同、默认安全边界 | complete |
+| 27 | 跨域终审 | liveness/lease 矩阵、发布/车辆/双核/ROS2 停止门、文档漂移和结论去重 | complete |
+
+### 12.3 完成条件
+
+- 详细证据写入 `.planning/stm-s3-full-audit-20260829/round18-27-current.md`，正式报告只保留高优先级发现、结论修正和最小修复/验证门。
+- 所有建议列出修改位置、原因、最小内容、潜在影响和分层验证；不在本审计实施。
+- 区分 tracked 默认、ignored 本机配置、旧 build/cache 和当前源码，不复制本地秘密。
+- 重新执行关键行号/哈希、本地链接、状态标记、`git diff --check` 和 Git 写入边界检查。
+- 终稿明确没有 clean build、匹配镜像、物理链路、RTOS 实测或车辆验收证据。
+
+## 13. 2026-08-31 当前 SRPv4 第 28-37 轮深化审计
+
+### 13.1 方法与只读边界
+
+- 快照仍为 `codex/s3-stm-cn-comments` / `f703453727a136d15ff7cacea4530beab6e9c08a`，结论覆盖该 HEAD 上的当前脏工作树，不代表 release tag。
+- 只修改本审计 Markdown；不修改/格式化/回滚/提交固件、App、配置、生成物或构建产物，不运行 build/test/flash/capture/vehicle 命令。
+- 第 28-37 轮必须覆盖前两组十轮未单独展开的 ABI、并发、时间、错误传播、复杂度、ISR、安全、UI、测试和终审角度；旧发现只能作为交叉验证，不重复计数。
+- 若发现秘密，只允许记录路径、条目数量、相等关系、Git 提交/refs 和处置状态；禁止把 SSID、password、token、可逆编码或可用于离线猜测的摘要写入报告。
+
+### 13.2 第 28-37 轮
+
+| 轮次 | 主题 | 独立核心输出 | 状态 |
+|---:|---|---|---|
+| 28 | ABI/序列化 | App type 表漂移、logical struct packing、S3RD 多份真值、binary32 合同 | complete |
+| 29 | 并发/锁/callback | BLE callback 跨 owner、MotorBoard 长 critical、link callback 重入、BLE epoch snapshot | complete |
+| 30 | 时间/回绕 | DWT 多回绕、V2 32-bit sequence、boot timing 哨兵及已确认 wrap-safe 路径 | complete |
+| 31 | 错误传播/关联 | PID/SYS_CONFIG callback context、coalesce 结果、V1 ACK、fast response/log 返回值 | complete |
+| 32 | 内存/复杂度 | ROS O(n²) resync/长度上限、App queue/disk 上界、CM7 调试栈 | complete |
+| 33 | ISR/DMA/WCET | USART2 ISR/critical 叠加；FFE3 CCC 向自身 BTC queue 无限等待回投 | complete |
+| 34 | secret/固件/BLE/network | 公开 tracked/产物凭据、secure boot/flash encryption、BLE/App identity、日志隐私 | complete |
+| 35 | App/UI/lifecycle | readiness、分阶段反馈、PID transaction、hide/terminate zero 边界 | complete |
+| 36 | test/CI/reproducibility | App 必需源未跟踪、motion/fault 测试空白、无 CI/产物溯源 | complete |
+| 37 | 跨域终审 | 根因去重、S0/R0/P0/M0/T0/N0/D0/V0 独立停止门、CM4 建议复核 | complete |
+
+### 13.3 安全事件与验收门
+
+| 门 | 目标 | 静态审计后的动作 |
+|---|---|---|
+| S0 secret incident | 撤销已进入 HEAD/history 的活动凭据，扫描全部 refs/artifacts/caches | 先轮换/撤销；history rewrite 必须另行授权并协调所有 clone/远端 |
+| R0 release | clean checkout 源图、固定 target/security profile、可追溯产物 | 当前脏树只作开发快照，不签 release |
+| P0 protocol | ACK/replay/epoch/context/callback/wrap/fault test 闭环 | 未通过前不开放产品 motion/动态 baud |
+| M0 motion | App-S3-CM7-MotorBoard 分层 lease、最终非零准入和物理优先 stop | 未通过前不进入车辆运动验收 |
+| T0 realtime | ISR/critical WCET、HWM/heap/queue/ring 实测 | 未量测不声明时延或资源余量 |
+| N0 ROS2 live | 认证、新鲜度、client/frame deadline、时间映射 | 保持 `transport: unconfigured` 或受控 PoC/replay |
+| D0 CM4 | boot/物理内存/CM4F RTOS/mailbox/cache/reset/heartbeat/单核回退 | 保持 CM7-only；CM4 首阶段仅 no-op + heartbeat |
+| V0 vehicle | 前置门通过且匹配镜像完成分阶段台架/实车签收 | 源码/构建绿灯不得替代车辆 READY |
+
+### 13.4 完成条件
+
+- 详细证据写入 `.planning/stm-s3-full-audit-20260829/round28-37-current.md`；正式报告第 18 节只保留 Critical/High、根因族、最小建议和验收门。
+- 所有 Critical/High 结论在终稿快照复查路径、行号或 Git 关系；秘密复核不得显示原值。
+- 关键源码哈希、本地 Markdown 链接、轮次/状态、`git diff --check` 和 audit-only 写入边界通过。
+- 明确本轮没有 build、host test、烧录、eFuse/option-byte 读取、UART/BLE/TCP 抓取、RTOS/WCET 量测、目标板或车辆验收。
+
+## 14. 2026-08-31 当前 SRPv4 第 38-47 轮深化审计
+
+### 14.1 方法与边界
+
+- 起始快照为 `codex/s3-stm-cn-comments` / `f703453727a136d15ff7cacea4530beab6e9c08a` / status 151项；同一HEAD下脏源码可继续漂移，终稿重拍行号与非secret hash。
+- 只修改本审计Markdown；不修改/格式化/回滚/提交源码、App、配置、secret、生成物或构建产物，不运行build/test/flash/capture/vehicle。
+- 已知公开secret事件保持S0阻断，本十轮禁止读取/输出值，只允许记录路径、数量、命中/处置状态。
+- 每轮必须提供新证据、独立关闭或纠偏，不重复前37轮的ACK/lease/BUS_OFF/watchdog文字充数。
+
+### 14.2 第38-47轮
+
+| 轮次 | 主题 | 独立核心输出 | 状态 |
+|---:|---|---|---|
+| 38 | compiler/UB/转换 | fault strict alias、ROS窄化、C/C++ header、vendor lock UB、诊断profile | complete |
+| 39 | reset/brownout/re-arm | peer boot epoch、earliest physical stop、reset cause、retained fault交付 | complete |
+| 40 | persistence/OTA | NVS整擦、OTA rollback owner、分区表、App session原子完成 | complete |
+| 41 | control numeric | heading min-wheel对requested/applied linear speed的改写 | complete |
+| 42 | sensor/cal evidence | timestamp/quality保护、cal-result端到端合同、新odometry时间对齐 | complete |
+| 43 | lifecycle/rollback | STM UART、uplink、service staged init与重试资源守恒 | complete |
+| 44 | parser budget | MotorBoard ACK相关性、Swift parser容量/复杂度及固定容量保护 | complete |
+| 45 | diagnostic truth | wheel source freshness、ONLINE/READY、counter/snapshot/log loss语义 | complete |
+| 46 | supply chain | ROS/GCC锁定、LICENSE/SBOM、YDLidar provenance、generator环境 | complete |
+| 47 | cross-domain closeout | 33项去重、停止门更新、冻结合同与CM4结论 | complete |
+
+### 14.3 完成条件
+
+- 详细证据写入 `.planning/stm-s3-full-audit-20260829/round38-47-current.md`；正式报告第19节保留带High等级发现、关键Medium根因、建议与停止门。
+- 所有High/Medium-High在最终工作树重新定位；33项统计、轮次、计划/报告/findings/progress/task plan一致。
+- secret字面量审计文档命中0，本地Markdown链接、非secret关键源码hash、状态、`git diff --check`和audit-only写入边界通过。
+- 明确没有O0/Os build、sanitizer/fuzz、NVS/OTA/掉电/reset、UART/BLE/TCP、目标板或车辆验收证据。

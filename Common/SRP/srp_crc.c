@@ -1,5 +1,7 @@
 #include "srp_crc.h"
 
+/* SRP CRC 纯函数实现；创建人：待确认（当前维护人：Zhiqin）。 */
+
 static const uint16_t s_ccitt_nibble_table[16] = {
     UINT16_C(0x0000), UINT16_C(0x1021), UINT16_C(0x2042), UINT16_C(0x3063),
     UINT16_C(0x4084), UINT16_C(0x50A5), UINT16_C(0x60C6), UINT16_C(0x70E7),
@@ -7,6 +9,7 @@ static const uint16_t s_ccitt_nibble_table[16] = {
     UINT16_C(0xC18C), UINT16_C(0xD1AD), UINT16_C(0xE1CE), UINT16_C(0xF1EF)
 };
 
+/** 计算 CCITT-FALSE；输入为空时返回初始化值，非法指针返回 0。 */
 uint16_t srp_crc16_ccitt_false(const uint8_t *data, size_t length)
 {
     uint16_t crc = UINT16_C(0xFFFF);
@@ -22,6 +25,7 @@ uint16_t srp_crc16_ccitt_false(const uint8_t *data, size_t length)
     return crc;
 }
 
+/** 计算 MODBUS CRC；输入为空时返回初始化值，非法指针返回 0。 */
 uint16_t srp_crc16_modbus(const uint8_t *data, size_t length)
 {
     uint16_t crc = UINT16_C(0xFFFF);

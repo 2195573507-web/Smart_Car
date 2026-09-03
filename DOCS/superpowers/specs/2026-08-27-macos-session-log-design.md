@@ -2,9 +2,9 @@
 
 ## 状态
 
-- 状态：已获用户确认，待实施
-- 范围：`SmartCar_Control_MAC` 的 BLE Session 日志持久化、连接时 UI 日志清空和日志页状态入口
-- 不包含：BLE UUID、FFE3 数据格式、日志解析器、S3/STM32 固件或车辆控制逻辑修改
+- 状态：已实现，主机验证通过；真实 BLE/FFE3 文件写入仍待设备验证
+- 范围：`IOS_APP/SmartCar_Control_MAC` 的 BLE Session 日志持久化、连接时 UI 日志清空和日志页状态入口
+- 不包含：BLE UUID、FFE3 数据格式、S3/STM32 固件或车辆控制逻辑修改
 
 ## 目标与约束
 
@@ -70,14 +70,13 @@ BLEManager didDisconnectPeripheral
 修改：
 
 - `BLE/BLEManager.swift`：持有 writer；在 `didConnect` 建立 Session 并清空两个 UI store；每个已解析 FFE3 `SmartCarLogRecord` 送入 writer；在断开回调和显式断开路径安全关闭。对 SwiftUI 公开只读当前文件名和写入错误状态。
-- `ViewModels/SmartCarViewModel.swift`：透传当前录制文件名，供两个开发者日志页使用；不改变连接、运动或协议状态逻辑。
 - `UI/LoggerSTMView.swift`、`UI/LoggerS3View.swift`、`UI/DeviceLogView.swift`：把当前录制文件名传入日志工具栏/状态栏，并增加 Finder 打开固定 `LOG` 目录的按钮。没有活动 Session 时显示明确的未录制状态，按钮仍可打开目录。
+- `Model/SmartCarLog.swift`、`Stores/DeviceLogStore.swift`：当前自包含包内的有界解析缓冲和环形日志缓存，不依赖旧分支的 `Shared/SmartCarAppCore`。
 
 不修改：
 
-- `SmartCarLogParser`、`SmartCarLogRecord`、FFE0--FFE3 UUID 和任何 BLE 帧/协议定义。
+- `SmartCarLogRecord`、FFE0--FFE3 UUID 和任何 BLE 帧/协议定义。
 - S3、STM32、CM7、GPIO、DMA、RTOS 和安全控制代码。
-- `DeviceLogStore` 的容量/批量发布策略以及现有 Copy/Export TXT 操作。
 
 ## 文件内容与错误策略
 
@@ -116,6 +115,8 @@ BLEManager didDisconnectPeripheral
 - 已打包 App：运行 `./script/build_and_run.sh --verify`，确认 staged bundle 能启动。
 - 静态检查：确认文件名格式、目录创建、头部精确文本、FFE3 record 追加、来源标签、断开关闭和 UI folder reveal 调用均在目标文件中。
 - 手工 macOS 验证：连接已可用的 `SmartCar_S3` 后确认 UI 两个 store 清空、`LOG/` 生成一个新 `.md`、文件包含头部和后续 FFE3 文本；断开后确认文件可以读取和重命名，表明句柄已关闭。
+
+当前实现另外对同一秒内的重连文件名增加后缀，避免覆盖已有 Session；解析器和 Store 使用有界缓存。
 
 ### 证据限制
 

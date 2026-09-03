@@ -278,7 +278,7 @@ private struct VirtualJoystick: View {
     @ObservedObject var viewModel: SmartCarViewModel
     @Environment(\.locale) private var locale
     @State private var translation: CGSize = .zero
-    @State private var activeCommand: SmartCarProtocol.ControlCommand?
+    @State private var lastInput: JoystickIntent?
 
     var body: some View {
         GeometryReader { geometry in
@@ -298,17 +298,18 @@ private struct VirtualJoystick: View {
                 DragGesture(minimumDistance: 0)
                     .onChanged { value in
                         translation = value.translation
-                        let command = command(for: value.translation)
-                        if command != activeCommand {
-                            activeCommand = command
-                            viewModel.setJoystickCommand(command)
+                        let input = input(for: value.translation, limit: limit)
+                        if input != lastInput {
+                            lastInput = input
+                            viewModel.setJoystickInput(input)
                         }
                     }
                     .onEnded { _ in
+                        let hadActiveInput = lastInput.map { !$0.isNeutral } ?? false
                         translation = .zero
-                        if activeCommand != nil {
-                            activeCommand = nil
-                            viewModel.setJoystickCommand(nil)
+                        lastInput = nil
+                        if hadActiveInput {
+                            viewModel.setJoystickInput(.neutral)
                         }
                     }
             )
@@ -317,13 +318,20 @@ private struct VirtualJoystick: View {
         .accessibilityLabel(AppStrings.text("accessibility.drive_joystick", locale: locale))
     }
 
-    private func command(for translation: CGSize) -> SmartCarProtocol.ControlCommand? {
-        let threshold: CGFloat = 18
-        guard max(abs(translation.width), abs(translation.height)) >= threshold else { return nil }
-        if abs(translation.width) > abs(translation.height) {
-            return translation.width < 0 ? .turnLeft : .turnRight
-        }
-        return translation.height < 0 ? .moveForward : .moveBack
+    private func input(for translation: CGSize, limit: CGFloat) -> JoystickIntent {
+        JoystickIntent(
+            horizontal: Float(normalizedAxis(translation.width, limit: limit)),
+            vertical: Float(normalizedAxis(translation.height, limit: limit))
+        )
+    }
+
+    private func normalizedAxis(_ value: CGFloat, limit: CGFloat) -> CGFloat {
+        let deadZone: CGFloat = 18
+        let clamped = min(max(value, -limit), limit)
+        let magnitude = abs(clamped)
+        guard limit > deadZone, magnitude > deadZone else { return 0 }
+        let normalized = min(1, (magnitude - deadZone) / (limit - deadZone))
+        return clamped < 0 ? -normalized : normalized
     }
 }
 

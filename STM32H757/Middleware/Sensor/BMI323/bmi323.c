@@ -1,5 +1,7 @@
 #include "bmi323.h"
 
+/* BMI323 驱动实现；创建人：待确认（当前维护人：Zhiqin）。 */
+
 #include <stddef.h>
 #include <stdio.h>
 
@@ -44,6 +46,15 @@ static bmi323_diag_t bmi323_diag = {
     .spi_status = UINT8_MAX
 };
 
+/**
+ * @brief 将采样率枚举映射为 BMI323 配置寄存器的 ODR 位编码。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * @param[in] sample_rate 待转换的采样率枚举；无效值按当前实现回退为 100 Hz 编码。
+ * @return 对应的 ODR 位编码；本函数不报告失败，也不修改调用方对象。
+ * 调用方式：由 bmi323_build_config() 和 bmi323_apply_sample_rate() 在组装配置值时同步调用。
+ * 线程约束：纯计算，不阻塞、不使用 mutex；当前仅在任务路径调用，未设计为 ISR 接口；不取得参数所有权。
+ */
 static uint16_t bmi323_odr_code(bmi323_sample_rate_t sample_rate)
 {
     switch (sample_rate) {
@@ -55,6 +66,15 @@ static uint16_t bmi323_odr_code(bmi323_sample_rate_t sample_rate)
     }
 }
 
+/**
+ * @brief 检查采样率是否属于驱动支持的 100/200/400/800 Hz 集合。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * @param[in] sample_rate 待校验的采样率枚举。
+ * @return 支持时返回 1，否则返回 0；无副作用，不涉及输出保持问题。
+ * 调用方式：由 bmi323_set_sample_rate() 在修改软件状态或硬件寄存器前调用。
+ * 线程约束：纯计算，不阻塞、不使用 mutex；当前仅在任务路径调用，未设计为 ISR 接口；不取得参数所有权。
+ */
 static uint8_t bmi323_sample_rate_valid(bmi323_sample_rate_t sample_rate)
 {
     return sample_rate == BMI323_SAMPLE_RATE_100HZ ||
@@ -65,6 +85,17 @@ static uint8_t bmi323_sample_rate_valid(bmi323_sample_rate_t sample_rate)
                : 0U;
 }
 
+/**
+ * @brief 以既有量程/带宽基础值和指定 ODR 组装两字节小端配置。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * @param[in] sample_rate 目标采样率；无效值经 bmi323_odr_code() 回退为 100 Hz。
+ * @param[in] base_config 保留除 ODR 字段外的配置基础值。
+ * @param[out] config 接收低字节和高字节的两字节缓冲；必须非 NULL 且至少可写 2 字节。
+ * @return 无返回值；当前实现不校验 config，前置条件不满足时输出语义未定义。
+ * 调用方式：由 bmi323_init() 和 bmi323_apply_sample_rate() 使用栈上两字节数组调用。
+ * 线程约束：纯计算，不阻塞、不使用 mutex；当前仅在任务路径调用，未设计为 ISR 接口；缓冲仅借用且不保留所有权。
+ */
 static void bmi323_build_config(bmi323_sample_rate_t sample_rate,
                                 uint16_t base_config, uint8_t config[2])
 {
@@ -75,6 +106,16 @@ static void bmi323_build_config(bmi323_sample_rate_t sample_rate,
     config[1] = (uint8_t)(value >> 8U);
 }
 
+/**
+ * @brief 通过现有 UART 日志通道发送一条短诊断文本。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * @param[in] line 以 NUL 结尾的待发送文本；NULL 时静默跳过。
+ * @return 无返回值；UART 写入结果被丢弃，发送失败不会修改调用方缓冲。
+ * 调用方式：由本文件初始化、探针和错误记录路径同步调用。
+ * 线程约束：uart_log_write() 最多阻塞 BMI323_LOG_TIMEOUT_MS，且不使用本文件 mutex。
+ *           禁止 ISR；字符串仅在调用期间借用，不转移所有权。
+ */
 static void bmi323_log_short(const char *line)
 {
     if (line != NULL) {
@@ -82,6 +123,15 @@ static void bmi323_log_short(const char *line)
     }
 }
 
+/**
+ * @brief 将初始化错误格式化为紧凑的 `[BMI][E1]` 诊断记录。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * @param[in] error 初始化错误；NONE 按当前实现替换为 WHO_AM_I_READ。
+ * @return 无返回值；格式化或 UART 发送失败不向上层报告，也不改变错误状态。
+ * 调用方式：仅由 bmi323_init_fail() 在初始化失败收口时同步调用。
+ * 线程约束：间接 UART 写入最多阻塞 BMI323_LOG_TIMEOUT_MS，无 mutex，禁止 ISR 调用；无指针所有权转移。
+ */
 static void bmi323_log_init_fail(bmi323_error_t error)
 {
     char line[64];
@@ -93,6 +143,16 @@ static void bmi323_log_init_fail(bmi323_error_t error)
     bmi323_log_short(line);
 }
 
+/**
+ * @brief 对诊断计数器执行饱和加一。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * @param[in,out] counter 待更新计数器；NULL 或已为 UINT32_MAX 时保持原值。
+ * @return 无返回值；无失败上报，不能更新时输出保持不变。
+ * 调用方式：由 SPI、读写、WHO_AM_I 和采样统计路径直接调用。
+ * 线程约束：不阻塞、不使用 mutex，读改写不是原子操作。
+ *           禁止任务或 ISR 并发更新同一计数器；指针仅在调用期间借用。
+ */
 static void bmi323_increment_counter(uint32_t *counter)
 {
     if (counter != NULL && *counter != UINT32_MAX) {
@@ -100,18 +160,49 @@ static void bmi323_increment_counter(uint32_t *counter)
     }
 }
 
+/**
+ * @brief 同步增加通用 SPI 错误的两个兼容诊断计数器。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * 传入参数：无。
+ * @return 无返回值；计数器达到 UINT32_MAX 后保持饱和。
+ * 调用方式：由寄存器传输、初始化和原始探针的失败分支调用。
+ * 线程约束：不阻塞、不使用 mutex，内部计数更新不是原子操作。
+ *           禁止任务与 ISR 并发，多个任务之间也不得并发调用；不涉及外部对象所有权。
+ */
 static void bmi323_record_spi_error(void)
 {
     bmi323_increment_counter(&bmi323_diagnostics.spi_error_count);
     bmi323_increment_counter(&bmi323_diagnostics.spi_error);
 }
 
+/**
+ * @brief 同时更新驱动最近错误和诊断快照中的最近错误字段。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * @param[in] error 要记录的错误枚举。
+ * @return 无返回值；赋值本身无失败路径，其他诊断字段保持不变。
+ * 调用方式：由参数校验、SPI 失败、配置失败和初始化失败路径调用。
+ * 线程约束：不阻塞、不使用 mutex；共享状态写入未同步，禁止 ISR 或多个任务并发调用；不涉及指针所有权。
+ */
 static void bmi323_set_error(bmi323_error_t error)
 {
     bmi323_last_error = error;
     bmi323_diagnostics.last_error = error;
 }
 
+/**
+ * @brief 捕获首次 WHO_AM_I 原始事务，并刷新最近一次接收字节诊断。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * @param[in] reg 本次读取的寄存器；非 WHO_AM_I 时不更新任何状态。
+ * @param[in] tx 事务发送缓冲；必须至少覆盖 min(length, BMI323_SPI_RAW_BYTES) 字节，NULL 时不更新。
+ * @param[in] rx 事务接收缓冲；必须至少覆盖 min(length, BMI323_SPI_RAW_BYTES) 字节，NULL 时不更新。
+ * @param[in] length 事务字节数；实际最多复制和解析前 BMI323_SPI_RAW_BYTES 字节。
+ * @return 无返回值；寄存器或指针无效时所有诊断输出保持原值。
+ * 调用方式：由 bmi323_read_reg() 和 bmi323_spi_probe() 在事务结束后同步调用。
+ * 线程约束：不阻塞、不使用 mutex；会写多个共享诊断字段，禁止 ISR/多任务并发调用；tx/rx 仅借用且不保留所有权。
+ */
 static void bmi323_capture_whoami_raw(uint8_t reg, const uint8_t *tx,
                                       const uint8_t *rx, uint16_t length)
 {
@@ -144,6 +235,16 @@ static void bmi323_capture_whoami_raw(uint8_t reg, const uint8_t *tx,
     bmi323_diagnostics.last_whoami = bmi323_diagnostics.last_rx2;
 }
 
+/**
+ * @brief 将 BMI323 错误枚举转换为固定诊断名称。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * @param[in] error 待转换的错误枚举。
+ * @return 指向只读静态字符串的借用指针；NONE 和未知值均返回 "NONE"，不会返回 NULL。
+ * 调用方式：由 bmi323_log_debug() 和 bmi323_log_init() 格式化日志时调用。
+ * 线程约束：纯查询、可重入，不阻塞也不使用 mutex；当前仅由任务日志路径调用。
+ *           返回字符串为只读静态存储，调用方不得修改或释放。
+ */
 static const char *bmi323_error_name(bmi323_error_t error)
 {
     switch (error) {
@@ -165,6 +266,16 @@ static const char *bmi323_error_name(bmi323_error_t error)
     }
 }
 
+/**
+ * @brief 将当前 BMI323 在线状态和累计诊断字段输出为多行调试记录。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * 传入参数：无。
+ * @return 无返回值；snprintf 截断或 UART 失败均不向上层报告，诊断状态保持不变。
+ * 调用方式：由 bmi323_init() 成功路径及 bmi323_init_fail() 失败收口调用。
+ * 线程约束：UART 写入最多阻塞 BMI323_LOG_TIMEOUT_MS，且不使用 mutex。
+ *           并发写入可能使诊断快照不一致；禁止 ISR；无所有权转移。
+ */
 static void bmi323_log_debug(void)
 {
     char line[256];
@@ -204,6 +315,15 @@ static void bmi323_log_debug(void)
     (void)uart_log_write(line, BMI323_LOG_TIMEOUT_MS);
 }
 
+/**
+ * @brief 输出 WHO_AM_I、初始化状态和 ACC/GYR ODR 配置摘要。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * 传入参数：无。
+ * @return 无返回值；两次 UART 写入结果均被忽略，不改变驱动或诊断状态。
+ * 调用方式：由 bmi323_init() 成功路径及 bmi323_init_fail() 失败收口调用。
+ * 线程约束：最多执行两次 BMI323_LOG_TIMEOUT_MS 阻塞写入，无 mutex；禁止 ISR 调用并要求初始化路径串行；无所有权转移。
+ */
 static void bmi323_log_init(void)
 {
     char line[96];
@@ -222,6 +342,20 @@ static void bmi323_log_init(void)
     (void)uart_log_write(line, BMI323_LOG_TIMEOUT_MS);
 }
 
+/**
+ * @brief 分段输出一次底层 BMI323 原始 SPI 探针的引脚、帧和寄存器诊断。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * @param[in] test 探针序号，仅用于日志标识。
+ * @param[in] sequence 以 NUL 结尾的事务方案名称；NULL 时不输出。
+ * @param[in] tx 至少 BMI323_SPI_RAW_BYTES 字节的发送缓冲；NULL 时不输出。
+ * @param[in] rx 至少 BMI323_SPI_RAW_BYTES 字节的接收缓冲；NULL 时不输出。
+ * @param[in] diagnostics 已由 BSP 填充的原始事务诊断；NULL 时不输出。
+ * @return 无返回值；任一指针无效时静默返回，UART 失败不改变输入或探针结果。
+ * 调用方式：仅由 bmi323_spi_probe() 对三种事务方案逐次调用。
+ * 线程约束：包含多次 UART 阻塞写入，每次最长 BMI323_LOG_TIMEOUT_MS；函数没有 mutex。
+ *           禁止 ISR；所有输入均仅在调用期间借用。
+ */
 static void bmi323_log_raw_probe(uint8_t test, const char *sequence,
                                   const uint8_t tx[BMI323_SPI_RAW_BYTES],
                                   const uint8_t rx[BMI323_SPI_RAW_BYTES],
@@ -301,6 +435,17 @@ static void bmi323_log_raw_probe(uint8_t test, const char *sequence,
     bmi323_log_short(line);
 }
 
+/**
+ * @brief 统一收口 BMI323 初始化失败状态并输出失败诊断。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * @param[in] error 初始化错误；NONE 会规范化为 WHO_AM_I_READ。
+ * @param[in] status 对外诊断状态。
+ * @return 固定返回 false；失败时清除 ready、更新错误/结果字段并保留已累计的其他诊断字段。
+ * 调用方式：仅由 bmi323_init() 的端口、身份、复位和配置失败分支 return 调用。
+ * 线程约束：包含多次阻塞 UART 日志，且不使用 mutex。
+ *           必须由单一初始化任务调用；禁止 ISR 或并发初始化；不涉及指针所有权。
+ */
 static bool bmi323_init_fail(bmi323_error_t error, bmi323_diag_status_t status)
 {
     const bmi323_error_t reported_error =
@@ -316,16 +461,35 @@ static bool bmi323_init_fail(bmi323_error_t error, bmi323_diag_status_t status)
     return false;
 }
 
+/**
+ * @brief 将两个小端字节解码为有符号 16 位原始量。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * @param[in] data 至少包含 2 字节的输入缓冲，必须非 NULL。
+ * @return 解码后的 int16_t；当前实现不校验指针，前置条件不满足时无失败保护。
+ * 调用方式：由采样和温度读取路径在 SPI 成功后同步调用。
+ * 线程约束：纯计算，不阻塞、不使用 mutex；当前仅在任务路径调用，未设计为 ISR 接口；缓冲仅借用且不保留所有权。
+ */
 static int16_t bmi323_decode_s16(const uint8_t *data)
 {
     return (int16_t)((uint16_t)data[0] | ((uint16_t)data[1] << 8U));
 }
 
+/**
+ * @brief 将两个小端字节解码为无符号 16 位寄存器值。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * @param[in] data 至少包含 2 字节的输入缓冲，必须非 NULL。
+ * @return 解码后的 uint16_t；当前实现不校验指针，前置条件不满足时无失败保护。
+ * 调用方式：由初始化和 ODR 配置读回校验路径同步调用。
+ * 线程约束：纯计算，不阻塞、不使用 mutex；当前仅在任务路径调用，未设计为 ISR 接口；缓冲仅借用且不保留所有权。
+ */
 static uint16_t bmi323_decode_u16(const uint8_t *data)
 {
     return (uint16_t)data[0] | ((uint16_t)data[1] << 8U);
 }
 
+/** 读取连续寄存器；参数校验和 SPI 失败均通过 false 返回。 */
 bool bmi323_read_reg(uint8_t reg, uint8_t *data, uint16_t len)
 {
     uint8_t tx[BMI323_MAX_READ_BYTES + 2U] = {0U};
@@ -370,6 +534,7 @@ bool bmi323_read_reg(uint8_t reg, uint8_t *data, uint16_t len)
     return true;
 }
 
+/** 写入连续寄存器；调用方仍拥有输入缓冲。 */
 bool bmi323_write_reg(uint8_t reg, const uint8_t *data, uint16_t len)
 {
     uint8_t tx[BMI323_MAX_WRITE_BYTES + 1U] = {0U};
@@ -398,6 +563,18 @@ bool bmi323_write_reg(uint8_t reg, const uint8_t *data, uint16_t len)
     return true;
 }
 
+/**
+ * @brief 写入并读回校验加速度计和陀螺仪的目标 ODR 配置。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * @param[in] sample_rate 已由调用方校验的目标采样率。
+ * @return 两组寄存器均写入且读回匹配时返回 true；任一步失败返回 false 并记录错误。
+ *         失败不会回滚已经写入的前序硬件寄存器；后续诊断字段也可能只更新一部分。
+ * 调用方式：仅由 bmi323_set_sample_rate() 在设备 ready 后同步调用。
+ * 线程约束：包含带超时的阻塞 SPI 读写，且不使用 mutex。
+ *           必须由 BMI323 单一所有者任务串行调用；禁止 ISR 或并发采样。
+ *           不涉及外部缓冲所有权。
+ */
 static bool bmi323_apply_sample_rate(bmi323_sample_rate_t sample_rate)
 {
     uint8_t accel_config[2U] = {0U};
@@ -436,6 +613,7 @@ static bool bmi323_apply_sample_rate(bmi323_sample_rate_t sample_rate)
     return true;
 }
 
+/** 更新 BMI323 ODR 配置并记录诊断状态。 */
 bool bmi323_set_sample_rate(bmi323_sample_rate_t sample_rate)
 {
     const bmi323_sample_rate_t previous_rate = bmi323_sample_rate;
@@ -454,11 +632,13 @@ bool bmi323_set_sample_rate(bmi323_sample_rate_t sample_rate)
     return true;
 }
 
+/** 返回当前 ODR 配置。 */
 bmi323_sample_rate_t bmi323_get_sample_rate(void)
 {
     return bmi323_sample_rate;
 }
 
+/** 执行软复位、WHO_AM_I、配置和就绪检查。 */
 bool bmi323_init(void)
 {
     uint8_t who_am_i = 0U;
@@ -604,6 +784,7 @@ bool bmi323_init(void)
     return true;
 }
 
+/** 执行一次低速 SPI/WHO_AM_I 诊断探针。 */
 bool bmi323_spi_probe(void)
 {
     const uint8_t tx[BMI323_SPI_RAW_BYTES] = {
@@ -677,6 +858,7 @@ bool bmi323_spi_probe(void)
     return true;
 }
 
+/** 读取换算后的三轴加速度，单位 m/s^2。 */
 bool bmi323_read_accel(float *x, float *y, float *z)
 {
     uint8_t raw[6U] = {0U};
@@ -713,6 +895,7 @@ bool bmi323_read_accel(float *x, float *y, float *z)
     return true;
 }
 
+/** 读取换算后的三轴角速度，单位 rad/s。 */
 bool bmi323_read_gyro(float *x, float *y, float *z)
 {
     uint8_t raw[6U] = {0U};
@@ -749,8 +932,10 @@ bool bmi323_read_gyro(float *x, float *y, float *z)
     return true;
 }
 
+/** 读取原始加速度/陀螺计数，供标定和回放使用。 */
 bool bmi323_read_raw_sample(int16_t accel[3], int16_t gyro[3])
 {
+    uint8_t status = 0U;
     uint8_t raw[12U] = {0U};
 
     if (accel == NULL || gyro == NULL) {
@@ -762,6 +947,20 @@ bool bmi323_read_raw_sample(int16_t accel[3], int16_t gyro[3])
         if (bmi323_diagnostics.last_status == BMI323_DIAG_STATUS_OK) {
             bmi323_diagnostics.last_status = BMI323_DIAG_STATUS_DATA_NOT_READY;
         }
+        return false;
+    }
+
+    /* Do not timestamp/integrate a register image that has not advanced since
+     * the previous poll. The sensor status read is deliberately separate from
+     * the data burst to preserve the existing register-layout contract. */
+    if (!bmi323_read_reg(BMI323_REG_STATUS, &status, sizeof(status))) {
+        bmi323_increment_counter(&bmi323_diagnostics.read_fail);
+        return false;
+    }
+    if ((status & (BMI323_STATUS_ACC_DATA_READY |
+                   BMI323_STATUS_GYR_DATA_READY)) !=
+        (BMI323_STATUS_ACC_DATA_READY | BMI323_STATUS_GYR_DATA_READY)) {
+        bmi323_diagnostics.last_status = BMI323_DIAG_STATUS_DATA_NOT_READY;
         return false;
     }
 
@@ -798,6 +997,7 @@ float bmi323_gyro_raw_to_rads(int16_t raw)
                          BMI323_DEG_TO_RAD);
 }
 
+/** 读取芯片温度诊断值。 */
 bool bmi323_read_temperature(float *temperature)
 {
     uint8_t raw[2U] = {0U};
@@ -861,6 +1061,7 @@ void bmi323_refresh_data_ready_status(void)
                                         : BMI323_DIAG_STATUS_DATA_NOT_READY;
 }
 
+/** 复制完整诊断快照。 */
 void bmi323_get_diagnostics(bmi323_diagnostics_t *diagnostics)
 {
     if (diagnostics != NULL) {
@@ -868,6 +1069,7 @@ void bmi323_get_diagnostics(bmi323_diagnostics_t *diagnostics)
     }
 }
 
+/** 复制一次性原始 WHO_AM_I 探针结果。 */
 void bmi323_get_diag(bmi323_diag_t *diag)
 {
     if (diag != NULL) {

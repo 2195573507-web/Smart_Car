@@ -12,17 +12,12 @@
 #include "freertos/task.h"
 #include "radar_frame_fifo.h"
 #include "s3_ble.h"
+#include "smartcar_debug_config.h"
+
+/* 雷达 UART1 接收、解析和 FIFO 投递实现；创建人：待确认（当前维护人：Zhiqin）。 */
 
 static const char *TAG = "RADAR";
 
-#define RADAR_UART_RAW_LOG_ENABLED 0U
-#define RADAR_UART_HEX_LOG_BYTES 32U
-#define RADAR_BLE_RAW_UART_LOG_ENABLED 0U
-#define RADAR_BLE_HEX_LOG_BYTES 20U
-#define RADAR_BLE_LOG_BUFFER_SIZE 96U
-#define RADAR_BLE_LOG_PERIOD_MS 200U
-#define RADAR_UART_HEX_LOG_PERIOD_MS 200U
-#define RADAR_PARSER_STATS_LOG_PERIOD_MS 1000U
 #define RADAR_FRAME_FIFO_MUTEX_WAIT_TICKS 1U
 
 static TaskHandle_t s_uart_task;
@@ -52,6 +47,16 @@ static uint32_t s_frame_lock_drop_count;
 static uint32_t s_uart_overflow_count;
 static SemaphoreHandle_t s_frame_fifo_mutex;
 
+/**
+ * @brief  识别 UART FIFO/驱动环形缓冲溢出事件并重置接收流边界。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date   2026-08-31（函数契约补充）。
+ * @param  event UART 驱动事件队列弹出的借用对象；可为 NULL，仅本次调用期间读取。
+ * @return 已处理 UART_FIFO_OVF 或 UART_BUFFER_FULL 时为 true；其他事件或 NULL 返回 false。
+ * 调用方式：仅由 radar_uart_task() 收到事件后调用；处理时清驱动输入、复位事件队列并丢弃 parser 半帧。
+ * 线程约束：运行在雷达 UART 任务而非 ISR；会调用驱动/FreeRTOS API 和日志，禁止并发或 ISR 调用。
+ * 失败语义：溢出计数增加后无法恢复已丢字节，只能重新等待完整帧头。
+ */
 static bool radar_uart_handle_event(const uart_event_t *event)
 {
     if (event == NULL) {
@@ -71,6 +76,18 @@ static bool radar_uart_handle_event(const uart_event_t *event)
     return true;
 }
 
+/**
+ * @brief  将解析器给出的完整帧复制到有界 FIFO，并通知可选上行任务。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date   2026-08-31（函数契约补充）。
+ * @param  data 解析器栈上的临时完整帧，仅在回调返回前有效；函数不保留指针。
+ * @param  length 帧字节数，必须为 1..RADAR_PARSER_MAX_FRAME_SIZE。
+ * @param  context parser 回调上下文，当前实现忽略，可为 NULL。
+ * @return 无；参数无效、mutex 未创建或 1 tick 内取锁失败时静默丢弃该帧并按条件计数。
+ * 调用方式：由 radar_parser_feed() 在雷达 UART 任务栈同步回调；取得 mutex 后先递增序号，
+ *           只有 FIFO push 成功才更新最近帧元数据并通知消费者。
+ * 线程约束：非 ISR；最多等待 FIFO mutex 1 个 RTOS tick并复制整帧。FIFO 满会丢最旧帧，锁失败丢当前帧。
+ */
 static void radar_uart_frame_callback(const uint8_t *data,
                                       size_t length,
                                       void *context)
@@ -103,6 +120,16 @@ static void radar_uart_frame_callback(const uint8_t *data,
     }
 }
 
+/**
+ * @brief  按统一周期汇总解析、FIFO、UART、任务栈和堆资源诊断。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date   2026-08-31（函数契约补充）。
+ * 传入参数：无。
+ * @return 无；节流周期未到时立即返回，FIFO mutex 忙时仍输出其余统计且 FIFO 快照保持零值。
+ * 调用方式：radar_uart_task() 每轮末尾调用；可选 BLE 日志只有 FFE3 就绪且格式化成功时尝试发送。
+ * 线程约束：仅雷达 UART 任务调用；FIFO mutex 使用零等待，但日志、heap/stack 查询和 snprintf 不适合 ISR。
+ * 数据边界：统计只证明本地 UART/解析/FIFO 状态，不证明雷达物理量或 TCP/ROS2 端到端可用。
+ */
 static void radar_uart_log_parser_stats(void)
 {
     const uint32_t now_ms = (uint32_t)esp_log_timestamp();
@@ -190,6 +217,17 @@ static void radar_uart_log_parser_stats(void)
 }
 
 #if RADAR_UART_RAW_LOG_ENABLED
+/**
+ * @brief  按调试宏和节流周期输出有限字节的 UART 十六进制预览。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date   2026-08-31（函数契约补充）。
+ * @param  data 接收块起始地址；调用点保证 length 大于 0 时非 NULL，函数不保留指针。
+ * @param  length 本次 UART 接收字节数；输出最多显示统一宏配置的字节上限。
+ * @return 无；未到日志周期、BLE 未就绪或格式化空间不足时跳过相应输出。
+ * 调用方式：仅在 RADAR_UART_RAW_LOG_ENABLED 编译开启时由 drain 路径调用；BLE 原始日志还受依赖宏控制。
+ * 线程约束：使用模块级静态字符缓冲、不可重入；运行在 UART 任务，日志和 snprintf 会增加延迟，
+ *           禁止 ISR 调用。
+ */
 static void radar_uart_log_hex(const uint8_t *data, size_t length)
 {
     const uint32_t now_ms = (uint32_t)esp_log_timestamp();
@@ -264,6 +302,16 @@ static void radar_uart_log_hex(const uint8_t *data, size_t length)
 }
 #endif
 
+/**
+ * @brief  非阻塞排空当前 UART 驱动缓冲，并把字节块交给增量解析器。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date   2026-08-31（函数契约补充）。
+ * 传入参数：无。
+ * @return 无；查询失败、无缓存字节或零超时读取未取得数据时结束本轮排空。
+ * 调用方式：radar_uart_task() 在非溢出事件或周期唤醒后调用；每个接收块可同步产生多个帧回调。
+ * 线程约束：只允许雷达 UART 任务调用并独占 s_read_buffer/s_parser；read 超时为 0，但解析/复制/调试会耗时，
+ *           禁止 ISR 或其他任务并发调用。
+ */
 static void radar_uart_drain_rx_buffer(void)
 {
     for (;;) {
@@ -296,6 +344,16 @@ static void radar_uart_drain_rx_buffer(void)
     }
 }
 
+/**
+ * @brief  持续消费 UART1 事件、排空雷达字节流、解析完整帧并输出健康统计。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date   2026-08-31（函数契约补充）。
+ * @param  context xTaskCreate() 传入的任务上下文，当前固定为 NULL 并被忽略。
+ * @return 无；FreeRTOS 任务进入永久循环，不应返回。
+ * 调用方式：仅由 radar_uart_init() 创建一次；事件队列最多阻塞 RADAR_UART_EVENT_WAIT_MS 后仍执行排空/统计。
+ * 线程约束：该任务独占 UART1 接收解析器和读缓冲；不是 ISR，禁止手工直接调用或访问 STM UART2。
+ * 故障恢复：FIFO/驱动缓冲溢出会清输入并重置半帧，已丢数据不可恢复，后续从新帧头继续。
+ */
 static void radar_uart_task(void *context)
 {
     (void)context;
@@ -315,6 +373,17 @@ static void radar_uart_task(void *context)
     }
 }
 
+/**
+ * @brief  配置雷达 UART1 接收驱动、PSRAM 帧 FIFO、mutex 和持续解析任务。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date   2026-08-31（函数契约补充）。
+ * 传入参数：无。
+ * @return ESP_OK 表示所有资源和任务创建成功；重复调用为 ESP_ERR_INVALID_STATE，
+ *         PSRAM/mutex/任务不足为 ESP_ERR_NO_MEM，UART 配置失败返回对应 ESP-IDF 错误。
+ * 调用方式：app_main() 在 radar_uplink_init() 前调用一次；失败时不得启动依赖原始帧的上行链路。
+ * 线程约束：仅启动任务调用；会分配大量 PSRAM、创建 FreeRTOS 对象和任务，禁止 ISR 或并发初始化。
+ * 硬件边界：只配置 UART1 RX=GPIO44、115200 8N1，不配置 TX，也不访问 STM UART2 GPIO17/18。
+ */
 esp_err_t radar_uart_init(void)
 {
     if (s_uart_ready) {
@@ -436,11 +505,29 @@ esp_err_t radar_uart_init(void)
     return ESP_OK;
 }
 
+/**
+ * @brief  查询雷达 UART 初始化标志与接收任务句柄是否同时有效。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date   2026-08-31（函数契约补充）。
+ * 传入参数：无。
+ * @return 两项均有效时为 true；不表示 UART 收到字节、解析出帧或雷达物理在线。
+ * 调用方式：启动状态和诊断读取；链路健康仍需结合 parser/FIFO 计数和帧时间戳。
+ * 线程约束：无锁快照、不阻塞；初始化完成后读取，禁止把返回值当作同步屏障。
+ */
 bool radar_uart_is_running(void)
 {
     return s_uart_ready && s_uart_task != NULL;
 }
 
+/**
+ * @brief  设置完整帧入队后通过 task notification 唤醒的消费者任务。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date   2026-08-31（函数契约补充）。
+ * @param  task FreeRTOS 任务句柄；非 NULL 时保存并立即发一次通知，NULL 表示取消通知目标。
+ * @return 无。
+ * 调用方式：UART 初始化成功且上行任务创建后注册；消费者删除前应先传 NULL，避免悬空句柄。
+ * 线程约束：启动/上行生命周期串行调用，无内部锁；禁止 ISR 调用或与帧回调、任务删除并发修改。
+ */
 void radar_uart_set_frame_notification_task(TaskHandle_t task)
 {
     s_uplink_notification_task = task;
@@ -449,6 +536,21 @@ void radar_uart_set_frame_notification_task(TaskHandle_t task)
     }
 }
 
+/**
+ * @brief  在有限 mutex 等待内复制并弹出最旧的校验通过雷达帧。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date   2026-08-31（函数契约补充）。
+ * @param[out] buffer 非 NULL、至少可写 capacity 字节的输出缓冲。
+ * @param  capacity buffer 字节容量，必须大于 0。
+ * @param[out] length 必须非 NULL；成功写帧长，空队列写 0，短缓冲写所需长度；
+ *                    参数错误或 mutex 获取失败时保持调用前值。
+ * @param[out] sequence 可为 NULL；成功时写 UART 接收侧帧序号。
+ * @param[out] timestamp_ms 可为 NULL；成功时写采集时间，单位 ms。
+ * @param[out] age_ms 可为 NULL；成功时写当前时间减采集时间，单位 ms，允许无符号回绕。
+ * @return 已复制并消费时为 true；参数、初始化、mutex、空队列或短缓冲问题时为 false。
+ * 调用方式：单一上行任务调用；false 且 length 写为更大值时可扩容重试，其他 false 不应忙等。
+ * 线程约束：最多等待 FIFO mutex 1 个 RTOS tick并复制整帧；禁止 ISR 调用。
+ */
 bool radar_uart_pop_frame(uint8_t *buffer,
                           size_t capacity,
                           size_t *length,
@@ -495,6 +597,17 @@ bool radar_uart_pop_frame(uint8_t *buffer,
     return true;
 }
 
+/**
+ * @brief  配置 GPIO4 上的 X3PRO M_CTR LEDC PWM 并提交默认占空比。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date   2026-08-31（函数契约补充）。
+ * 传入参数：无。
+ * @return ESP_OK 表示 timer、channel 和默认 duty 更新成功；重复调用为 ESP_ERR_INVALID_STATE，
+ *         其他值为对应 LEDC 配置或更新错误。
+ * 调用方式：app_main() 启动阶段调用；成功后再初始化 radar_control，运行期 duty 由其状态机管理。
+ * 线程约束：仅启动任务调用一次；会配置 LEDC/GPIO4，禁止 ISR 或并发调用。
+ * 硬件边界：返回成功只表示 S3 外设寄存器配置完成，不证明 PWM 波形、电机供电或雷达转动。
+ */
 esp_err_t radar_pwm_init(void)
 {
     if (s_pwm_ready) {
@@ -546,6 +659,15 @@ esp_err_t radar_pwm_init(void)
     return ESP_OK;
 }
 
+/**
+ * @brief  查询雷达 LEDC PWM 是否完成本地初始化。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date   2026-08-31（函数契约补充）。
+ * 传入参数：无。
+ * @return timer/channel/duty 更新成功后为 true；不表示当前 duty 非零、GPIO 有波形或电机已旋转。
+ * 调用方式：仅用于初始化状态诊断；运行期门控和占空比状态读取使用 radar_control 接口。
+ * 线程约束：无锁快照、不阻塞；初始化完成后读取，禁止作为跨任务同步屏障。
+ */
 bool radar_pwm_is_running(void)
 {
     return s_pwm_ready;

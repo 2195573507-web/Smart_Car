@@ -9,6 +9,7 @@ and public interfaces. Paths are source paths, not claims of runtime success.
 | STM32 UART log | `STM32H757/BSP/UART`, `Middleware/Boot` | `bsp_uart_init`, `boot_log` | `bsp_uart_transmit`, `log_service_start` | USART1 text/structured logs |
 | STM-S3 UART | `STM32H757/Middleware/Communication/UART_Link` | `uart_link_task_start` | `uart_link_send/read/get_stats` | Raw STM-S3 bytes |
 | Shared SRP v4 | `Common/SRP` | parser/link callbacks | `srp_encode/decode`, `srp_parser_feed`, `srp_link_send/receive/tick` | Shared validated UART frame views and link health |
+| Shared debug config | `Common/SmartCarDebug/smartcar_debug_config.h` | compile-time include | `SMARTCAR_*`, `RADAR_*_LOG_*`, `*_PERIOD_MS` diagnostics | S3/STM debug switches and bounded log settings |
 | STM S3 service | `STM32H757/Middleware/Communication/Services/s3_service.c` | `s3_service_start` | `s3_service_step`, `s3_service_send_boot_message` | SRP calibration/telemetry/config service events |
 | IMU runtime | `STM32H757/Application/RTOS/imu_runtime.c` | `imu_runtime_start` | `imu_task`, `imu_debug_task` | Sample cadence and logs |
 | IMU manager | `STM32H757/Middleware/Sensor/imu_manager.c` | `imu_init`, `imu_update` | `imu_get_data`, `imu_lsm_is_online` | Complete raw snapshot |

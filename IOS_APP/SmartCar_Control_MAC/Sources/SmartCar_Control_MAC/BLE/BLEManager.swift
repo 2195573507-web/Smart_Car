@@ -7,7 +7,18 @@ private enum BLEReceiveEvent {
 }
 
 private enum BLELogReceiveEvent {
-    case record(SmartCarLogRecord)
+    case record(sessionGeneration: UInt64, record: SmartCarLogRecord)
+}
+
+private enum BLEOutboundWriteKind: Equatable {
+    case normal
+    case motion
+    case stop
+}
+
+private struct BLEOutboundWrite {
+    let data: Data
+    let kind: BLEOutboundWriteKind
 }
 
 private final class BLEReceivePipeline: @unchecked Sendable {
@@ -52,17 +63,30 @@ private final class BLELogReceivePipeline: @unchecked Sendable {
         qos: .utility
     )
     private var parser = SmartCarLogParser()
+    private var sessionGeneration: UInt64 = 0
 
-    func reset() {
+    func beginSession() -> UInt64 {
         queue.sync {
+            sessionGeneration &+= 1
+            parser.reset()
+            return sessionGeneration
+        }
+    }
+
+    func invalidateSession() {
+        queue.sync {
+            sessionGeneration &+= 1
             parser.reset()
         }
     }
 
     func submit(_ data: Data, handler: @escaping ([BLELogReceiveEvent]) -> Void) {
+        let generation = queue.sync { sessionGeneration }
         queue.async {
             let records = self.parser.feed(data, receivedAt: Date())
-            handler(records.map(BLELogReceiveEvent.record))
+            handler(records.map {
+                BLELogReceiveEvent.record(sessionGeneration: generation, record: $0)
+            })
         }
     }
 }
@@ -91,11 +115,32 @@ final class BLEManager: NSObject {
     private let central: CBCentralManager
     private nonisolated let receivePipeline: BLEReceivePipeline
     private nonisolated let logReceivePipeline: BLELogReceivePipeline
+    private let sessionLogWriter = SessionLogWriter()
     private var peripheral: CBPeripheral?
     private var writeCharacteristic: CBCharacteristic?
     private var notifyCharacteristic: CBCharacteristic?
     private var loggerCharacteristic: CBCharacteristic?
     private var scanWhenPoweredOn = false
+    private var activeLogSessionGeneration: UInt64?
+    private var txNotifyConfirmed = false
+    private var outboundWriteQueue: [BLEOutboundWrite] = []
+    private var inFlightWrite: BLEOutboundWrite?
+    private var pendingMotionAfterStop: BLEOutboundWrite?
+    private var stopBarrierPending = false
+    private var disconnectAfterStop = false
+    private var submittedWriteCount: UInt64 = 0
+    private var completedWriteCount: UInt64 = 0
+    private var failedWriteCount: UInt64 = 0
+
+    private static let maxOutboundWriteQueueDepth = 32
+
+    private func logDiagnostic(_ message: String) {
+        print("[BLE_DIAG] \(message)")
+    }
+
+    private func shouldLogWrite(_ count: UInt64, kind: BLEOutboundWriteKind) -> Bool {
+        kind != .motion || count <= 3 || count.isMultiple(of: 20)
+    }
 
     override convenience init() {
         self.init(telemetryStore: TelemetryStore())
@@ -114,6 +159,10 @@ final class BLEManager: NSObject {
         central.delegate = self
     }
 
+    deinit {
+        sessionLogWriter.closeAndSynchronizeAndWait()
+    }
+
     func startScanning() {
         guard central.state == .poweredOn else {
             scanWhenPoweredOn = true
@@ -123,7 +172,6 @@ final class BLEManager: NSObject {
 
         decodedMessages.removeAll(keepingCapacity: true)
         receivePipeline.reset()
-        logReceivePipeline.reset()
         setError(nil)
         updateStatus(.scanning)
         // Scan by name so discovery also works when the peripheral omits FFE0 from its advertisement.
@@ -152,9 +200,22 @@ final class BLEManager: NSObject {
     }
 
     func disconnect() {
+        guard let peripheral else {
+            clearOutboundWrites()
+            endLogSession()
+            return
+        }
+
+        guard status == .connected, writeCharacteristic != nil else {
+            clearOutboundWrites()
+            endLogSession()
+            central.cancelPeripheralConnection(peripheral)
+            return
+        }
+
+        disconnectAfterStop = true
         sendWheelSpeeds([0, 0, 0, 0])
-        guard let peripheral else { return }
-        central.cancelPeripheralConnection(peripheral)
+        endLogSession()
     }
 
     func sendPing() {
@@ -176,8 +237,10 @@ final class BLEManager: NSObject {
 
     func sendWheelSpeeds(_ speeds: [Float]) {
         guard speeds.count == 4, speeds.allSatisfy(\.isFinite) else { return }
-        _ = sendFrame(SmartCarProtocol.encode(type: .wheelSpeedCommand,
-                                              payload: Self.floatPayload(speeds)))
+        let data = SmartCarProtocol.encode(type: .wheelSpeedCommand,
+                                           payload: Self.floatPayload(speeds))
+        let kind: BLEOutboundWriteKind = speeds.allSatisfy { $0 == 0.0 } ? .stop : .motion
+        _ = sendFrame(data, kind: kind)
     }
 
     @discardableResult
@@ -190,13 +253,80 @@ final class BLEManager: NSObject {
     }
 
     @discardableResult
-    private func sendFrame(_ data: Data) -> Bool {
-        guard let peripheral, let writeCharacteristic else {
+    private func sendFrame(_ data: Data, kind: BLEOutboundWriteKind = .normal) -> Bool {
+        guard status == .connected,
+              let peripheral,
+              let writeCharacteristic else {
+            logDiagnostic("WRITE_REJECT status=\(status.displayText) rx=\(self.writeCharacteristic != nil ? 1 : 0)")
             setError(.notConnected)
             return false
         }
-        peripheral.writeValue(data, for: writeCharacteristic, type: .withResponse)
+
+        let outbound = BLEOutboundWrite(data: data, kind: kind)
+        if kind == .stop {
+            stopBarrierPending = true
+            pendingMotionAfterStop = nil
+            outboundWriteQueue.removeAll { $0.kind == .motion || $0.kind == .stop }
+            if inFlightWrite?.kind != .stop {
+                if outboundWriteQueue.count >= Self.maxOutboundWriteQueueDepth,
+                   let normalIndex = outboundWriteQueue.firstIndex(where: { $0.kind == .normal }) {
+                    outboundWriteQueue.remove(at: normalIndex)
+                }
+                outboundWriteQueue.insert(outbound, at: 0)
+            }
+        } else if kind == .motion {
+            if stopBarrierPending {
+                pendingMotionAfterStop = outbound
+                return true
+            } else {
+                outboundWriteQueue.removeAll { $0.kind == .motion }
+                return enqueueOutboundWrite(outbound)
+            }
+        } else {
+            return enqueueOutboundWrite(outbound)
+        }
+        pumpWriteQueue(peripheral: peripheral, characteristic: writeCharacteristic)
         return true
+    }
+
+    @discardableResult
+    private func enqueueOutboundWrite(_ outbound: BLEOutboundWrite) -> Bool {
+        if outboundWriteQueue.count >= Self.maxOutboundWriteQueueDepth {
+            if let normalIndex = outboundWriteQueue.firstIndex(where: { $0.kind == .normal }) {
+                outboundWriteQueue.remove(at: normalIndex)
+            } else {
+                logDiagnostic("WRITE_REJECT queue_full kind=\(outbound.kind)")
+                return false
+            }
+        }
+        outboundWriteQueue.append(outbound)
+        pumpWriteQueueIfPossible()
+        return true
+    }
+
+    private func pumpWriteQueueIfPossible() {
+        guard let peripheral, let writeCharacteristic else { return }
+        pumpWriteQueue(peripheral: peripheral, characteristic: writeCharacteristic)
+    }
+
+    private func pumpWriteQueue(peripheral: CBPeripheral, characteristic: CBCharacteristic) {
+        guard inFlightWrite == nil, !outboundWriteQueue.isEmpty else { return }
+        let outbound = outboundWriteQueue.removeFirst()
+        inFlightWrite = outbound
+        submittedWriteCount &+= 1
+        if shouldLogWrite(submittedWriteCount, kind: outbound.kind) {
+            let frameType = outbound.data.count > 2 ? String(format: "0x%02X", outbound.data[2]) : "unknown"
+            logDiagnostic("WRITE_SUBMIT count=\(submittedWriteCount) kind=\(outbound.kind) type=\(frameType) bytes=\(outbound.data.count) queue=\(outboundWriteQueue.count)")
+        }
+        peripheral.writeValue(outbound.data, for: characteristic, type: .withResponse)
+    }
+
+    private func clearOutboundWrites() {
+        outboundWriteQueue.removeAll(keepingCapacity: true)
+        inFlightWrite = nil
+        pendingMotionAfterStop = nil
+        stopBarrierPending = false
+        disconnectAfterStop = false
     }
 
     private static func floatPayload(_ values: [Float]) -> Data {
@@ -227,7 +357,9 @@ final class BLEManager: NSObject {
     private func handleReceivedLogEvents(_ events: [BLELogReceiveEvent]) {
         for event in events {
             switch event {
-            case .record(let record):
+            case .record(let sessionGeneration, let record):
+                guard activeLogSessionGeneration == sessionGeneration else { continue }
+                sessionLogWriter.append(record)
                 switch record.source {
                 case .stm32:
                     stmLogStore.append(record)
@@ -236,6 +368,26 @@ final class BLEManager: NSObject {
                 }
             }
         }
+    }
+
+    private func beginLogSession() {
+        let descriptor = SessionLogWriter.makeDescriptor(connectedAt: Date())
+        activeLogSessionGeneration = logReceivePipeline.beginSession()
+        stmLogStore.clear()
+        s3LogStore.clear()
+        stmLogStore.setRecordingFileName(descriptor.fileName)
+        s3LogStore.setRecordingFileName(descriptor.fileName)
+        sessionLogWriter.beginSession(descriptor)
+    }
+
+    private func endLogSession() {
+        activeLogSessionGeneration = nil
+        logReceivePipeline.invalidateSession()
+        stmLogStore.flush()
+        s3LogStore.flush()
+        stmLogStore.setRecordingFileName(nil)
+        s3LogStore.setRecordingFileName(nil)
+        sessionLogWriter.closeAndSynchronize()
     }
 
     private func updateStatus(_ newStatus: BLEConnectionStatus) {
@@ -261,8 +413,12 @@ extension BLEManager: CBCentralManagerDelegate {
                     self.startScanning()
                 }
             case .poweredOff, .unauthorized, .unsupported, .resetting, .unknown:
+                self.clearOutboundWrites()
+                self.endLogSession()
                 self.updateStatus(.unavailable)
             @unknown default:
+                self.clearOutboundWrites()
+                self.endLogSession()
                 self.updateStatus(.unavailable)
             }
         }
@@ -291,8 +447,14 @@ extension BLEManager: CBCentralManagerDelegate {
             guard let self else { return }
             self.peripheral = peripheral
             peripheral.delegate = self
-            self.updateStatus(.connected)
-            print("BLE CONNECT SUCCESS")
+            self.writeCharacteristic = nil
+            self.notifyCharacteristic = nil
+            self.loggerCharacteristic = nil
+            self.txNotifyConfirmed = false
+            self.clearOutboundWrites()
+            self.beginLogSession()
+            self.updateStatus(.connecting)
+            self.logDiagnostic("LINK_CONNECTED; discovering service=\(Self.serviceUUID.uuidString)")
             peripheral.discoverServices([Self.serviceUUID])
         }
     }
@@ -301,6 +463,8 @@ extension BLEManager: CBCentralManagerDelegate {
         Task { @MainActor [weak self] in
             guard let self else { return }
             let message = error?.localizedDescription ?? "Connection failed"
+            self.logDiagnostic("CONNECT_FAILED error=\(message)")
+            self.endLogSession()
             self.setError(.connectionFailed(message))
             self.updateStatus(.failed(message))
         }
@@ -312,9 +476,11 @@ extension BLEManager: CBCentralManagerDelegate {
             self.writeCharacteristic = nil
             self.notifyCharacteristic = nil
             self.loggerCharacteristic = nil
+            self.clearOutboundWrites()
             self.receivePipeline.reset()
-            self.logReceivePipeline.reset()
+            self.endLogSession()
             self.updateStatus(.disconnected)
+            self.logDiagnostic("DISCONNECTED error=\(error?.localizedDescription ?? "none")")
             if let error {
                 self.setError(.system(error.localizedDescription))
             }
@@ -328,13 +494,18 @@ extension BLEManager: CBPeripheralDelegate {
         Task { @MainActor [weak self] in
             guard let self else { return }
             guard errorDescription == nil else {
+                self.logDiagnostic("SERVICE_DISCOVERY_FAILED error=\(errorDescription ?? "unknown")")
                 self.setError(.system(errorDescription ?? "Unknown error"))
+                self.updateStatus(.failed(errorDescription ?? "Service discovery failed"))
                 return
             }
             guard let service = peripheral.services?.first(where: { $0.uuid == Self.serviceUUID }) else {
+                self.logDiagnostic("SERVICE_DISCOVERY_FAILED missing=\(Self.serviceUUID.uuidString)")
                 self.setError(.serviceNotFound)
+                self.updateStatus(.failed("Required BLE service not found"))
                 return
             }
+            self.logDiagnostic("SERVICE_DISCOVERED uuid=\(service.uuid.uuidString)")
             peripheral.discoverCharacteristics(
                 [Self.rxCharacteristicUUID, Self.txCharacteristicUUID, Self.loggerCharacteristicUUID],
                 for: service
@@ -351,7 +522,9 @@ extension BLEManager: CBPeripheralDelegate {
         Task { @MainActor [weak self] in
             guard let self else { return }
             guard errorDescription == nil else {
+                self.logDiagnostic("CHARACTERISTIC_DISCOVERY_FAILED error=\(errorDescription ?? "unknown")")
                 self.setError(.system(errorDescription ?? "Unknown error"))
+                self.updateStatus(.failed(errorDescription ?? "Characteristic discovery failed"))
                 return
             }
             for characteristic in service.characteristics ?? [] {
@@ -365,7 +538,114 @@ extension BLEManager: CBPeripheralDelegate {
                     peripheral.setNotifyValue(true, for: characteristic)
                 }
             }
+            let discovered = [
+                self.writeCharacteristic != nil ? Self.rxCharacteristicUUID.uuidString : nil,
+                self.notifyCharacteristic != nil ? Self.txCharacteristicUUID.uuidString : nil,
+                self.loggerCharacteristic != nil ? Self.loggerCharacteristicUUID.uuidString : nil
+            ].compactMap { $0 }.joined(separator: ",")
+            self.logDiagnostic("CHARACTERISTICS_DISCOVERED values=\(discovered) tx_notify_pending=\(!self.txNotifyConfirmed)")
+            guard self.writeCharacteristic != nil,
+                  self.notifyCharacteristic != nil,
+                  self.loggerCharacteristic != nil else {
+                self.logDiagnostic("GATT_NOT_READY missing_required_characteristic")
+                self.setError(.system("Required BLE characteristics are missing"))
+                self.updateStatus(.failed("Required BLE characteristics are missing"))
+                return
+            }
+            self.tryFinalizeGattReady(peripheral: peripheral)
         }
+    }
+
+    nonisolated func peripheral(
+        _ peripheral: CBPeripheral,
+        didUpdateNotificationStateFor characteristic: CBCharacteristic,
+        error: Error?
+    ) {
+        let errorDescription = error?.localizedDescription
+        Task { @MainActor [weak self] in
+            guard let self, self.peripheral === peripheral else { return }
+            if characteristic.uuid == Self.txCharacteristicUUID {
+                self.txNotifyConfirmed = errorDescription == nil && characteristic.isNotifying
+                self.logDiagnostic("FFE2_NOTIFY_STATE enabled=\(characteristic.isNotifying ? 1 : 0) error=\(errorDescription ?? "none")")
+                if let errorDescription {
+                    self.setError(.system("FFE2 notification setup failed: \(errorDescription)"))
+                    self.updateStatus(.failed(errorDescription))
+                    return
+                }
+            } else if characteristic.uuid == Self.loggerCharacteristicUUID {
+                self.logDiagnostic("FFE3_NOTIFY_STATE enabled=\(characteristic.isNotifying ? 1 : 0) error=\(errorDescription ?? "none")")
+            } else {
+                return
+            }
+            self.tryFinalizeGattReady(peripheral: peripheral)
+        }
+    }
+
+    nonisolated func peripheral(
+        _ peripheral: CBPeripheral,
+        didWriteValueFor characteristic: CBCharacteristic,
+        error: Error?
+    ) {
+        let errorDescription = error?.localizedDescription
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            guard self.peripheral === peripheral,
+                  characteristic.uuid == Self.rxCharacteristicUUID else { return }
+
+            let completed = self.inFlightWrite
+            self.inFlightWrite = nil
+            self.completedWriteCount &+= 1
+            if let errorDescription {
+                self.failedWriteCount &+= 1
+                self.logDiagnostic("WRITE_COMPLETE result=FAIL count=\(self.completedWriteCount) failed=\(self.failedWriteCount) error=\(errorDescription)")
+                let shouldDisconnect = self.disconnectAfterStop
+                self.clearOutboundWrites()
+                self.setError(.system(errorDescription))
+                if shouldDisconnect {
+                    self.endLogSession()
+                    self.central.cancelPeripheralConnection(peripheral)
+                }
+                return
+            }
+
+            if let completed, self.shouldLogWrite(self.completedWriteCount, kind: completed.kind) {
+                self.logDiagnostic("WRITE_COMPLETE result=OK count=\(self.completedWriteCount) kind=\(completed.kind) bytes=\(completed.data.count)")
+            }
+
+            if completed?.kind == .stop {
+                self.stopBarrierPending = false
+                if self.disconnectAfterStop {
+                    // A disconnect stop is a terminal barrier: do not release
+                    // any motion captured while the stop write was in flight.
+                    self.clearOutboundWrites()
+                    self.endLogSession()
+                    self.central.cancelPeripheralConnection(peripheral)
+                    return
+                }
+                if let pendingMotionAfterStop = self.pendingMotionAfterStop {
+                    self.pendingMotionAfterStop = nil
+                    self.enqueueOutboundWrite(pendingMotionAfterStop)
+                }
+            }
+
+            if let writeCharacteristic = self.writeCharacteristic {
+                self.pumpWriteQueue(peripheral: peripheral, characteristic: writeCharacteristic)
+            }
+        }
+    }
+
+    private func tryFinalizeGattReady(peripheral: CBPeripheral) {
+        guard self.peripheral === peripheral,
+              status == .connecting,
+              writeCharacteristic != nil,
+              notifyCharacteristic != nil,
+              loggerCharacteristic != nil,
+              txNotifyConfirmed else {
+            return
+        }
+        updateStatus(.connected)
+        logDiagnostic("GATT_READY rx=1 tx=1 ffe3=1 ffe2_notify=1")
+        pumpWriteQueueIfPossible()
     }
 
     nonisolated func peripheral(

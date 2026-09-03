@@ -10,7 +10,6 @@ struct SmartCarControlMACApp: App {
                 .environmentObject(languageManager)
                 .environment(\.locale, languageManager.locale)
         }
-        .windowResizability(.contentSize)
     }
 }
 

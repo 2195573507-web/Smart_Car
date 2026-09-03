@@ -1,6 +1,6 @@
 idf_component_register(
     SRCS "command_bridge.c" "radar_calibration_manager.c" "log_bridge.c"
-    INCLUDE_DIRS "include"
+    INCLUDE_DIRS "include" "../../../Common/SmartCarDebug"
     REQUIRES stm_uart smartcar_protocol smartcar_log s3_ble radar_control freertos log
 )
 

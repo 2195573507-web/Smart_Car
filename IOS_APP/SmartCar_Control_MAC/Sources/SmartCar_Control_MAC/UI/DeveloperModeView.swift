@@ -36,7 +36,7 @@ struct DeveloperModeView: View {
                     DualIMULifecycleCard(store: telemetryStore.dualIMU)
                     DualAttitudeComparisonView(store: telemetryStore.dualAttitude,
                                                 angleUnit: angleUnit)
-                    DualAttitudeLogConsole(store: telemetryStore.dualAttitude)
+                    DualAttitudeLogConsole(log: telemetryStore.dualAttitude.log)
                     DeveloperCalibrationCard(viewModel: viewModel.calibrationViewModel)
                     RadarControlCard(viewModel: viewModel, store: telemetryStore.radar)
                     StaticCalibrationAnalysisCard(
@@ -52,7 +52,7 @@ struct DeveloperModeView: View {
 }
 
 private struct DualAttitudeLogConsole: View {
-    @ObservedObject var store: DualAttitudeState
+    @ObservedObject var log: DualAttitudeLogState
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -60,12 +60,12 @@ private struct DualAttitudeLogConsole: View {
                 .font(.headline.monospaced())
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 6) {
-                    if store.snapshot.logLines.isEmpty {
+                    if log.lines.isEmpty {
                         Text("Waiting for DualAttitude frames")
                             .foregroundStyle(.secondary)
                     }
-                    ForEach(Array(store.snapshot.logLines.enumerated().reversed()), id: \.offset) { _, line in
-                        Text(line)
+                    ForEach(log.lines.indices.reversed(), id: \.self) { index in
+                        Text(log.lines[index])
                             .font(.caption.monospaced())
                             .textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)

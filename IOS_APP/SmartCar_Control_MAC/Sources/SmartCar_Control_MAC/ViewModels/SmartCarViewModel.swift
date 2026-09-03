@@ -8,10 +8,23 @@ enum DeveloperPage: Equatable {
     case loggerS3
 }
 
+struct JoystickIntent: Equatable {
+    let horizontal: Float
+    let vertical: Float
+
+    static let neutral = JoystickIntent(horizontal: 0.0, vertical: 0.0)
+
+    var isNeutral: Bool {
+        horizontal == 0.0 && vertical == 0.0
+    }
+}
+
 @MainActor
 final class SmartCarViewModel: ObservableObject {
     private static let angleUnitDefaultsKey = "smartcar.angleUnit"
     private static let joystickMaximumSpeed: Float = 800.0
+    private static let chassisTrackWidthMM: Float = 193.0
+    private static let joystickSteeringCurve = 1.5
 
     let bleManager: BLEManager
     let telemetryStore: TelemetryStore
@@ -45,6 +58,7 @@ final class SmartCarViewModel: ObservableObject {
     private var wheelHeartbeatTimer: Timer?
     private var lifecycleObservers: [NSObjectProtocol] = []
     private var activeJoystickCommand: SmartCarProtocol.ControlCommand?
+    private var activeJoystickIntent: JoystickIntent?
 
     var decodedMessages: [DecodedMessageRecord] { bleManager.decodedMessages }
     var stmLogStore: DeviceLogStore { bleManager.stmLogStore }
@@ -76,6 +90,7 @@ final class SmartCarViewModel: ObservableObject {
                 self.stopWheelHeartbeat()
                 self.wheelTargets = Array(repeating: 0, count: 4)
                 self.activeJoystickCommand = nil
+                self.activeJoystickIntent = nil
                 self.pidTuning.applyStatus = .unavailable
             }
         }
@@ -127,13 +142,16 @@ final class SmartCarViewModel: ObservableObject {
         stopWheelHeartbeat()
         wheelTargets = Array(repeating: 0, count: 4)
         activeJoystickCommand = nil
+        activeJoystickIntent = nil
         bleManager.disconnect()
     }
 
     func setWheelTarget(index: Int, value: Double) {
         guard wheelTargets.indices.contains(index) else { return }
         activeJoystickCommand = nil
-        wheelTargets[index] = Float(max(-800, min(800, value)))
+        activeJoystickIntent = nil
+        wheelTargets[index] = Float(max(-Double(Self.joystickMaximumSpeed),
+                                         min(Double(Self.joystickMaximumSpeed), value)))
         if wheelTargets.allSatisfy({ $0 == 0.0 }) {
             sendZeroWheelSpeeds()
         } else {
@@ -143,7 +161,9 @@ final class SmartCarViewModel: ObservableObject {
 
     func setAllWheelTargets(_ value: Double) {
         activeJoystickCommand = nil
-        let clamped = Float(max(-800, min(800, value)))
+        activeJoystickIntent = nil
+        let clamped = Float(max(-Double(Self.joystickMaximumSpeed),
+                                min(Double(Self.joystickMaximumSpeed), value)))
         wheelTargets = Array(repeating: clamped, count: 4)
         if clamped == 0.0 {
             sendZeroWheelSpeeds()
@@ -178,10 +198,27 @@ final class SmartCarViewModel: ObservableObject {
     func sendZeroWheelSpeeds() {
         stopWheelHeartbeat()
         activeJoystickCommand = nil
+        activeJoystickIntent = nil
         wheelTargets = Array(repeating: 0, count: 4)
         guard status == .connected else { return }
-        transmittedFrameCount += 1
-        bleManager.sendWheelSpeeds(wheelTargets)
+        sendCurrentWheelSpeeds()
+    }
+
+    func setJoystickInput(_ input: JoystickIntent) {
+        guard status == .connected else { return }
+
+        let sanitized = JoystickIntent(
+            horizontal: Self.clampJoystickAxis(input.horizontal),
+            vertical: Self.clampJoystickAxis(input.vertical)
+        )
+        guard !sanitized.isNeutral else {
+            sendZeroWheelSpeeds()
+            return
+        }
+
+        activeJoystickCommand = nil
+        activeJoystickIntent = sanitized
+        applyJoystickIntent()
     }
 
     func setJoystickCommand(_ command: SmartCarProtocol.ControlCommand?) {
@@ -191,6 +228,8 @@ final class SmartCarViewModel: ObservableObject {
             return
         }
 
+        activeJoystickIntent = nil
+        activeJoystickCommand = command
         let speed = joystickSpeed
         let targets: [Float]
         switch command {
@@ -207,13 +246,7 @@ final class SmartCarViewModel: ObservableObject {
             return
         }
 
-        activeJoystickCommand = command
-        wheelTargets = targets
-        if targets.allSatisfy({ $0 == 0.0 }) {
-            sendZeroWheelSpeeds()
-        } else {
-            scheduleWheelCommand()
-        }
+        applyWheelTargets(targets)
     }
 
     func ping() {
@@ -228,12 +261,18 @@ final class SmartCarViewModel: ObservableObject {
         bleManager.sendControl(command)
     }
 
-    func stop() { send(.stop) }
-    func emergencyStop() { send(.stop) }
+    // All UI stop actions use the wheel-stop primitive supported by the S3
+    // bridge. The legacy CONTROL/0x01 frame is not handled by the current
+    // command bridge and therefore cannot stop the vehicle.
+    func stop() { sendZeroWheelSpeeds() }
+    func emergencyStop() { sendZeroWheelSpeeds() }
 
     func updateSpeed() {
-        guard let activeJoystickCommand else { return }
-        setJoystickCommand(activeJoystickCommand)
+        if activeJoystickIntent != nil {
+            applyJoystickIntent()
+        } else if let activeJoystickCommand {
+            setJoystickCommand(activeJoystickCommand)
+        }
     }
 
     func updateRadarSpeed() {
@@ -245,12 +284,17 @@ final class SmartCarViewModel: ObservableObject {
     }
 
     private func scheduleWheelCommand() {
-        wheelCommandTimer?.invalidate()
+        wheelHeartbeatTimer?.invalidate()
+        wheelHeartbeatTimer = nil
+        guard wheelCommandTimer == nil else { return }
+
         let timer = Timer(timeInterval: 0.05, repeats: false) { [weak self] _ in
             Task { @MainActor [weak self] in
-                guard let self, self.status == .connected,
+                guard let self else { return }
+                self.wheelCommandTimer = nil
+                guard self.status == .connected,
                       self.wheelTargets.contains(where: { $0 != 0.0 }) else {
-                    self?.stopWheelHeartbeat()
+                    self.stopWheelHeartbeat()
                     return
                 }
                 self.sendCurrentWheelSpeeds()
@@ -297,8 +341,63 @@ final class SmartCarViewModel: ObservableObject {
     }
 
     private var joystickSpeed: Float {
-        let percent = min(max(speed, 0.0), 100.0)
+        let percent = speed.isFinite ? min(max(speed, 0.0), 100.0) : 0.0
         return Float(percent / 100.0) * Self.joystickMaximumSpeed
+    }
+
+    private func applyJoystickIntent() {
+        guard let activeJoystickIntent else { return }
+        applyWheelTargets(Self.wheelTargets(for: activeJoystickIntent,
+                                            speed: joystickSpeed))
+    }
+
+    private func applyWheelTargets(_ targets: [Float]) {
+        wheelTargets = targets
+        if targets.allSatisfy({ $0 == 0.0 }) {
+            stopWheelHeartbeat()
+            sendCurrentWheelSpeeds()
+        } else {
+            scheduleWheelCommand()
+        }
+    }
+
+    private static func clampJoystickAxis(_ value: Float) -> Float {
+        guard value.isFinite else { return 0.0 }
+        return min(max(value, -1.0), 1.0)
+    }
+
+    private static func wheelTargets(for input: JoystickIntent,
+                                     speed: Float) -> [Float] {
+        let horizontal = clampJoystickAxis(input.horizontal)
+        let vertical = clampJoystickAxis(input.vertical)
+        let safeSpeed = speed.isFinite
+            ? min(max(speed, 0.0), joystickMaximumSpeed)
+            : 0.0
+        let halfTrack = 0.5 * chassisTrackWidthMM
+        let linearSpeed = -vertical * safeSpeed
+        let turnFraction = Float(
+            pow(Double(abs(horizontal)), joystickSteeringCurve)
+        )
+        let angularSpeed: Float
+        if horizontal < 0.0 {
+            angularSpeed = turnFraction * safeSpeed / halfTrack
+        } else if horizontal > 0.0 {
+            angularSpeed = -turnFraction * safeSpeed / halfTrack
+        } else {
+            angularSpeed = 0.0
+        }
+
+        /* Keep horizontal polarity unchanged while reversing; only the linear
+         * component changes sign with the vertical joystick input. */
+        var rightSpeed = linearSpeed + angularSpeed * halfTrack
+        var leftSpeed = linearSpeed - angularSpeed * halfTrack
+        let peak = max(abs(rightSpeed), abs(leftSpeed))
+        if peak > safeSpeed, peak > 0.0 {
+            let scale = safeSpeed / peak
+            rightSpeed *= scale
+            leftSpeed *= scale
+        }
+        return [rightSpeed, rightSpeed, leftSpeed, leftSpeed]
     }
 
     func refreshLogs() {

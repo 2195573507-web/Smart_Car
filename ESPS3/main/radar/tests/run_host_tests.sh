@@ -39,6 +39,12 @@ cc -std=c11 -Wall -Wextra -Werror \
 
 cc -std=c11 -Wall -Wextra -Werror \
    -I"$RADAR_DIR" \
+   "$SCRIPT_DIR/test_radar_telemetry_age.c" \
+   -o "$BUILD_DIR/test_radar_telemetry_age"
+"$BUILD_DIR/test_radar_telemetry_age"
+
+cc -std=c11 -Wall -Wextra -Werror \
+   -I"$RADAR_DIR" \
    -I"$COMMON_SRP_DIR/include" \
    "$COMMON_SRP_DIR/srp_crc.c" \
    "$COMMON_SRP_DIR/srp_codec.c" \
@@ -48,3 +54,39 @@ cc -std=c11 -Wall -Wextra -Werror \
    -lm \
    -o "$BUILD_DIR/test_radar_telemetry_queue"
 "$BUILD_DIR/test_radar_telemetry_queue"
+
+cc -std=c11 -Wall -Wextra -Werror \
+   -I"$RADAR_DIR" \
+   -I"$COMMON_SRP_DIR/include" \
+   "$RADAR_DIR/radar_uplink_tx.c" \
+   "$RADAR_DIR/radar_telemetry_observability.c" \
+   "$SCRIPT_DIR/test_radar_telemetry_observability.c" \
+   -o "$BUILD_DIR/test_radar_telemetry_observability"
+"$BUILD_DIR/test_radar_telemetry_observability"
+
+cc -std=c11 -Wall -Wextra -Werror \
+   -fsanitize=address,undefined -fno-omit-frame-pointer \
+   -I"$RADAR_DIR" \
+   -I"$COMMON_SRP_DIR/include" \
+   "$RADAR_DIR/radar_uplink_tx.c" \
+   "$RADAR_DIR/radar_telemetry_observability.c" \
+   "$SCRIPT_DIR/test_radar_telemetry_observability.c" \
+   -o "$BUILD_DIR/test_radar_telemetry_observability_sanitized"
+ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 \
+UBSAN_OPTIONS=halt_on_error=1 \
+    "$BUILD_DIR/test_radar_telemetry_observability_sanitized"
+
+cc -std=c11 -Wall -Wextra -Werror \
+   -fsanitize=address,undefined -fno-omit-frame-pointer \
+   -I"$RADAR_DIR" \
+   -I"$COMMON_SRP_DIR/include" \
+   "$COMMON_SRP_DIR/srp_crc.c" \
+   "$COMMON_SRP_DIR/srp_codec.c" \
+   "$COMMON_SRP_DIR/srp_wire.c" \
+   "$RADAR_DIR/radar_telemetry_queue.c" \
+   "$SCRIPT_DIR/test_radar_telemetry_queue.c" \
+   -lm \
+   -o "$BUILD_DIR/test_radar_telemetry_queue_sanitized"
+ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 \
+UBSAN_OPTIONS=halt_on_error=1 \
+    "$BUILD_DIR/test_radar_telemetry_queue_sanitized"

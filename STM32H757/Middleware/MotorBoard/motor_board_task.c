@@ -1,5 +1,7 @@
 #include "motor_board_task.h"
 
+/* MotorBoard 控制/配置任务实现；创建人：待确认（当前维护人：Zhiqin）。 */
+
 #include <stdbool.h>
 #include <stdint.h>
 #include <math.h>
@@ -8,6 +10,7 @@
 
 #include "FreeRTOS.h"
 #include "task.h"
+#include "stm32h7xx_hal.h"
 
 #include "log_service.h"
 #include "motor_board_protocol.h"
@@ -84,17 +87,39 @@ static bool s_have_mspd;
 static bool s_have_mall;
 static float s_target_wheel_speed[MB_WHEEL_COUNT];
 static float s_actual_wheel_speed[MB_WHEEL_COUNT];
+static uint32_t s_actual_wheel_speed_timestamp_ms;
+static uint32_t s_actual_wheel_speed_sequence;
+static bool s_actual_wheel_speed_valid;
 static pid_controller_t s_wheel_pid[MB_WHEEL_COUNT];
 static Ramp_Profile_t s_wheel_ramp[MB_WHEEL_COUNT];
 static bool s_motion_forced_stop;
 static char s_latest_raw[MB_PROTOCOL_MAX_FRAME_LEN];
 static uint32_t s_link_probe_attempts;
 
+/**
+ * @brief 用有符号差值判断 FreeRTOS tick deadline 是否到期。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * @param now 当前 tick。
+ * @param due 目标 deadline tick。
+ * @return now 位于 due 或其后时 true，否则 false。
+ * 调用方式：MotorBoard 周期、响应超时和状态机间隔判断调用；两时刻差必须小于 2^31 tick。
+ * 线程约束：纯数值计算、可重入、不阻塞。
+ */
 static bool tick_due(TickType_t now, TickType_t due)
 {
     return (int32_t)(now - due) >= 0;
 }
 
+/**
+ * @brief 把有符号轮 PWM 限制到 +/-WHEEL_PID_MAX_OUT。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * @param value PID 与 trim 相乘后的 PWM；调用方应保证为有限值。
+ * @return 超上/下限时返回边界，否则原样返回；NaN 不会在此被修复。
+ * 调用方式：四轮 PID 输出转换为 int16_t 前逐轮调用。
+ * 线程约束：纯数值计算、可重入、不阻塞。
+ */
 static float clamp_wheel_pwm(float value)
 {
     if (value > WHEEL_PID_MAX_OUT) {
@@ -106,6 +131,15 @@ static float clamp_wheel_pwm(float value)
     return value;
 }
 
+/**
+ * @brief 把 MotorBoard 启动序列枚举映射为稳定诊断名称。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * @param step 当前启动序列步骤。
+ * @return 静态字符串常量；未知值与 FAILED 均返回 `failed`。
+ * 调用方式：配置失败日志保存失败步骤时调用，返回指针无需释放。
+ * 线程约束：纯 switch、可重入、不阻塞。
+ */
 static const char *motor_board_step_name(mb_sequence_step_t step)
 {
     switch (step) {
@@ -133,6 +167,15 @@ static const char *motor_board_step_name(mb_sequence_step_t step)
     }
 }
 
+/**
+ * @brief 把非 NULL MotorBoard 文本作为 INFO 日志提交到有界日志服务。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * @param text 只读零结尾文本；NULL 时忽略，日志服务返回前复制。
+ * @return 无；队列满时由 log_service 计数，本函数不报告失败。
+ * 调用方式：本模块格式化普通诊断后统一调用。
+ * 线程约束：普通任务上下文；LOG_INFO 使用零等待队列提交，禁止 ISR 调用。
+ */
 static void motor_board_log(const char *text)
 {
     if (text != NULL) {
@@ -140,6 +183,16 @@ static void motor_board_log(const char *text)
     }
 }
 
+/**
+ * @brief 记录一条 MotorBoard 命令的 TX ring 排队结果。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * @param command 只读命令文本；NULL 在日志中显示 `?`。
+ * @param sent true 表示完整文本进入 TX ring，false 表示 DROP。
+ * @return 无；`QUEUED` 不代表 USART6 已发送或电机板已执行。
+ * 调用方式：启动配置状态机每次发送后调用。
+ * 线程约束：使用栈上日志缓冲和日志队列，只在 MotorBoard 任务调用。
+ */
 static void motor_board_log_send(const char *command, bool sent)
 {
     char line[SMARTCAR_LOG_MAX_PAYLOAD + 1U];
@@ -155,6 +208,16 @@ static void motor_board_log_send(const char *command, bool sent)
     }
 }
 
+/**
+ * @brief 把长文本响应按最多 64 字符分片提交 INFO 日志。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * @param category 非空零结尾类别名；NULL 时忽略。
+ * @param raw 非空零结尾文本；NULL 或空串时忽略。
+ * @return 无；每片独立入队，队列满时可能只保留部分片段。
+ * 调用方式：read_flash 文本响应记录调用，不改变 parser 状态。
+ * 线程约束：调用 strlen/snprintf 和日志队列，仅 MotorBoard 普通任务调用。
+ */
 static void motor_board_log_raw(const char *category, const char *raw)
 {
     const char *cursor = raw;
@@ -178,6 +241,16 @@ static void motor_board_log_raw(const char *category, const char *raw)
     }
 }
 
+/**
+ * @brief 把未知文本按最多 16 字节分片为 hex 与可打印 ASCII 的 WARN 日志。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * @param category 非空零结尾类别名；NULL 时忽略。
+ * @param raw 非空零结尾字节串；NULL 或首字节为零时忽略。
+ * @return 无；格式化失败时提前停止，输入中的首个 NUL 结束全部处理。
+ * 调用方式：INVALID 非 `hex=` 和 UNKNOWN frame 的诊断路径调用。
+ * 线程约束：使用栈缓冲、snprintf 和日志队列，仅 MotorBoard 任务调用。
+ */
 static void motor_board_log_unrecognized_raw(const char *category,
                                              const char *raw)
 {
@@ -225,6 +298,15 @@ static void motor_board_log_unrecognized_raw(const char *category,
     }
 }
 
+/**
+ * @brief 尝试排队四路零 PWM，并把启动序列锁定为 FAILED。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * @param reason 只在错误日志中借用的原因；NULL 显示 `?`。
+ * @return 无；零 PWM 排队失败只记录 DROP，不证明电机已经停止。
+ * 调用方式：配置命令排队失败或电机板返回 NACK 时调用。
+ * 线程约束：修改无锁序列状态并调用 USART6 TX ring API，仅 MotorBoard task owner 调用。
+ */
 static void motor_board_enter_failed(const char *reason)
 {
     char line[SMARTCAR_LOG_MAX_PAYLOAD + 1U];
@@ -241,6 +323,15 @@ static void motor_board_enter_failed(const char *reason)
     LOG_ERROR(line);
 }
 
+/**
+ * @brief 判断帧类型能否作为 `$upload` 配置已生效的响应证据。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * @param type 已解析的 MotorBoard 帧类型。
+ * @return OK_ACK、MTEP、MSPD、BATTERY 或 MALL 返回 true；其他类型返回 false。
+ * 调用方式：等待 MB_WAIT_UPLOAD_RESPONSE 时选择是否推进到 RUNNING。
+ * 线程约束：纯 switch、可重入、不阻塞。
+ */
 static bool motor_board_upload_response_is_success(mb_frame_type_t type)
 {
     switch (type) {
@@ -259,6 +350,15 @@ static bool motor_board_upload_response_is_success(mb_frame_type_t type)
     }
 }
 
+/**
+ * @brief 尝试恢复 USART6 RX，并记录寄存器与 transport 统计摘要。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * @param reason 最多显示前 8 字符的原因；NULL 显示 `?`。
+ * @return 无；RX active 时也以 WARN 记录，失败时记录 ERROR。
+ * 调用方式：link probe 重启清理 RX/parser 后调用，不改变控制目标。
+ * 线程约束：会直接检查 USART6、进入 transport 临界区并提交日志，禁止 ISR，仅任务 owner 调用。
+ */
 static void motor_board_log_rx_health(const char *reason)
 {
     mb_transport_stats_t stats;
@@ -285,6 +385,16 @@ static void motor_board_log_rx_health(const char *reason)
     }
 }
 
+/**
+ * @brief 丢弃 USART6 RX 与 parser 半帧，并立即回到零 PWM link probe 步骤。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * @param now 当前 FreeRTOS tick，作为下一次 probe 的立即 deadline。
+ * @param reason 只在健康/重试日志中借用；允许 NULL。
+ * @return 无；不会清 TX ring、轮速目标、PID 状态或累计 probe 次数。
+ * 调用方式：等待响应超时后由启动序列调用，下一轮 run_sequence 重新排队零 PWM。
+ * 线程约束：修改 transport/parser/任务全局状态，只允许 MotorBoard task owner 调用。
+ */
 static void motor_board_restart_link_probe(TickType_t now, const char *reason)
 {
     char line[SMARTCAR_LOG_MAX_PAYLOAD + 1U];
@@ -302,6 +412,15 @@ static void motor_board_restart_link_probe(TickType_t now, const char *reason)
     LOG_WARN(line);
 }
 
+/**
+ * @brief 清除当前响应等待，按枚举顺序推进一个配置步骤并安排 100 ms 间隔。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * @param now 当前 FreeRTOS tick。
+ * @return 无；依赖 mb_sequence_step_t 的配置步骤保持连续有序。
+ * 调用方式：handle_response() 收到与当前等待匹配的成功响应后调用。
+ * 线程约束：无锁修改状态机字段，仅 MotorBoard task owner 调用。
+ */
 static void motor_board_advance_sequence(TickType_t now)
 {
     s_wait_response = MB_WAIT_NONE;
@@ -310,6 +429,16 @@ static void motor_board_advance_sequence(TickType_t now)
     s_next_sequence_tick = now + pdMS_TO_TICKS(MB_TASK_SEQUENCE_GAP_MS);
 }
 
+/**
+ * @brief 记录待等响应类型并设置固定 1000 ms deadline。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * @param response 期望响应类别；MB_WAIT_NONE 不修改任何状态。
+ * @param now 当前 FreeRTOS tick。
+ * @return 当前实现始终返回 true，表示状态记录操作本身不会失败。
+ * 调用方式：配置文本成功进入 TX ring 后由 run_sequence() 调用。
+ * 线程约束：无锁修改等待状态，只允许 MotorBoard task owner 调用。
+ */
 static bool motor_board_wait_for_response(mb_wait_response_t response,
                                           TickType_t now)
 {
@@ -321,6 +450,15 @@ static bool motor_board_wait_for_response(mb_wait_response_t response,
     return true;
 }
 
+/**
+ * @brief 缓存最近响应，并按 frame type 更新业务快照或输出有界诊断。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * @param frame parser 产出的只读完整帧；NULL 时返回，内容在本函数内按值复制。
+ * @return 无；BATTERY/MTEP/MSPD/MALL 更新对应 have 标志，其他类型只记录日志。
+ * 调用方式：MotorBoard task 每次 Poll 成功后、状态机响应处理和 PID 更新前调用。
+ * 线程约束：无锁修改模块快照并可能提交多条日志，只允许 MotorBoard task owner 调用。
+ */
 static void motor_board_log_frame_event(const mb_protocol_frame_t *frame)
 {
     char line[SMARTCAR_LOG_MAX_PAYLOAD + 1U];
@@ -373,6 +511,16 @@ static void motor_board_log_frame_event(const mb_protocol_frame_t *frame)
     }
 }
 
+/**
+ * @brief 按当前等待类型消费 MotorBoard 响应，并推进配置状态机或进入 FAILED。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（关键静态函数契约补充）。
+ * @param frame parser 产出的只读帧；NULL 或当前无等待时忽略。
+ * @param now 当前 FreeRTOS tick，用于计算下一步/超时期限。
+ * @return 无；不匹配当前等待类型的帧仅由日志/缓存路径处理，不推进状态。
+ * 调用方式：仅 MotorBoard 任务在 Poll 成功后调用。
+ * 线程约束：直接修改无锁状态机字段，单任务 owner，禁止 ISR 或并发调用。
+ */
 static void motor_board_handle_response(const mb_protocol_frame_t *frame,
                                         TickType_t now)
 {
@@ -435,6 +583,7 @@ static void motor_board_handle_response(const mb_protocol_frame_t *frame,
     }
 }
 
+/** 提交四轮目标速度；数组顺序固定为 RR/RF/LR/LF。 */
 bool motor_board_set_target_wheel_speeds(const float speeds[MB_WHEEL_COUNT])
 {
     bool any_nonzero = false;
@@ -459,6 +608,7 @@ bool motor_board_set_target_wheel_speeds(const float speeds[MB_WHEEL_COUNT])
     return true;
 }
 
+/** 更新 PID 与加速度限幅，拒绝非有限或越界参数。 */
 bool motor_board_update_pid_params(float kp, float ki, float kd,
                                    float max_accel)
 {
@@ -479,6 +629,7 @@ bool motor_board_update_pid_params(float kp, float ki, float kd,
     return true;
 }
 
+/** 清零目标并发送 MotorBoard 安全停机序列。 */
 bool motor_board_force_stop(void)
 {
     bool sent;
@@ -500,13 +651,36 @@ bool motor_board_force_stop(void)
     return sent;
 }
 
+/** 复制最近一次实际轮速反馈。 */
 void motor_board_get_actual_wheel_speeds(float speeds[MB_WHEEL_COUNT])
 {
+    motor_board_wheel_speed_snapshot_t snapshot;
+
     if (speeds != NULL) {
-        (void)memcpy(speeds, s_actual_wheel_speed, sizeof(s_actual_wheel_speed));
+        (void)motor_board_get_actual_wheel_speed_snapshot(&snapshot);
+        (void)memcpy(speeds, snapshot.speed_mm_s,
+                     sizeof(snapshot.speed_mm_s));
     }
 }
 
+bool motor_board_get_actual_wheel_speed_snapshot(
+    motor_board_wheel_speed_snapshot_t *snapshot)
+{
+    if (snapshot == NULL) {
+        return false;
+    }
+
+    taskENTER_CRITICAL();
+    (void)memcpy(snapshot->speed_mm_s, s_actual_wheel_speed,
+                 sizeof(snapshot->speed_mm_s));
+    snapshot->timestamp_ms = s_actual_wheel_speed_timestamp_ms;
+    snapshot->sequence = s_actual_wheel_speed_sequence;
+    snapshot->valid = s_actual_wheel_speed_valid;
+    taskEXIT_CRITICAL();
+    return snapshot->valid;
+}
+
+/** 读取最近一次电池电压反馈。 */
 bool motor_board_get_battery_voltage(float *voltage)
 {
     if (voltage == NULL || !s_have_battery || !isfinite(s_latest_battery.battery_voltage)) {
@@ -516,11 +690,22 @@ bool motor_board_get_battery_voltage(float *voltage)
     return true;
 }
 
+/**
+ * @brief 用 MSPD 反馈执行四轮斜坡/PID/trim，并把 [RR,RF,LR,LF] PWM 排入 USART6 ring。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（关键静态函数契约补充）。
+ * @param frame 只读 MotorBoard 帧；仅 MB_FRAME_MSPD 会处理，RF 编码器极性在此修正一次。
+ * @return 无；强停 latch 生效时只更新实际轮速，不产生新 PWM；排队失败记录警告。
+ * 调用方式：MotorBoard 单一任务每收到速度反馈调用，控制步长固定为 MB_PID_DT_SECONDS。
+ * 线程约束：四轮计算、状态更新和 TX 排队均位于 FreeRTOS 临界区，期间会屏蔽调度/IRQ；
+ *           禁止 ISR/并发调用，扩展计算前必须评估最坏临界区时长。
+ */
 static void motor_board_update_pid(const mb_protocol_frame_t *frame)
 {
     int16_t pwm[MB_WHEEL_COUNT];
     float target_speed[MB_WHEEL_COUNT];
     bool sent;
+    const uint32_t sample_timestamp_ms = HAL_GetTick();
 
     if (frame == NULL || frame->type != MB_FRAME_MSPD) {
         return;
@@ -531,6 +716,9 @@ static void motor_board_update_pid(const mb_protocol_frame_t *frame)
             s_actual_wheel_speed[index] =
                 frame->speed[index] * (float)ENCODER_DIR_SIGN[index];
         }
+        s_actual_wheel_speed_timestamp_ms = sample_timestamp_ms;
+        ++s_actual_wheel_speed_sequence;
+        s_actual_wheel_speed_valid = true;
         taskEXIT_CRITICAL();
         return;
     }
@@ -555,6 +743,9 @@ static void motor_board_update_pid(const mb_protocol_frame_t *frame)
         pwm[index] = (int16_t)clamp_wheel_pwm(
             raw_pwm * s_wheel_trim[index]);
     }
+    s_actual_wheel_speed_timestamp_ms = sample_timestamp_ms;
+    ++s_actual_wheel_speed_sequence;
+    s_actual_wheel_speed_valid = true;
     sent = MB_Protocol_SendPwm(pwm[0], pwm[1], pwm[2], pwm[3]);
     taskEXIT_CRITICAL();
     if (!sent) {
@@ -562,6 +753,15 @@ static void motor_board_update_pid(const mb_protocol_frame_t *frame)
     }
 }
 
+/**
+ * @brief 把最近四轮实际速度按小端 float 编码为 SRP WHEEL_SPEED_STATUS。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * 传入参数：无。
+ * @return 无；忽略服务发送返回值，失败由 SRP/UART 统计体现。
+ * 调用方式：MotorBoard task 每 50 ms 调用，数组顺序固定为 [RR,RF,LR,LF]。
+ * 线程约束：读取同一 task owner 更新的实际速度并可能等待服务 mutex/UART，禁止 ISR。
+ */
 static void motor_board_send_wheel_status(void)
 {
     uint8_t payload[SRP_PAYLOAD_WHEEL_SPEED_STATUS_SIZE];
@@ -573,6 +773,15 @@ static void motor_board_send_wheel_status(void)
                                   sizeof(payload));
 }
 
+/**
+ * @brief 把最近有效电池电压编码为 SRP POWER_STATUS 遥测。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * 传入参数：无。
+ * @return 无；尚无有限电压时不发送，服务发送失败不向本函数调用者返回。
+ * 调用方式：MotorBoard task 每 500 ms 调用；缓存无独立 freshness 时间戳。
+ * 线程约束：同一 task owner 读取缓存，发送路径可能等待 mutex/UART，禁止 ISR。
+ */
 static void motor_board_send_power_status(void)
 {
     float voltage;
@@ -588,6 +797,15 @@ static void motor_board_send_power_status(void)
                                   sizeof(payload));
 }
 
+/**
+ * @brief 按 have 标志输出最近 Battery/MTEP/MSPD/MAll 和原始响应快照。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * 传入参数：无。
+ * @return 无；读取后不清 have 标志或缓存，因此后续周期可重复同一值。
+ * 调用方式：MotorBoard task 每 1000 ms 调用；日志轮序显示 M1=RR,M2=RF,M3=LR,M4=LF。
+ * 线程约束：使用共享静态日志缓冲与模块快照，只允许 MotorBoard task owner 调用。
+ */
 static void motor_board_log_snapshot(void)
 {
     char line[SMARTCAR_LOG_MAX_PAYLOAD + 1U];
@@ -641,6 +859,15 @@ static void motor_board_log_snapshot(void)
     }
 }
 
+/**
+ * @brief 汇总 USART6 transport 与文本 parser 累计统计并输出一条 INFO 日志。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * 传入参数：无。
+ * @return 无；快照读取不清零，日志排队失败不反馈。
+ * 调用方式：MotorBoard task 每 5000 ms 调用，用于诊断而非链路验收。
+ * 线程约束：transport 快照使用短临界区，protocol 统计由同一 task owner 读取；禁止 ISR。
+ */
 static void motor_board_log_stats(void)
 {
     mb_transport_stats_t transport_stats;
@@ -662,6 +889,15 @@ static void motor_board_log_stats(void)
     motor_board_log(line);
 }
 
+/**
+ * @brief 推进零 PWM 探测、520 参数配置、Flash/电压查询和上传使能启动序列。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（关键静态函数契约补充）。
+ * @param now 当前 FreeRTOS tick，所有 deadline 用有符号差值判断回绕。
+ * @return 无；响应超时会清 transport/parser 并回到零 PWM link probe，配置排队失败进入 FAILED。
+ * 调用方式：MotorBoard 任务每 1 ms 调用；只有匹配响应通过 handle_response 后才推进下一步。
+ * 线程约束：无锁状态机、单任务 owner；会短临界区排队 USART6 文本，禁止 ISR/并发调用。
+ */
 static void motor_board_run_sequence(TickType_t now)
 {
     bool sent;
@@ -758,6 +994,7 @@ static void motor_board_run_sequence(TickType_t now)
     }
 }
 
+/** MotorBoard FreeRTOS 任务：配置序列、周期目标、反馈解析和恢复。 */
 void motor_board_task(void *argument)
 {
     TickType_t now;
@@ -782,6 +1019,9 @@ void motor_board_task(void *argument)
     s_next_power_status_tick = now + pdMS_TO_TICKS(MB_TASK_POWER_STATUS_PERIOD_MS);
     (void)memset(s_target_wheel_speed, 0, sizeof(s_target_wheel_speed));
     (void)memset(s_actual_wheel_speed, 0, sizeof(s_actual_wheel_speed));
+    s_actual_wheel_speed_timestamp_ms = 0U;
+    s_actual_wheel_speed_sequence = 0U;
+    s_actual_wheel_speed_valid = false;
     for (size_t index = 0U; index < MB_WHEEL_COUNT; ++index) {
         s_wheel_ramp[index].current_target = 0.0f;
         s_wheel_ramp[index].max_accel = WHEEL_RAMP_MAX_ACCEL;
@@ -818,6 +1058,7 @@ void motor_board_task(void *argument)
     }
 }
 
+/** 创建唯一 MotorBoard 任务。 */
 void motor_board_task_start(void)
 {
     if (!MB_Transport_IsReady() || s_task_handle != NULL) {

@@ -1,8 +1,11 @@
 #include "chassis_kinematics.h"
 
+/* 四轮差速运动学实现；创建人：待确认（当前维护人：Zhiqin）。 */
+
 #include <math.h>
 #include <stddef.h>
 
+/** 实现头文件约定的 RR/RF/LR/LF 四轮差速换算和越界拒绝。 */
 bool chassis_kinematics_compute(float linear_mm_s, float angular_rad_s,
                                 float wheel_speed[CHASSIS_WHEEL_COUNT])
 {

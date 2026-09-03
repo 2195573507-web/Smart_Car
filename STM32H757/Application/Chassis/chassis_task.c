@@ -15,6 +15,9 @@
 #include "log_service.h"
 #include "motor_board_task.h"
 #include "s3_service.h"
+#include "smartcar_debug_config.h"
+
+/* CM7 底盘控制任务实现；创建人：待确认（当前维护人：Zhiqin）。 */
 
 #define CHASSIS_TASK_STACK_WORDS UINT16_C(512)
 #define CHASSIS_TASK_PRIORITY (tskIDLE_PRIORITY + 3U)
@@ -22,8 +25,6 @@
 #define CHASSIS_TASK_PERIOD_S 0.010f
 #define CHASSIS_HEADING_CONTROL_DT_MIN_S 0.001f
 #define CHASSIS_HEADING_CONTROL_DT_MAX_S 0.100f
-#define CHASSIS_HEADING_LOG_PERIOD_MS UINT32_C(500)
-#define CHASSIS_OUTPUT_LOG_PERIOD_MS UINT32_C(100)
 #define CHASSIS_MAX_ACCEL_MM_S2 (400.0f)
 #define CHASSIS_HEADING_KP 0.28f /* rad/s per degree */
 #define CHASSIS_HEADING_KI 0.085f /* rad/s per degree-second */
@@ -48,6 +49,17 @@ static float s_heading_w_ff_rad_s = CHASSIS_HEADING_W_FF_DEFAULT_RAD_S;
 static float s_ramped_v = 0.0f;
 static uint32_t s_stop_sequence;
 
+/**
+ * @brief 将底盘控制周期修正为有限且位于配置上下限内的秒数。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * @param[in] dt_s 由相邻 FreeRTOS tick 差换算的控制周期，单位 s。
+ * @return 非有限或非正输入返回名义周期 0.010 s；过小/过大分别返回 0.001/0.100 s；
+ *         其余返回原值，无独立失败码。
+ * 调用方式：`chassis_task()` 每个 10 ms 周期在斜坡与航向 slew 计算前调用一次。
+ * 线程约束：纯计算、不阻塞、不获取 mutex 且可重入，禁止 ISR 调用；参数按值传递，
+ *           不涉及对象所有权。
+ */
 static float chassis_sanitize_control_dt(float dt_s)
 {
     if (!isfinite(dt_s) || dt_s <= 0.0f) {
@@ -62,6 +74,18 @@ static float chassis_sanitize_control_dt(float dt_s)
     return dt_s;
 }
 
+/**
+ * @brief 按动态控制周期和最大线加速度推进全局线速度斜坡状态。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * @param[in] target_v_mm_s 当前目标线速度，单位 mm/s。
+ * @param[in] dt_s 已校验控制周期，单位 s。
+ * @return 返回更新后的 `s_ramped_v`；目标非有限时复位并返回 0，周期或最大增量无效时
+ *         保持已有斜坡值，内部旧值非有限时先清零。
+ * 调用方式：仅 `chassis_task()` 在输出门打开后、运动学计算前每周期调用。
+ * 线程约束：读写模块全局 `s_ramped_v`，自身不获取 mutex/临界区且不阻塞；正常 writer
+ *           为底盘任务，外部停机路径可在临界区复位，禁止 ISR/并发调用，无对象所有权。
+ */
 static float chassis_ramp_linear_velocity(float target_v_mm_s, float dt_s)
 {
     float max_delta;
@@ -94,6 +118,18 @@ static float chassis_ramp_linear_velocity(float target_v_mm_s, float dt_s)
 
 /* Limit angular-velocity slew using the actual task interval. The stored
  * value is the last applied correction in rad/s, while alpha is rad/s^2. */
+/**
+ * @brief 按最大角加速度限制航向修正角速度相对上次已应用值的变化率。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * @param[in] raw_rad_s 本周期限幅前航向角速度修正，单位 rad/s。
+ * @param[in] dt_s 已校验控制周期，单位 s。
+ * @return 返回本周期允许的有限修正值；输入、周期、最大增量或计算结果异常时清零
+ *         `s_heading_w_prev_rad_s` 并返回 0。
+ * 调用方式：仅 `chassis_task()` 的有效 Target Yaw 闭环在最终运动学计算前调用。
+ * 线程约束：通过 FreeRTOS 临界区串行读写共享 slew 历史，不使用 mutex、不会主动阻塞；
+ *           仅任务上下文调用，禁止 ISR，参数按值且不涉及对象所有权。
+ */
 static float chassis_heading_apply_slew(float raw_rad_s, float dt_s)
 {
     float previous_rad_s;
@@ -138,14 +174,39 @@ static float chassis_heading_apply_slew(float raw_rad_s, float dt_s)
     return applied_rad_s;
 }
 
+/**
+ * @brief 汇总 SRP 同步、IMU boot、姿态 ready/freshness 和 MotorBoard 任务存在五项输出门。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * 传入参数：无。
+ * @return 本次顺序读取全部满足时返回 true，否则返回 false；true 不证明下一时刻条件仍
+ *         有效，也不证明 MotorBoard 已接受或执行输出。
+ * 调用方式：命令准入、航向目标准入以及每个 10 ms 控制周期发送前重新调用。
+ * 线程约束：任务上下文顺序读取多个模块，函数自身不持有统一 mutex 且条件不是原子快照；
+ *           `xTaskGetHandle()` 访问 RTOS 状态但不主动等待，禁止 ISR，无对象所有权。
+ */
 static bool chassis_output_gate_is_open(void)
 {
     return s3_service_is_synced() != 0U &&
            imu_boot_manager_is_ready() != 0U &&
            g_attitude_is_ready != 0U &&
+           dual_ahrs_is_primary_fresh() != 0U &&
            xTaskGetHandle("motor_board") != NULL;
 }
 
+/**
+ * @brief 在非低速直行目标下抬升过低侧轮速，并以同符号增量保持左右差速量。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-08-31（静态函数契约补充）。
+ * @param[in] linear_mm_s 已经斜坡处理的目标线速度，单位 mm/s。
+ * @param[in,out] wheel_speed 调用方拥有且至少含 `CHASSIS_WHEEL_COUNT` 项的 RR/RF/LR/LF
+ *                            轮速数组，单位 mm/s；允许为 NULL。
+ * @return 无返回值；NULL 或 `|linear_mm_s|<=80` 时保持数组不变；否则可能修改四轮值。
+ *         本函数不重新执行轮速上限校验，调用方须承担最终准入责任。
+ * 调用方式：仅 Target Yaw 闭环在运动学初次校验成功后、提交 MotorBoard 前调用。
+ * 线程约束：只修改调用方数组、不阻塞、不获取 mutex；仅底盘任务上下文调用，禁止 ISR，
+ *           不保存或接管数组所有权，同一数组不得并发访问。
+ */
 static void chassis_apply_min_safe_wheel_speed(
     float linear_mm_s, float wheel_speed[CHASSIS_WHEEL_COUNT])
 {
@@ -189,6 +250,7 @@ static void chassis_apply_min_safe_wheel_speed(
     wheel_speed[CHASSIS_WHEEL_LF] = left_speed;
 }
 
+/** 提交普通差速目标；最终输出仍受全套安全门控。 */
 bool chassis_task_set_velocity(float v_mm_s, float w_rad_s)
 {
     float wheel_speed[CHASSIS_WHEEL_COUNT];
@@ -213,6 +275,7 @@ bool chassis_task_set_velocity(float v_mm_s, float w_rad_s)
     return true;
 }
 
+/** 清除所有目标并发起四轮安全停机。 */
 void chassis_task_force_stop(void)
 {
     taskENTER_CRITICAL();
@@ -229,6 +292,7 @@ void chassis_task_force_stop(void)
     taskEXIT_CRITICAL();
 }
 
+/** 提交目标航向巡航目标；不直接写 MotorBoard。 */
 void chassis_task_set_heading_target(float v_mm_s, float target_yaw_deg)
 {
     if (!chassis_task_heading_target_is_admissible(v_mm_s, target_yaw_deg)) {
@@ -259,6 +323,7 @@ void chassis_task_set_heading_target(float v_mm_s, float target_yaw_deg)
     taskEXIT_CRITICAL();
 }
 
+/** 设置航向角速度前馈目标。 */
 void chassis_task_set_heading_feedforward(float w_ff_rad_s)
 {
     if (!isfinite(w_ff_rad_s) ||
@@ -270,6 +335,7 @@ void chassis_task_set_heading_feedforward(float w_ff_rad_s)
     taskEXIT_CRITICAL();
 }
 
+/** 检查航向命令有限性/范围，不修改控制状态。 */
 bool chassis_task_heading_target_is_admissible(float v_mm_s,
                                                float target_yaw_deg)
 {
@@ -279,6 +345,7 @@ bool chassis_task_heading_target_is_admissible(float v_mm_s,
            (v_mm_s == 0.0f || chassis_output_gate_is_open());
 }
 
+/** 底盘实时任务入口：计算运动学、斜坡、航向修正并执行安全门控。 */
 void chassis_task(void *argument)
 {
     TickType_t last_wake;
@@ -529,6 +596,7 @@ void chassis_task(void *argument)
     }
 }
 
+/** 创建唯一底盘任务。 */
 void chassis_task_start(void)
 {
     if (s_task_handle != NULL) {

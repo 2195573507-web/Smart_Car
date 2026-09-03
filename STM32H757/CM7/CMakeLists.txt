@@ -26,6 +26,7 @@ target_link_options(${PROJECT_NAME} PRIVATE -u _printf_float)
 option(SMARTCAR_MOTOR_BOARD_ONLY
        "Run the CM7 motor-board UART bring-up image without BMI/LSM tasks" OFF)
 
+# 调试开关默认关闭；具体日志周期/抓包上限统一见 Common/SmartCarDebug。
 option(SMARTCAR_BMI323_DEBUG_ONLY
        "Run the CM7 BMI323-only diagnostic configuration" OFF)
 
@@ -53,6 +54,8 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../Application/Safety/attitude_startup_coordinator.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../Application/Chassis/chassis_kinematics.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../Application/Chassis/chassis_task.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../Application/Chassis/chassis_state_task.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../Middleware/Odometry/chassis_odometry.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../Application/RTOS/imu_runtime.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../Middleware/Communication/UART_Link/uart_link.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../../Common/SRP/srp_crc.c
@@ -76,6 +79,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../Middleware/Communication/UART_Link
     ${CMAKE_CURRENT_SOURCE_DIR}/../../Common/SRP/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../Common/SmartCarDebug
     ${CMAKE_CURRENT_SOURCE_DIR}/../Middleware/Communication/Services
     ${CMAKE_CURRENT_SOURCE_DIR}/../Drivers/IMU/BMI323
     ${CMAKE_CURRENT_SOURCE_DIR}/../Drivers/IMU/LSM303
@@ -89,6 +93,7 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../Middleware/Boot
     ${CMAKE_CURRENT_SOURCE_DIR}/../Application/Safety
     ${CMAKE_CURRENT_SOURCE_DIR}/../Application/Chassis
+    ${CMAKE_CURRENT_SOURCE_DIR}/../Middleware/Odometry
     ${CMAKE_CURRENT_SOURCE_DIR}/../Middleware/MotorBoard
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Inc
     ${CMAKE_CURRENT_SOURCE_DIR}/../Application/RTOS

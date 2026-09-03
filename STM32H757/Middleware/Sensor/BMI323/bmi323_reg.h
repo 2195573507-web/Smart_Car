@@ -1,6 +1,9 @@
 #ifndef SMARTCAR_SENSOR_BMI323_REG_H
 #define SMARTCAR_SENSOR_BMI323_REG_H
 
+/* BMI323 寄存器地址/位定义；创建人：待确认（当前维护人：Zhiqin）。
+ * 本文件只描述芯片寄存器，不包含总线访问或业务逻辑。 */
+
 #include <stdint.h>
 
 #ifdef __cplusplus
