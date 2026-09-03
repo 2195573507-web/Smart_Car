@@ -190,7 +190,7 @@ TEST(S3Protocol, HandlesSplitAndStickyTcpChunksWithoutDroppingFrames) {
   EXPECT_EQ(assembler.bufferedBytes(), 0U);
 }
 
-TEST(S3Protocol, PreservesAllStickyFramesPastTheLegacyReadyLimit) {
+TEST(S3Protocol, EnforcesReadyQueueCapacityByDroppingOldestFrames) {
   auto extractor = std::make_shared<s3_ydlidar_bridge::S3FrameExtractor>();
   s3_ydlidar_bridge::TcpChunkAssembler assembler(extractor, 4096U, 1U);
   const auto first = makeS3Frame(minimalYdlidarPayload(false), 21U);
@@ -201,16 +201,40 @@ TEST(S3Protocol, PreservesAllStickyFramesPastTheLegacyReadyLimit) {
   sticky.insert(sticky.end(), third.begin(), third.end());
 
   ASSERT_TRUE(assembler.feed(sticky.data(), sticky.size()));
+  const auto queued_stats = assembler.readyStats();
+  EXPECT_EQ(queued_stats.depth, 1U);
+  EXPECT_EQ(queued_stats.capacity, 1U);
+  EXPECT_EQ(queued_stats.dropped_ready, 2U);
+  EXPECT_EQ(queued_stats.overflow, 2U);
+  EXPECT_EQ(queued_stats.dropped_ready_frames, 2U);
+  EXPECT_EQ(queued_stats.ready_queue_overflows, 2U);
   const auto frames = assembler.takeAll();
-  ASSERT_EQ(frames.size(), 3U);
-  EXPECT_EQ(frames[0].sequence, 21U);
-  EXPECT_EQ(frames[1].sequence, 22U);
-  EXPECT_EQ(frames[2].sequence, 23U);
+  ASSERT_EQ(frames.size(), 1U);
+  EXPECT_EQ(frames[0].sequence, 23U);
+  EXPECT_EQ(assembler.readyFrames(), 0U);
+  EXPECT_EQ(assembler.droppedReady(), 2U);
+  EXPECT_EQ(assembler.readyOverflow(), 2U);
+}
+
+TEST(S3Protocol, ZeroReadyCapacityDropsParsedFramesExplicitly) {
+  auto extractor = std::make_shared<s3_ydlidar_bridge::S3FrameExtractor>();
+  s3_ydlidar_bridge::TcpChunkAssembler assembler(extractor, 4096U, 0U);
+  const auto candidate = makeS3Frame(minimalYdlidarPayload(false), 24U);
+
+  ASSERT_TRUE(assembler.feed(candidate.data(), candidate.size()));
+  EXPECT_EQ(assembler.readyFrames(), 0U);
+  EXPECT_EQ(assembler.droppedReady(), 1U);
+  EXPECT_EQ(assembler.readyOverflow(), 1U);
+  const auto stats = assembler.readyStats();
+  EXPECT_EQ(stats.capacity, 0U);
+  EXPECT_EQ(stats.depth, 0U);
+  EXPECT_EQ(stats.dropped_ready, 1U);
+  EXPECT_EQ(stats.overflow, 1U);
 }
 
 TEST(S3Protocol, GoldenS3rdReplayPublishesOnlyAtTheNextZeroPacket) {
   auto extractor = std::make_shared<s3_ydlidar_bridge::S3FrameExtractor>();
-  s3_ydlidar_bridge::TcpChunkAssembler assembler(extractor, 4096U, 1U);
+  s3_ydlidar_bridge::TcpChunkAssembler assembler(extractor, 4096U, 8U);
   const auto zero_start = makeS3Frame(
       trianglePayload(0x01U, 5U, 5U, {4000U}), 100U, 1U, 1U, 0x0001U);
   const auto normal = makeS3Frame(
@@ -297,4 +321,84 @@ TEST(S3Protocol, RejectsWrongMessageTypeAndFlags) {
   }
   EXPECT_EQ(extractor.counters().type_errors, 1U);
   EXPECT_EQ(extractor.counters().flags_errors, 1U);
+}
+
+TEST(S3Protocol, AcceptsOpaqueMessageTypeWithoutYdlidarPayloadValidation) {
+  s3_ydlidar_bridge::S3ProtocolConfig config;
+  config.message_type_rules = {
+      {1U, s3_ydlidar_bridge::S3MessageTypePolicy::kRawYdlidar},
+      {7U, s3_ydlidar_bridge::S3MessageTypePolicy::kOpaque},
+  };
+  config.expected_stream_id = 9U;
+  config.opaque_min_payload_bytes = 0U;
+  s3_ydlidar_bridge::S3FrameExtractor extractor(config);
+
+  // A one-byte payload and the zero-position flag are intentionally invalid
+  // for a raw YDLIDAR packet, but valid for an opaque, dispatcher-owned type.
+  const auto opaque = makeS3Frame({0x42U}, 44U, 1U, 7U, 0x0001U, 1U, 9U);
+  size_t consumed = 0U;
+  s3_ydlidar_bridge::ReceivedFrame decoded;
+  ASSERT_EQ(extractor.extract(opaque, consumed, decoded),
+            s3_ydlidar_bridge::ExtractStatus::kFrameReady);
+  EXPECT_EQ(consumed, opaque.size());
+  EXPECT_TRUE(decoded.isOpaque());
+  EXPECT_FALSE(decoded.isRawYdlidar());
+  EXPECT_FALSE(decoded.zero_packet);
+  EXPECT_EQ(decoded.payload, std::vector<uint8_t>({0x42U}));
+  EXPECT_EQ(decoded.payload_length, 1U);
+  EXPECT_EQ(decoded.message_type, 7U);
+  EXPECT_EQ(decoded.flags, 0x0001U);
+  EXPECT_EQ(decoded.device_id, 1U);
+  EXPECT_EQ(decoded.stream_id, 9U);
+  EXPECT_EQ(decoded.sequence, 44U);
+  EXPECT_EQ(decoded.timestamp_ms, 1234U);
+  EXPECT_EQ(decoded.metadata.message_type, 7U);
+  EXPECT_EQ(decoded.metadata.payload_kind,
+            s3_ydlidar_bridge::S3FramePayloadKind::kOpaque);
+  EXPECT_EQ(decoded.metadata.payload_length, 1U);
+  EXPECT_EQ(extractor.counters().accepted_frames, 1U);
+  EXPECT_EQ(extractor.counters().raw_frames, 0U);
+  EXPECT_EQ(extractor.counters().opaque_frames, 1U);
+}
+
+TEST(S3Protocol, RoutesTypeTwoSrpChassisFrameAsOpaqueOnly) {
+  const std::vector<uint8_t> srp_chassis{
+      0xAAU, 0x55U, 0x18U, 0x00U, 0x00U, 0x2AU, 0x15U, 0x02U, 0x01U,
+      0x04U, 0x00U, 0x00U, 0xE8U, 0x03U, 0x00U, 0x00U, 0x00U, 0x00U,
+      0x7AU, 0x44U, 0x00U, 0x00U, 0xFAU, 0xC3U, 0x00U, 0x00U, 0x33U,
+      0x43U, 0x00U, 0x00U, 0x48U, 0x41U, 0x7FU, 0xC0U, 0x0DU, 0x0AU,
+  };
+  s3_ydlidar_bridge::S3ProtocolConfig config;
+  config.opaque_message_types = {2U};
+  s3_ydlidar_bridge::S3FrameExtractor extractor(config);
+  const auto outer = makeS3Frame(srp_chassis, 46U, 1U, 2U);
+
+  size_t consumed = 0U;
+  s3_ydlidar_bridge::ReceivedFrame decoded;
+  ASSERT_EQ(extractor.extract(outer, consumed, decoded),
+            s3_ydlidar_bridge::ExtractStatus::kFrameReady);
+  EXPECT_EQ(consumed, outer.size());
+  EXPECT_EQ(decoded.message_type, 2U);
+  EXPECT_TRUE(decoded.isOpaque());
+  EXPECT_FALSE(decoded.isRawYdlidar());
+  EXPECT_FALSE(decoded.zero_packet);
+  EXPECT_EQ(decoded.payload, srp_chassis);
+  EXPECT_EQ(extractor.counters().raw_frames, 0U);
+  EXPECT_EQ(extractor.counters().opaque_frames, 1U);
+}
+
+TEST(S3Protocol, OpaqueConvenienceAllowListAcceptsShortPayload) {
+  s3_ydlidar_bridge::S3ProtocolConfig config;
+  config.opaque_message_types = {7U};
+  s3_ydlidar_bridge::S3FrameExtractor extractor(config);
+  const auto opaque = makeS3Frame({}, 45U, 1U, 7U);
+
+  size_t consumed = 0U;
+  s3_ydlidar_bridge::ReceivedFrame decoded;
+  ASSERT_EQ(extractor.extract(opaque, consumed, decoded),
+            s3_ydlidar_bridge::ExtractStatus::kFrameReady);
+  EXPECT_EQ(consumed, opaque.size());
+  EXPECT_TRUE(decoded.isOpaque());
+  EXPECT_TRUE(decoded.payload.empty());
+  EXPECT_EQ(extractor.counters().opaque_frames, 1U);
 }

@@ -1,5 +1,72 @@
 # ROS2_WIN Progress Log
 
+## 2026-09-01 real SLAM integration
+
+- Fresh preflight found one safe SRP v4 bridge with real `/scan` near 5 Hz;
+  `/odom`, `/tf`, `/tf_static`, and `/map` were absent while all four live
+  publication gates were false.
+- A first all-true attempt used the stale default `docker-ros2-dev` image and
+  was discarded; no evidence from it was used. The corrected run used the
+  `srp_interleave_0831-ros2-dev` image and matching install volume.
+- Started `robot_state_publisher`, `slam_toolbox`, and RViz in the existing
+  bridge container. No temporary TF or `/cmd_vel` was used. Verified
+  `base_link -> laser_frame`, `odom -> base_link`, and `map -> odom`; RViz
+  config has Fixed Frame `map` with `/scan`, `/map`, TF, and RobotModel.
+- Stationary 120-second gate passed with continuous scan/odom and map output;
+  diagnostics showed no SRP decoder, outer CRC, or sequence faults in the
+  accepted period. A real bag was recorded while the vehicle was then moved
+  manually and slowly.
+- Rosbag finalized at `bags/slam_live_20260901`: 343.300 s, 25,013 messages,
+  `/scan` 1,215, `/odom` 3,107, `/tf` 20,278, `/tf_static` 1, `/map` 69,
+  `/diagnostics` 343. Map saved to `maps/slam_live_20260901.pgm/.yaml`.
+- Final safe bridge `srp_interleave_0831-safe-final3` is the only 8765 owner;
+  `allow_live_telemetry`, `enable_live_odom`, `publish_odom`, and `publish_tf`
+  are false. The temporary RViz container was removed.
+- Runtime warnings retained as evidence: the combined run ended with 49 ready
+  queue overflows, 2 SRP outer-sequence rejects, 12 scan timeouts, and one
+  reconnect. These do not invalidate topic presence but prevent claiming a
+  clean stability window.
+
+## 2026-09-01 mapping console and map reset
+
+- Added `docker/open_mapping_console.ps1` and `docker/mapping_session.ps1`.
+  The console starts the real bridge, `robot_state_publisher`,
+  `slam_toolbox`, and RViz; it offers Start Mapping, Save Map, Clear Saved
+  Maps And Reset SLAM, Stop And Restore Safe Mode, and Open Session Log.
+- Updated `C:\Users\至亲\Desktop\Smart Car RViz2.lnk` in place and added
+  `C:\Users\至亲\Desktop\Smart Car Mapping.lnk`; both launch
+  `open_mapping_console.ps1` with `ExecutionPolicy Bypass` and the
+  description `Start Smart Car real SLAM mapping console`.
+- The Clear action stops the session, restores a safe bridge before the
+  recoverable cleanup, moves only `.pgm`, `.yaml`, `.posegraph`, and `.data`
+  under `maps/` to the Windows Recycle Bin, then attempts a new live session.
+  `bags/` is never traversed by that action.
+- Actual Clear validation moved `slam_live_20260901.pgm` and
+  `slam_live_20260901.yaml` to the Recycle Bin. Afterwards `maps/` contained
+  only `.gitkeep`; `bags/` remained seven files totaling 29,066,820 bytes.
+- The immediate fresh session launched all intended ROS components but current
+  physical S3 data was absent. Its strict live scan/odom gate did not pass;
+  the test was stopped and the script restored `smartcar-mapping-safe`.
+  Final ROS graph exposes only `/scan` and `/diagnostics`, with all four gates
+  false. No `/cmd_vel`, STM/S3, serial, or protocol action occurred.
+- PowerShell parser validation passed for both console scripts. A GUI smoke
+  test opened a responsive window titled `Smart Car Mapping` and closed only
+  that test process; no mapping session was started by the UI test.
+
+## 2026-08-29 P1 mapping implementation start
+
+- Read `C:\Users\至亲\Downloads\P1_MAPPING_PLAN.md`, the existing bridge
+  design/report, ROS2_WIN task files, and protocol/hardware references before
+  editing.
+- Confirmed Docker Desktop Linux is available (`29.7.2`, `linux/amd64`) but
+  the current image does not yet contain the P1 SLAM/state dependencies.
+- Confirmed the only safe host-side scope is a gated/offline implementation:
+  the S3 telemetry contract and wheel freshness fields are not frozen, so no
+  live `/odom` publisher will be enabled by default.
+- Planned work: bounded single-owner gateway dispatch, telemetry decoder
+  interface and diagnostics, synthetic wheel FIFO/kinematics tests, URDF/TF
+  and mapping bringup, then container build and layered verification.
+
 ## 2026-08-28
 
 - Read mandatory workflow, brainstorming, and planning instructions.
@@ -125,3 +192,287 @@
   wildcard listeners on `::1` and `::`; `Test-NetConnection` from WLAN
   address `192.168.31.101` to port 8765 succeeded.
 - No source change or S3RD protocol-field change was needed.
+
+## 2026-08-30 P1 completion pass
+
+- Reviewed the resumed P1 workspace against `P1_MAPPING_PLAN.md` and the
+  independent source/build audits. Confirmed that `Common/SCBP_CAN` is absent;
+  no duplicate SCBP parser or guessed wheel payload layout was added.
+- Hardened `TelemetryDecoder`: live input now requires both configured and
+  present source/destination identities, only reviewed wheel type `0x0210` is
+  accepted, and rejected calls clear the output sample before returning.
+- Hardened `WheelOdom` configuration validation to reject non-positive or
+  non-finite wheel diameter. Added focused tests for identity, schema, output
+  clearing, diameter, live decoder-fault latching, and explicit session epochs.
+- A first test pass caught three stale test fixtures that omitted a bound
+  connection epoch after `beginSession()`. The fixtures were corrected and the
+  complete suite was rerun successfully.
+- Initial P1 container pass: four packages built and `74 tests, 0 errors, 0
+  failures, 0 skipped`. Compiler stderr was limited to warnings in the
+  unchanged official YDLIDAR SDK; this was an intermediate stale-volume
+  result and the final forced reconfigure pass is recorded below.
+- Added `docs/p1-mapping-evidence/README.md` with the H0-H6 matrix, command
+  recipes, artifact template, and explicit non-claims. H0 and host/container
+  evidence are complete; H2, H3, H5, and H6 remain blocked by missing live
+  protocol/capture/hardware evidence, while H1/H4 are partial.
+- Verified the default bridge parameter file with `s3_opaque_message_types: ~`.
+  A literal empty `[]` override is rejected by Humble's parameter parser before
+  node construction, so it is documented as an external CLI/YAML limitation.
+
+## 2026-08-30 final build audit
+
+- Rebuilt the Docker image after adding the P1 runtime dependencies. The final
+  image is `docker-ros2-dev:latest` with digest
+  `sha256:aa3d6c3f4708f37d7fe79e25a888d74e723f91dcc57ddb197033a7a941b2f5`.
+  The image contains `nav2_lifecycle_manager`, `nav2_map_server`,
+  `slam_toolbox`, `robot_state_publisher`, `xacro`, and the other declared P1
+  packages.
+- In fresh named Compose volumes, the final command
+  `colcon build --symlink-install --cmake-force-configure --executor sequential`
+  built all four packages. The matching `colcon test` and
+  `colcon test-result --verbose` completed with `75 tests, 0 errors, 0
+  failures, 0 skipped`.
+- `p1_mapping`, `p1_localization`, `description`, `localization`,
+  `map_server`, and `continue_mapping` launch argument listings were checked;
+  default mapping/localization/description smoke launches started their
+  expected nodes. A parameter smoke confirmed launch-provided identity values
+  remain integer ROS parameters and boolean gates remain booleans.
+- The map-server non-default smoke started the official lifecycle manager;
+  its deliberate missing-file error confirms the lifecycle path without
+  fabricating a map artifact.
+- Corrected the posegraph-load helpers for Humble: `DeserializePoseGraph.srv`
+  has an empty response section, so the shell and PowerShell helpers now use
+  the service-call exit code plus non-empty artifact checks instead of looking
+  for a nonexistent `result: 0` response.
+- The host result remains bounded to H0 and component/static H1/H4 evidence.
+  No real S3 capture, approved SCBP parser, calibrated geometry, integrated
+  sensor bag, saved map/posegraph, or vehicle-control evidence was available;
+  H2/H3/H5/H6 remain open as documented.
+
+## 2026-08-30 final verification rerun
+
+- From `ROS2_WIN`, an initial compose invocation without `-f docker\\compose.yaml`
+  failed before container startup; the same commands with the explicit compose
+  file then completed successfully.
+- Rebuilt the image as `docker-ros2-dev:latest` and reran the
+  complete four-package `colcon build`, `colcon test`, and
+  `colcon test-result --verbose`. The observed result is
+  `75 tests, 0 errors, 0 failures, 0 skipped`.
+- A host cleanup attempt for three verified task-generated temporary paths was
+  rejected by the local command policy before execution; no repository files
+  were affected and those paths remain outside `ROS2_WIN`.
+
+## 2026-08-30 clean-project verification rerun
+
+- Rebuilt and tested with a new Compose project name (`ros2_final_clean2`) and
+  fresh named build/install/log volumes, so stale test XML could not affect the
+  result. The image was `ros2_final_clean2-ros2-dev:latest` with digest
+  `sha256:b06e22755c504f76adaa58c1fb8d0aa5d2e6db028959c9ea36d667104c440cac`.
+- The four-package forced-reconfigure build passed. `colcon test` and
+  `colcon test-result --verbose` reported exactly `75 tests, 0 errors, 0
+  failures, 0 skipped`.
+- All six bringup launch files passed `--show-args`; xacro expansion and shell/
+  PowerShell syntax checks passed. A five-second default `p1_mapping` smoke
+  showed `robot_state_publisher`, `s3_ydlidar_bridge`, and `slam_toolbox`, with
+  `/scan`, `/map`, and `/tf_static` endpoints present and no `/odom` or
+  `/cmd_vel` topic publishers. The bridge's expected protocol-not-frozen error
+  was the only runtime warning.
+
+## 2026-08-31 SRP v4 chassis-state odometry
+
+- Read current Git status, all relevant workspace/module documentation,
+  package manifests, launch/config files, state tests, and the gateway
+  telemetry/connection lifecycle before editing.
+- Confirmed extensive pre-existing dirty work, including the entire state,
+  description, and bringup packages. These changes are being preserved and
+  extended in place; no Git cleanup or commit operation is permitted.
+- User approved an isolated SRP memory decoder plus authoritative-pose tracker.
+  The old wheel fixture path remains intact, outer S3RD framing is unchanged,
+  and type-2 telemetry will return before the YDLIDAR decoder.
+- Body twist convention: rotate the odom-frame pose delta into the previous
+  valid `base_link` orientation; use the shortest yaw delta. The first valid
+  frame after startup, invalidity, stale state, disconnect, or epoch change is
+  baseline-only.
+- Added the pure-memory SRP decoder, chassis state adapter/tracker, and shared
+  odom/TF message builder. The old wheel fixture/integrator remains intact.
+- Integrated only S3RD type 2 into the new path. It returns from the opaque
+  branch before legacy wheel handling and before the YDLIDAR decoder; raw type
+  1 scan behavior was not edited.
+- Added protocol, semantic, finite-value, pose/twist, yaw-wrap, freshness,
+  epoch/disconnect, covariance/timestamp, type-routing, and default ROS graph
+  tests. Container execution is still pending.
+- Generated the fixed 36-byte vector with CRC `0xC07F`, stored little endian
+  as `7F C0`, and recorded the same bytes in test code and the wire contract.
+- Ran the four required commands from `ROS2_WIN/docker`: Compose image build,
+  four-package symlink build, complete test run, and verbose test-result all
+  passed with `98 tests, 0 errors, 0 failures, 0 skipped`.
+- Repeated image build, forced-reconfigure colcon build, and tests under the
+  new Compose project `srp_v4_clean`; its independent result is also
+  `98 tests, 0 errors, 0 failures, 0 skipped`, excluding stale result XML.
+- Confirmed the installed launch interfaces still expose
+  `allow_live_telemetry=false`, `enable_live_odom=false`,
+  `publish_odom=false`, and `publish_tf=false`. The default launch test sees
+  no bridge-owned `/odom` or dynamic `/tf` publisher.
+- Final source/config scans found no new `/cmd_vel`, controller manager,
+  `ros2_control`, identity odom, or temporary `rviz_world` TF path. No live
+  odometry process or real-hardware mapping test was started.
+
+## 2026-08-31 SRP v4 live integration continuation
+
+- Re-read the current plan, findings, progress, Git status, decoder, shared
+  fixture, and test registration before changing tests.
+- Confirmed the decoder already treats payload bits `0x00..0x0F` as the only
+  supported mask while independently requiring `ODOMETRY_VALID=0x04`.
+- Existing tests covered the fixed `0x04` golden frame but not `0x0C`, the
+  complete low/high nibble boundary, or producer-owned inner sequence and
+  timestamp values. Added only those focused cases to
+  `test_srp_v4_chassis.cpp`; product code and protocol remain unchanged.
+- The flags `0x0C` variant with otherwise identical fields has
+  CRC16-CCITT-FALSE `0xD844`, stored little endian as `44 D8`.
+- Complete Docker colcon build and test passed for all four packages. Current
+  result: `101 tests, 0 errors, 0 failures, 0 skipped`.
+- Current hardware gate passed before any runtime replacement: Windows showed
+  an established `192.168.31.239 -> 192.168.31.101:8765` session, a bounded
+  12-second subscriber measured real `/scan` near 4.74 Hz, and diagnostics
+  reported connected, stale=false, coverage 360/360.
+- The active bridge used the older image `4a44de94...` and its diagnostics did
+  not contain the SRP chassis fields. An initial `/proc/1/exe` hash targeted
+  the Python `ros2` launcher, so it was not used as bridge-binary evidence.
+  `/odom` did not exist and `tf2_echo odom base_link` confirmed no such
+  transform; existing `/tf` publishers belonged only to the already running
+  slam_toolbox process.
+- Replaced only the confirmed port-8765 bridge with the current image and
+  C++ PID 22 hash `9c540798...`. Runtime-only overrides set all four live gates
+  true; parameter dump confirmed them and `s3_opaque_message_types=[2]`.
+- A 120.60-second real-device monitor received 567 LaserScan messages at
+  4.704 Hz with a 0.326-second maximum gap. Diagnostics grew by 13,596 raw
+  packets and 564 published scans; outer CRC errors, ready-queue overflow, and
+  sequence gaps did not increase. YDLIDAR checksum errors increased by one.
+- In the same window, `opaque_frames`, `chassis_frames`,
+  `chassis_updates_accepted`, `telemetry_accepted`, and `odom_published` all
+  changed by zero. No `/odom` message or `odom -> base_link` TF was received;
+  chassis decode remained `not_attempted`.
+- Saved the requested real-device bag at
+  `bags/srp_v4_live_20260831_1453`: 288.25 seconds, 6.5 MiB, 1,357 `/scan`,
+  288 `/diagnostics`, zero `/odom`, and zero `/tf`. `/tf_static` had no
+  publisher/message and was therefore not added to bag metadata.
+- Did not request an S3 power cycle because no chassis baseline or odom stream
+  existed; it could not distinguish odom stop/re-anchor behavior. Stale and
+  reconnect acceptance remain blocked until S3 actually emits type 2.
+- Stopped the temporary all-true runtime and restored current-image container
+  `smartcar-scan-safe-0831` with the four gates false. S3 reconnected,
+  diagnostics returned connected/stale=false near 5 Hz, and node inspection
+  showed only `/scan` and `/diagnostics` application publishers.
+
+## 2026-08-31 interleaved SRP v4 telemetry correction
+
+- Re-read the current plan, findings, progress, protocol contract, bridge
+  dispatcher, state adapter, sequence tracker, tests, Git status, and live
+  runtime before editing product code.
+- Audited all requested chassis counter increment sites. Confirmed that
+  `chassis_frames` currently means outer type-2 frames and that outer sequence
+  is incorrectly split into per-message-type domains.
+- Confirmed one active 8765 bridge, an established S3 TCP connection, and all
+  four safety gates false. No ROS process was started or restarted.
+- Windows `pktmon` was unavailable without elevation. A temporary NET_RAW
+  helper container captured the existing namespace without replacing the
+  bridge or injecting data.
+- Reconstructed 120 consecutive real S3RD frames (`30934..31053`) with valid
+  outer CRC and no TCP/outer sequence gaps. Counted type-2 inner IDs and
+  confirmed non-contiguous forward chassis sequences caused by SRP
+  interleaving.
+- Recorded the approved public-decoder-first design and test/live-validation
+  gates. Product implementation is the next phase.
+
+## 2026-09-01 interleaved SRP v4 completion
+
+- Corrected baseline invalidation so sequence/timestamp/host-time history is
+  cleared together with the pose baseline; adjusted duplicate/rollback tests
+  to prove rejection only while a valid baseline exists and re-anchoring after
+  invalidation.
+- Rebuilt with `--cmake-force-configure` and reran all package tests:
+  `109 tests, 0 errors, 0 failures, 0 skipped`.
+- Real false-gated 30-second precheck passed on the established S3 connection:
+  `opaque_frames +2302`, `srp_frames +2302`, `chassis_frames +484`,
+  `srp_decoder_rejected +0`, `srp_outer_sequence_rejected +0`,
+  `outer_crc_error +0`, `ready_queue_overflow +0`, `stale=false`.
+  Snapshots are in `evidence/srp_precheck_20260901/`.
+- Real stationary all-true 120-second observation passed after the precheck:
+  `chassis_frames +4779`, `chassis_updates_accepted +4779`,
+  `odom_published +4779`, `chassis_decoder_rejected +0`,
+  `chassis_sequence_rejected +0`, `chassis_odom_rejected +0`, and
+  `outer_crc_error/sequence/queue +0`. The `/odom` timestamp capture and
+  `tf2_echo odom base_link` output are in `evidence/srp_alltrue_20260901/`.
+- Stopped the temporary all-true instance and restored the final bridge with
+  all four safety gates false. Current S3 TCP state is established on port
+  8765, and the final parameter dump confirms all four values are false.
+- Added a regression guard so outer-sequence rejection of valid IMU/wheel SRP
+  frames cannot clear chassis baseline or increment chassis reject counters;
+  rebuilt and reran the suite with final result `110 tests, 0 errors, 0
+  failures, 0 skipped`. Restarted the final safe bridge from this build;
+  current container is `srp_interleave_0831-safe-final2`, with one established
+  S3 connection and all four publication/telemetry gates false.
+
+## 2026-09-02 mapping console missing-container recovery
+
+- Reproduced the reported .NET popup: after a failed 60-second live mapping
+  gate removes `smartcar-mapping-session`, the GUI's `Set-Controls` refresh
+  called `docker inspect` while `$ErrorActionPreference` was `Stop`; Windows
+  PowerShell promoted Docker's `no such object` stderr to a terminating error.
+- Hardened `docker/open_mapping_console.ps1` so `Test-MappingRunning` scopes
+  native-command errors, returns `false` for an absent/unavailable mapping
+  container, and restores the caller's strict error preference.
+- PowerShell parser checks passed for both console scripts. An extracted
+  `Test-MappingRunning` probe returned `False` with the mapping container
+  absent and left the outer preference at `Stop`.
+
+## 2026-09-02 mapping console popup hardening
+
+- The first probe fix was insufficient on the user's Windows host because
+  PowerShell 5.1 could still surface the native `docker inspect` failure during
+  the GUI event cycle.
+- Replaced that probe with `docker ps --filter name=^/smartcar-mapping-session$`
+  and `status=running`; an absent container now produces an empty successful
+  result and never emits `no such object`.
+- Added defensive handling around `Set-Controls`, the timer refresh, and form
+  closing so a transient Docker/status-file error cannot escape the WinForms
+  event loop as a .NET dialog.
+- Parser checks, missing-container probe, Docker empty-result check, and GUI
+  open/close smoke test all passed. No mapping session was started.
+
+## 2026-09-02 stale GUI process and worker probe cleanup
+
+- The reported popup was traced to an already-running `Smart Car Mapping`
+  PowerShell process (PID `52580`, started before the second fix). Its in-memory
+  event handlers still contained the old `docker inspect` implementation, so
+  editing the script on disk could not change that window.
+- Closed only that stale mapping-console process; the `smartcar-mapping-safe`
+  container and its TCP-8765 listener were left running.
+- Removed the last worker-side `docker inspect` call from
+  `mapping_session.ps1`; all mapping-console container-state checks now use
+  non-throwing `docker ps` filters.
+- Started the current script in a fresh PowerShell process, confirmed a
+  responsive `Smart Car Mapping` window for five seconds, and closed it cleanly
+  with exit code 0. No .NET popup occurred.
+
+## 2026-09-03 non-fatal mapping live gate
+
+- Audited both desktop shortcuts: `Smart Car RViz2.lnk` and `Smart Car
+  Mapping.lnk` target `docker/open_mapping_console.ps1` without a strict-gate
+  argument. The launch starts RViz, SLAM, the TCP bridge, and robot description
+  together inside `smartcar-mapping-session`.
+- Separated a 60-second incomplete live-data gate from genuine startup failures.
+  The default timeout now writes `实时里程计/TF未就绪，暂不能建图` and returns
+  successfully without stopping TCP 8765, removing the mapping container, or
+  fabricating any ROS data. The strict original behavior is opt-in through
+  `-StrictLiveGate` on either console script.
+- Extended the live acceptance check to require real diagnostics, `/scan`,
+  `/odom`, and an `odom -> base_link` TF lookup. Save Map remains disabled
+  until that full live-ready status is observed.
+- Ran the default worker with incomplete live odometry/TF. It completed after
+  the gate with exit code 0; `smartcar-mapping-session` remained the sole
+  TCP-8765 owner. Container inspection found live `robot_state_publisher`,
+  `s3_ydlidar_bridge`, `async_slam_toolbox_node`, and `rviz2` processes.
+  Independent `/odom` and TF probes timed out, so no mapping-ready claim was
+  made. An explicit `Stop` then removed that session and restored one
+  false-gated `smartcar-mapping-safe` bridge.

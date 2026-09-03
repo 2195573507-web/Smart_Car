@@ -12,13 +12,24 @@ RUN apt-get update \
       python3-colcon-common-extensions \
       python3-pytest \
       ros-humble-ament-cmake-gtest \
+      ros-humble-diagnostic-updater \
+      ros-humble-diff-drive-controller \
       ros-humble-launch-ros \
+      ros-humble-launch-testing-ament-cmake \
+      ros-humble-launch-testing-ros \
+      ros-humble-nav2-lifecycle-manager \
+      ros-humble-nav2-map-server \
       ros-humble-rqt \
       ros-humble-rqt-common-plugins \
+      ros-humble-robot-localization \
+      ros-humble-robot-state-publisher \
       ros-humble-rviz2 \
       ros-humble-rosbag2 \
       ros-humble-rosbag2-storage-default-plugins \
       ros-humble-ros2bag \
+      ros-humble-slam-toolbox \
+      ros-humble-tf2-tools \
+      ros-humble-xacro \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /ws

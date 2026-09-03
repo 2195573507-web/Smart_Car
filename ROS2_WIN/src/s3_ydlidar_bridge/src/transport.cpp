@@ -60,8 +60,9 @@ bool TcpServerTransport::start(FrameCallback callback, std::string &error) {
     error = "TCP callback is empty";
     return false;
   }
-  if (config_.listen_port == 0U || config_.max_buffer_bytes == 0U) {
-    error = "TCP port and max_buffer_bytes must be non-zero";
+  if (config_.listen_port == 0U || config_.max_buffer_bytes == 0U ||
+      config_.max_ready_frames == 0U) {
+    error = "TCP port, max_buffer_bytes, and max_ready_frames must be non-zero";
     return false;
   }
   if (running_.exchange(true)) {
@@ -171,6 +172,21 @@ void TcpServerTransport::run() {
     }
     TcpChunkAssembler assembler(extractor_, config_.max_buffer_bytes,
                                 config_.max_ready_frames);
+    uint64_t accounted_dropped_ready = 0U;
+    uint64_t accounted_ready_overflow = 0U;
+    const auto accountQueueStats = [&]() {
+      const ReadyQueueStats queue_stats = assembler.readyStats();
+      if (queue_stats.dropped_ready > accounted_dropped_ready) {
+        dropped_ready_.fetch_add(queue_stats.dropped_ready -
+                                 accounted_dropped_ready);
+        accounted_dropped_ready = queue_stats.dropped_ready;
+      }
+      if (queue_stats.overflow > accounted_ready_overflow) {
+        ready_overflow_.fetch_add(queue_stats.overflow -
+                                  accounted_ready_overflow);
+        accounted_ready_overflow = queue_stats.overflow;
+      }
+    };
     while (running_) {
       const ssize_t count = ::recv(client, receive_buffer.data(),
                                    receive_buffer.size(), 0);
@@ -180,6 +196,7 @@ void TcpServerTransport::run() {
       recv_bytes_ += static_cast<uint64_t>(count);
       (void)assembler.feed(receive_buffer.data(),
                            static_cast<size_t>(count));
+      accountQueueStats();
       for (auto frame : assembler.takeAll()) {
         if (!running_) {
           break;
@@ -188,6 +205,9 @@ void TcpServerTransport::run() {
         callback_(std::move(frame));
       }
     }
+    // Keep the aggregate counters correct even when the loop exits because
+    // stop() closed the socket immediately after a final recv.
+    accountQueueStats();
     {
       std::lock_guard<std::mutex> lock(socket_mutex_);
       if (client_fd_ == client) {
@@ -217,6 +237,10 @@ TransportStats TcpServerTransport::stats() const {
   result.accepted_connections = accepted_connections_.load();
   result.disconnects = disconnects_.load();
   result.recv_bytes = recv_bytes_.load();
+  result.dropped_ready = dropped_ready_.load();
+  result.overflow = ready_overflow_.load();
+  result.dropped_ready_frames = result.dropped_ready;
+  result.ready_queue_overflows = result.overflow;
   if (extractor_) {
     result.protocol = extractor_->counters();
   }

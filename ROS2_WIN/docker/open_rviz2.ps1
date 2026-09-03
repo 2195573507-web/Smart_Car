@@ -20,7 +20,7 @@ try {
     $env:DISPLAY = "host.docker.internal:0.0"
     Set-Location -LiteralPath $composeDir
     docker compose run --rm -e "DISPLAY=$env:DISPLAY" ros2-dev rviz2 `
-        -d /ws/install/s3_ydlidar_bridge/share/s3_ydlidar_bridge/rviz/s3_ydlidar_bridge.rviz
+        -d /ws/config/rviz/radar_scan.rviz
     if ($LASTEXITCODE -ne 0) {
         throw "RViz2 exited with code $LASTEXITCODE."
     }

@@ -15,4 +15,8 @@ python3 /ws/testdata/s3_replay_sender.py --scenario bad_crc
 python3 /ws/testdata/s3_replay_sender.py --scenario reconnect
 ```
 
+The sender defaults to `device_id=1` and `stream_id=1`, matching
+`config/bridge.yaml`. Use `--device-id` and `--stream-id` when exercising
+identity-rejection cases or a different approved fixture configuration.
+
 These bytes are test fixtures, not captures from a real S3 or YDLIDAR device.

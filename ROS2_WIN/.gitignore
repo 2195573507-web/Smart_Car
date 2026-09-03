@@ -5,3 +5,7 @@
 **/build/
 **/install/
 **/log/
+**/__pycache__/
+*.pyc
+docker/mapping_console.status
+docker/mapping_console.log

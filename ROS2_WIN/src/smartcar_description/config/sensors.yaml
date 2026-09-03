@@ -1,0 +1,15 @@
+# P1 sensor calibration boundary.  Values are provisional until measured on
+# the assembled vehicle; launch files pass these values to xacro explicitly.
+calibration_status: provisional
+frame_names:
+  base: base_link
+  laser: laser_frame
+  imu: imu_link
+laser:
+  xyz_m: [0.200, 0.000, 0.155]
+  rpy_rad: [0.000, 0.000, 0.000]
+  measured: false
+imu:
+  xyz_m: [0.000, 0.000, 0.100]
+  rpy_rad: [0.000, 0.000, 0.000]
+  measured: false

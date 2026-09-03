@@ -42,7 +42,7 @@ def ydlidar_payload(intensity):
 
 
 def s3_frame(sequence, payload, *, version=1, message_type=1, flags=0,
-             device_id=0, stream_id=0, bad_crc=False, bad_length=False):
+             device_id=1, stream_id=1, bad_crc=False, bad_length=False):
     header = struct.pack("<4sBBHIII IH", b"S3RD", version, message_type,
                          flags, device_id, stream_id, sequence, 1234,
                          len(payload))
@@ -69,6 +69,14 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument(
+        "--device-id", type=int, default=1,
+        help="S3RD device identity (matches the bridge default)",
+    )
+    parser.add_argument(
+        "--stream-id", type=int, default=1,
+        help="S3RD stream identity (matches the bridge default)",
+    )
     parser.add_argument("--scenario", required=True, choices=[
         "legal_no_intensity", "legal_intensity", "half", "sticky",
         "bad_crc", "bad_version", "bad_length", "duplicate_jump",
@@ -79,30 +87,39 @@ def main():
     pause = args.pause_ms / 1000.0
     payload = ydlidar_payload(args.scenario == "legal_intensity")
 
+    def frame(sequence, **kwargs):
+        """Build a frame using the identities selected for this run."""
+        return s3_frame(
+            sequence,
+            payload,
+            device_id=args.device_id,
+            stream_id=args.stream_id,
+            **kwargs,
+        )
+
     if args.scenario == "legal_no_intensity":
-        send_once(args.host, args.port, [s3_frame(1, payload)])
+        send_once(args.host, args.port, [frame(1)])
     elif args.scenario == "legal_intensity":
-        send_once(args.host, args.port, [s3_frame(1, payload)])
+        send_once(args.host, args.port, [frame(1)])
     elif args.scenario == "half":
-        packet = s3_frame(1, payload)
+        packet = frame(1)
         send_once(args.host, args.port, [packet[:7], packet[7:]], pause)
     elif args.scenario == "sticky":
         send_once(args.host, args.port,
-                  [s3_frame(1, payload) + s3_frame(2, payload)])
+                  [frame(1) + frame(2)])
     elif args.scenario == "bad_crc":
-        send_once(args.host, args.port, [s3_frame(1, payload, bad_crc=True)])
+        send_once(args.host, args.port, [frame(1, bad_crc=True)])
     elif args.scenario == "bad_version":
-        send_once(args.host, args.port, [s3_frame(1, payload, version=2)])
+        send_once(args.host, args.port, [frame(1, version=2)])
     elif args.scenario == "bad_length":
-        send_once(args.host, args.port, [s3_frame(1, payload, bad_length=True)])
+        send_once(args.host, args.port, [frame(1, bad_length=True)])
     elif args.scenario == "duplicate_jump":
         send_once(args.host, args.port,
-                  [s3_frame(1, payload), s3_frame(1, payload),
-                   s3_frame(3, payload)], pause)
+                  [frame(1), frame(1), frame(3)], pause)
     elif args.scenario == "reconnect":
-        send_once(args.host, args.port, [s3_frame(1, payload)])
+        send_once(args.host, args.port, [frame(1)])
         time.sleep(pause)
-        send_once(args.host, args.port, [s3_frame(2, payload)])
+        send_once(args.host, args.port, [frame(2)])
 
 
 if __name__ == "__main__":

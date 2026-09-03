@@ -1,0 +1,31 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>smartcar_state_bridge</name>
+  <version>0.1.0</version>
+  <description>
+    Read-only SRP v4 chassis pose and legacy wheel telemetry validation for the
+    Smart Car ROS 2 host. The default node has no live transport.
+  </description>
+  <maintainer email="smart-car@example.invalid">Smart Car project</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <build_depend>diagnostic_msgs</build_depend>
+  <build_depend>diff_drive_controller</build_depend>
+  <build_depend>geometry_msgs</build_depend>
+  <build_depend>nav_msgs</build_depend>
+  <build_depend>rclcpp</build_depend>
+  <build_depend>tf2_ros</build_depend>
+  <exec_depend>diagnostic_msgs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>rclcpp</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
+  <!-- Optional future runtime integration; P1 does not start controllers. -->
+  <exec_depend>diff_drive_controller</exec_depend>
+  <test_depend>ament_cmake_gtest</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

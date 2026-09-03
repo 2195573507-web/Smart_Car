@@ -69,9 +69,16 @@ ExtractStatus S3FrameExtractor::extract(const std::vector<uint8_t> &buffer,
   const uint32_t sequence = readU32(buffer, 16U);
   const uint32_t timestamp_ms = readU32(buffer, 20U);
   const size_t payload_length = readU16(buffer, 24U);
-  if (payload_length < kYdlidarHeaderBytes ||
-      payload_length < config_.min_payload_bytes ||
-      payload_length > config_.max_payload_bytes) {
+  const auto policy = policyForMessageType(message_type);
+  const size_t minimum_payload =
+      policy.has_value() && *policy == S3MessageTypePolicy::kRawYdlidar
+          ? std::max(kYdlidarHeaderBytes, config_.min_payload_bytes)
+          : config_.opaque_min_payload_bytes;
+  // The envelope length bound is common to every message type.  The minimum
+  // bound is policy-specific: opaque payloads are intentionally not assumed to
+  // contain a YDLIDAR header.
+  if (payload_length > config_.max_payload_bytes ||
+      (policy.has_value() && payload_length < minimum_payload)) {
     ++length_errors_;
     consumed = 1U;
     return ExtractStatus::kInvalid;
@@ -85,7 +92,7 @@ ExtractStatus S3FrameExtractor::extract(const std::vector<uint8_t> &buffer,
     consumed = frame_length;
     return ExtractStatus::kInvalid;
   }
-  if (message_type != config_.expected_message_type) {
+  if (!policy.has_value()) {
     ++type_errors_;
     consumed = frame_length;
     return ExtractStatus::kInvalid;
@@ -98,9 +105,12 @@ ExtractStatus S3FrameExtractor::extract(const std::vector<uint8_t> &buffer,
     consumed = frame_length;
     return ExtractStatus::kInvalid;
   }
-  const uint8_t payload_ct = buffer[kHeaderBytes + 2U];
   const bool unknown_flags = (flags & ~config_.allowed_flags_mask) != 0U;
-  const bool ct_mismatch = (flags & 0x0001U) != (payload_ct & 0x01U);
+  const bool raw_payload = *policy == S3MessageTypePolicy::kRawYdlidar;
+  const bool ct_mismatch =
+      raw_payload &&
+      ((flags & 0x0001U) !=
+       (buffer[kHeaderBytes + 2U] & 0x01U));
   if (unknown_flags || ct_mismatch) {
     ++flags_errors_;
     consumed = frame_length;
@@ -120,13 +130,30 @@ ExtractStatus S3FrameExtractor::extract(const std::vector<uint8_t> &buffer,
   frame.stream_id = stream_id;
   frame.sequence = sequence;
   frame.timestamp_ms = timestamp_ms;
+  frame.payload_length = static_cast<uint16_t>(payload_length);
+  frame.payload_kind = raw_payload ? S3FramePayloadKind::kRawYdlidar
+                                   : S3FramePayloadKind::kOpaque;
   frame.payload.assign(buffer.begin() + static_cast<ptrdiff_t>(kHeaderBytes),
                        buffer.begin() +
                            static_cast<ptrdiff_t>(kHeaderBytes + payload_length));
-  frame.zero_packet = frame.payload.size() > 2U &&
+  frame.zero_packet = raw_payload && frame.payload.size() > 2U &&
                       (frame.payload[2] & 0x01U) != 0U;
+  frame.metadata.version = version;
+  frame.metadata.message_type = message_type;
+  frame.metadata.flags = flags;
+  frame.metadata.device_id = device_id;
+  frame.metadata.stream_id = stream_id;
+  frame.metadata.sequence = sequence;
+  frame.metadata.timestamp_ms = timestamp_ms;
+  frame.metadata.payload_length = static_cast<uint16_t>(payload_length);
+  frame.metadata.payload_kind = frame.payload_kind;
   consumed = frame_length;
   ++accepted_frames_;
+  if (raw_payload) {
+    ++raw_frames_;
+  } else {
+    ++opaque_frames_;
+  }
   return ExtractStatus::kFrameReady;
 }
 
@@ -134,14 +161,37 @@ S3ProtocolCounters S3FrameExtractor::counters() const noexcept {
   return S3ProtocolCounters{accepted_frames_.load(), magic_errors_.load(),
                             version_errors_.load(), type_errors_.load(),
                             flags_errors_.load(), identity_errors_.load(),
-                            length_errors_.load(), crc_errors_.load()};
+                            length_errors_.load(), crc_errors_.load(),
+                            raw_frames_.load(), opaque_frames_.load()};
+}
+
+std::optional<S3MessageTypePolicy> S3FrameExtractor::policyForMessageType(
+    uint8_t message_type) const noexcept {
+  if (!config_.message_type_rules.empty()) {
+    for (const auto &rule : config_.message_type_rules) {
+      if (rule.message_type == message_type) {
+        return rule.policy;
+      }
+    }
+    return std::nullopt;
+  }
+  if (message_type == config_.expected_message_type) {
+    return config_.message_type_policy;
+  }
+  for (const uint8_t opaque_type : config_.opaque_message_types) {
+    if (opaque_type == message_type) {
+      return S3MessageTypePolicy::kOpaque;
+    }
+  }
+  return std::nullopt;
 }
 
 TcpChunkAssembler::TcpChunkAssembler(std::shared_ptr<FrameExtractor> extractor,
-                                     size_t max_buffer_bytes,
-                                     size_t)
+                                      size_t max_buffer_bytes,
+                                      size_t max_ready_frames)
     : extractor_(std::move(extractor)),
-      max_buffer_bytes_(max_buffer_bytes) {
+      max_buffer_bytes_(max_buffer_bytes),
+      max_ready_frames_(max_ready_frames) {
   protocol_configured_ = extractor_ != nullptr;
 }
 
@@ -206,7 +256,19 @@ bool TcpChunkAssembler::feed(const uint8_t *data, size_t size) {
     if (frame.received_steady_ns == 0U) {
       frame.received_steady_ns = steadyNowNs();
     }
-    ready_.push_back(std::move(frame));
+    if (max_ready_frames_ == 0U) {
+      // A zero-capacity queue is useful as an explicit drop-all guard for
+      // callers that want to keep parsing/diagnostics without buffering.
+      ++dropped_ready_;
+      ++ready_overflow_;
+    } else {
+      if (ready_.size() >= max_ready_frames_) {
+        ready_.pop_front();
+        ++dropped_ready_;
+        ++ready_overflow_;
+      }
+      ready_.push_back(std::move(frame));
+    }
     produced = true;
   }
   return produced;
@@ -220,6 +282,16 @@ std::vector<ReceivedFrame> TcpChunkAssembler::takeAll() {
     ready_.pop_front();
   }
   return result;
+}
+
+ReadyQueueStats TcpChunkAssembler::readyStats() const noexcept {
+  const size_t depth = ready_.size();
+  return ReadyQueueStats{depth,
+                         max_ready_frames_,
+                         dropped_ready_,
+                         ready_overflow_,
+                         dropped_ready_,
+                         ready_overflow_};
 }
 
 void SequenceTracker::beginConnection(uint64_t connection_epoch) noexcept {

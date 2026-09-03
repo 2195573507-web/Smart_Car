@@ -32,6 +32,13 @@ struct TransportStats {
   uint64_t accepted_connections{0};
   uint64_t disconnects{0};
   uint64_t recv_bytes{0};
+  // Frames parsed successfully but evicted because the bounded ready queue
+  // was full.  `overflow` is the short diagnostic key used by the node;
+  // descriptive aliases are kept in the API for callers that prefer them.
+  uint64_t dropped_ready{0};
+  uint64_t overflow{0};
+  uint64_t dropped_ready_frames{0};
+  uint64_t ready_queue_overflows{0};
   S3ProtocolCounters protocol;
 };
 
@@ -115,6 +122,8 @@ class TcpServerTransport final : public FrameTransport {
   std::atomic<uint64_t> disconnects_{0};
   std::atomic<uint64_t> recv_bytes_{0};
   std::atomic<uint64_t> connection_epoch_{0};
+  std::atomic<uint64_t> dropped_ready_{0};
+  std::atomic<uint64_t> ready_overflow_{0};
 };
 
 }  // namespace s3_ydlidar_bridge

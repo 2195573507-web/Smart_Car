@@ -40,6 +40,15 @@ docker compose run --rm ros2-dev colcon test --packages-select s3_ydlidar_bridge
 docker compose run --rm ros2-dev colcon test-result --verbose
 ```
 
+To build and test the complete P1 host workspace, omit the package selector:
+
+```bash
+docker compose run --rm ros2-dev bash -lc \
+  'source /opt/ros/humble/setup.bash && colcon build --symlink-install --cmake-force-configure'
+docker compose run --rm ros2-dev bash -lc \
+  'source /opt/ros/humble/setup.bash && colcon test --event-handlers console_direct+ && colcon test-result --verbose'
+```
+
 If Docker reports `HCS_E_HYPERV_NOT_INSTALLED`, open an **Administrator**
 PowerShell and run `.\enable-wsl2.ps1` from this directory, then reboot Windows
 and restart Docker Desktop. The script enables the two required Windows
@@ -78,6 +87,53 @@ to `NaN`).
 When both `ydlidar_intensities` and `publish_intensities` are enabled, the
 published intensity value is the raw YDLIDAR `sync_quality` byte (0..255), not
 a calibrated physical intensity.
+
+The reviewed SRP v4 chassis-state discriminator is configured as
+`s3_opaque_message_types: [2]`. The outer extractor classifies it as opaque;
+the dedicated state decoder validates the complete 36-byte SRP frame, and the
+frame returns before the YDLIDAR decoder. Recognition does not authorize live
+odometry: `allow_live_telemetry`, `enable_live_odom`, `publish_odom`, and
+`publish_tf` all remain false by default.
+
+## P1 mapping host
+
+The P1 packages are `smartcar_state_bridge`, `smartcar_description`, and
+`smartcar_bringup`. The state bridge includes an independent SRP v4
+chassis-state decoder for S3RD type 2 and retains the older structured wheel
+fixture boundary. It does not open a second socket, depend on `Common/SRP`,
+guess an SCBP payload layout, or publish `/cmd_vel`.
+Live wheel odometry additionally requires source/destination identities,
+freshness fields, a bound connection epoch, and contiguous outer sequence
+metadata; faults remain latched until a new `beginSession()`.
+SRP chassis pose is authoritative instead of host-integrated; source time is
+used only for `dt`/freshness, while odom and TF share one receive-time ROS
+stamp. See `docs/srp-v4-chassis-state-wire-contract.md`.
+
+Start the read-only mapping workflow with:
+
+```bash
+docker compose run --rm ros2-dev ros2 launch smartcar_bringup p1_mapping.launch.py
+```
+
+The safe defaults keep live telemetry and `/odom` publication disabled. Sensor
+extrinsics in `smartcar_description` are provisional until measured. For an
+explicit saved-map workflow, use `p1_localization.launch.py` with a posegraph
+and/or YAML map path; the launch starts the official lifecycle-managed map
+server only when a non-empty map path is supplied.
+
+The installed operator helpers are `save_p1_map`, `save_p1_posegraph`,
+`load_p1_posegraph`, `record_p1_bag`, and `play_p1_bag` under the
+`smartcar_bringup` share directory. They check service types and return codes;
+they do not create a map without live `/scan` data. See
+`docs/p1-mapping-evidence/README.md` for the H0-H6 evidence boundary.
+
+The Windows desktop shortcuts start `docker/open_mapping_console.ps1`. Its
+default 60-second live gate checks diagnostics, `/scan`, `/odom`, and
+`odom -> base_link` TF. If live odometry/TF is incomplete, the console shows
+`实时里程计/TF未就绪，暂不能建图` and leaves RViz, SLAM, the bridge, and robot
+description running; it does not synthesize ROS data. Use the console's
+explicit Stop/Clear actions for cleanup. To request the previous fail-closed
+timeout behavior explicitly, launch the script with `-StrictLiveGate`.
 
 Run the live PoC receiver from `ROS2_WIN/docker`:
 

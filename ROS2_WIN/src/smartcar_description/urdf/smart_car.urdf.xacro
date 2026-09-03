@@ -1,0 +1,68 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="smart_car">
+  <!--
+    Sensor origins are explicit launch arguments.  The defaults are
+    provisional placeholders from the P1 plan and must be replaced by a
+    measured calibration before H4/H5 acceptance.
+  -->
+  <xacro:arg name="laser_xyz" default="0.200 0.000 0.155"/>
+  <xacro:arg name="laser_rpy" default="0.000 0.000 0.000"/>
+  <xacro:arg name="imu_xyz" default="0.000 0.000 0.100"/>
+  <xacro:arg name="imu_rpy" default="0.000 0.000 0.000"/>
+
+  <material name="chassis_black">
+    <color rgba="0.12 0.12 0.12 1.0"/>
+  </material>
+  <material name="sensor_gray">
+    <color rgba="0.55 0.57 0.60 1.0"/>
+  </material>
+
+  <link name="base_link">
+    <!-- Keep the root link free of inertia so robot_state_publisher's KDL
+         model remains warning-free; this P1 description is for TF/visualisation,
+         not dynamics simulation. -->
+    <visual>
+      <origin xyz="0 0 0.05" rpy="0 0 0"/>
+      <geometry><box size="0.36 0.28 0.10"/></geometry>
+      <material name="chassis_black"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.05" rpy="0 0 0"/>
+      <geometry><box size="0.36 0.28 0.10"/></geometry>
+    </collision>
+  </link>
+
+  <link name="laser_frame">
+    <inertial>
+      <mass value="0.01"/>
+      <inertia ixx="0.000001" ixy="0" ixz="0" iyy="0.000001" iyz="0" izz="0.000001"/>
+    </inertial>
+    <visual>
+      <geometry><cylinder radius="0.035" length="0.045"/></geometry>
+      <material name="sensor_gray"/>
+    </visual>
+  </link>
+
+  <link name="imu_link">
+    <inertial>
+      <mass value="0.01"/>
+      <inertia ixx="0.000001" ixy="0" ixz="0" iyy="0.000001" iyz="0" izz="0.000001"/>
+    </inertial>
+    <visual>
+      <geometry><box size="0.035 0.025 0.012"/></geometry>
+      <material name="sensor_gray"/>
+    </visual>
+  </link>
+
+  <joint name="base_to_laser" type="fixed">
+    <parent link="base_link"/>
+    <child link="laser_frame"/>
+    <origin xyz="$(arg laser_xyz)" rpy="$(arg laser_rpy)"/>
+  </joint>
+
+  <joint name="base_to_imu" type="fixed">
+    <parent link="base_link"/>
+    <child link="imu_link"/>
+    <origin xyz="$(arg imu_xyz)" rpy="$(arg imu_rpy)"/>
+  </joint>
+</robot>

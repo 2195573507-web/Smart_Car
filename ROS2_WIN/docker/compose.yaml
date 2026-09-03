@@ -10,6 +10,11 @@ services:
       - ../test:/ws/test:ro
       - ../testdata:/ws/testdata:ro
       - ../docs:/ws/docs:ro
+      - ../maps:/ws/maps:rw
+      - ../bags:/ws/bags:rw
+      - ../evidence:/ws/evidence:rw
+      # Common/SCBP_CAN is not mounted because this repository does not
+      # contain that reviewed source tree; do not substitute a guessed copy.
       - ros2_build:/ws/build
       - ros2_install:/ws/install
       - ros2_log:/ws/log

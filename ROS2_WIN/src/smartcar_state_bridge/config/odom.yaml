@@ -1,0 +1,32 @@
+smartcar_state_bridge:
+  ros__parameters:
+    # Live input remains disabled until the S3/SCBP contract is reviewed.
+    allow_live_telemetry: false
+    enable_live_odom: false
+    allow_offline_fixtures: true
+    publish_odom: false
+    publish_tf: false
+    odom_topic: /odom
+    diagnostics_topic: /diagnostics
+    frame_id: odom
+    child_frame_id: base_link
+
+    # Provisional values only; replace with measured calibration before H3.
+    track_width_m: 0.193
+    wheel_diameter_m: 0.065
+    wheel_speed_sign: [1.0, 1.0, 1.0, 1.0]
+    sample_tick_period_s: 0.001
+    min_dt_s: 0.000001
+    max_dt_s: 1.0
+    stale_timeout_ms: 500
+    wheel_fifo_depth: 32
+    require_source_freshness: true
+    allow_sequence_wrap: true
+    allow_tick_wrap: true
+    telemetry_max_payload_bytes: 267
+    # Both identities must be concrete before allow_live_telemetry can admit
+    # a wheel sample. -1 deliberately keeps live wheel telemetry rejected.
+    # Canonical names match the embedded gateway.  The standalone node keeps
+    # telemetry_source_id/telemetry_destination_id as deprecated aliases.
+    telemetry_expected_source_id: -1
+    telemetry_expected_destination_id: -1

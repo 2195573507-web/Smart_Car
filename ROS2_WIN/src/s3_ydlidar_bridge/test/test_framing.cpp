@@ -88,6 +88,31 @@ TEST(Framing, DetectsDuplicateAndSequenceJump) {
   EXPECT_EQ(tracker.observe(7U), s3_ydlidar_bridge::SequenceStatus::kInOrder);
 }
 
+TEST(Framing, TracksTypeOneAndTypeTwoInOneConnectionSequence) {
+  s3_ydlidar_bridge::SequenceTracker tracker;
+  tracker.beginConnection(9U);
+  std::vector<s3_ydlidar_bridge::ReceivedFrame> frames(6U);
+  const std::vector<uint8_t> message_types{1U, 2U, 2U, 1U, 2U, 1U};
+  for (std::size_t index = 0U; index < frames.size(); ++index) {
+    frames[index].message_type = message_types[index];
+    frames[index].sequence = 500U + index;
+  }
+
+  EXPECT_EQ(tracker.observe(*frames.front().sequence),
+            s3_ydlidar_bridge::SequenceStatus::kFirst);
+  for (std::size_t index = 1U; index < frames.size(); ++index) {
+    EXPECT_EQ(tracker.observe(*frames[index].sequence),
+              s3_ydlidar_bridge::SequenceStatus::kInOrder)
+        << "message_type=" << static_cast<unsigned>(frames[index].message_type);
+  }
+  const auto snapshot = tracker.snapshot();
+  EXPECT_EQ(snapshot.connection_epoch, 9U);
+  ASSERT_TRUE(snapshot.first_sequence.has_value());
+  ASSERT_TRUE(snapshot.last_sequence.has_value());
+  EXPECT_EQ(*snapshot.first_sequence, 500U);
+  EXPECT_EQ(*snapshot.last_sequence, 505U);
+}
+
 TEST(Framing, DetectsSequenceWrap) {
   s3_ydlidar_bridge::SequenceTracker tracker;
   tracker.beginConnection(1U);

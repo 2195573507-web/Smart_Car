@@ -1,0 +1,41 @@
+# P1 mapping parameters.  This file contains observation/mapping settings
+# only; it intentionally has no controller, command, or ros2_control section.
+slam_toolbox:
+  ros__parameters:
+    use_sim_time: false
+    mode: mapping
+    map_frame: map
+    odom_frame: odom
+    base_frame: base_link
+    scan_topic: /scan
+    scan_queue_size: 1
+    scan_buffer_size: 10
+    resolution: 0.05
+    min_laser_range: 0.10
+    max_laser_range: 8.0
+    minimum_time_interval: 0.10
+    transform_timeout: 0.20
+    tf_buffer_duration: 30.0
+    transform_publish_period: 0.02
+    map_update_interval: 5.0
+    minimum_travel_distance: 0.05
+    minimum_travel_heading: 0.05
+    throttle_scans: 1
+    use_scan_matching: true
+    use_scan_barycenter: true
+    scan_buffer_maximum_scan_distance: 10.0
+    do_loop_closing: true
+    enable_interactive_mode: false
+    use_map_saver: true
+    debug_logging: false
+
+smartcar_state_bridge:
+  ros__parameters:
+    use_sim_time: false
+    # Live chassis telemetry remains blocked pending STM/S3 integration.
+    allow_live_telemetry: false
+    enable_live_odom: false
+    publish_odom: false
+    publish_tf: false
+    frame_id: odom
+    child_frame_id: base_link
