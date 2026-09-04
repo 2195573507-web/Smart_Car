@@ -10,6 +10,7 @@ services:
       - ../test:/ws/test:ro
       - ../testdata:/ws/testdata:ro
       - ../docs:/ws/docs:ro
+      - ../../DOCS/protocol:/ws/protocol:ro
       - ../maps:/ws/maps:rw
       - ../bags:/ws/bags:rw
       - ../evidence:/ws/evidence:rw
@@ -30,7 +31,38 @@ services:
     ports:
       - "8765:8765"
 
+  motion-gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: smartcar-motion-gateway
+    profiles: ["motion-gateway"]
+    working_dir: /ws
+    command:
+      - bash
+      - -lc
+      - source /ws/install/setup.bash && exec ros2 run smartcar_motion_gateway smartcar_motion_gateway_node --ros-args --params-file /ws/src/smartcar_motion_gateway/config/motion_gateway.yaml
+    volumes:
+      - ../src:/ws/src:ro
+      - ../config:/ws/config:ro
+      - ../../DOCS/protocol:/ws/protocol:ro
+      - ros2_build:/ws/build
+      - ros2_install:/ws/install
+      - ros2_log:/ws/log
+    environment:
+      RCUTILS_COLORIZED_OUTPUT: "1"
+    ports:
+      - "8766:8766"
+    networks:
+      default:
+      mapping_session:
+
 volumes:
   ros2_build:
   ros2_install:
   ros2_log:
+
+networks:
+  mapping_session:
+    external: true
+    name: docker_default

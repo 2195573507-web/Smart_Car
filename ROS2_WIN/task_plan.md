@@ -209,3 +209,43 @@ available only through an explicit `-StrictLiveGate` option.
 | Check | Result | Resolution |
 | --- | --- | --- |
 | Host `python -m py_compile` | Host Python cannot load `encodings` | Use the existing ROS container Python for read-only AST parsing; no source bytecode is written |
+
+## 2026-09-03 automatic navigation increment
+
+| Phase | Status | Deliverable |
+| --- | --- | --- |
+| Motion gateway and protocol boundary | complete | Sole TCP 8766 owner, SCBP-shaped offline codec, 20 Hz loop, false-by-default `enable_motion` and `protocol_ready` gates |
+| Nav2 and goal confirmation | complete | Saved-map Nav2 launch, measured-extrinsic gate, RViz SetGoal preview via `ComputePathToPose`, explicit Start/Cancel services, zero on failure |
+| Safety and verification | complete | Sensor-frame health checks, one-shot zero on gate loss, velocity limits, clean Compose build and test result |
+
+### Automatic navigation verification
+
+- Docker image build passed.
+- Fresh Compose project forced-reconfigure build passed for all five ROS packages.
+- Fresh Compose project `colcon test` and verbose result passed: `129 tests, 0 errors, 0 failures, 0 skipped`.
+- All six mapping/navigation launch files passed `--show-args`; missing map validation fails through the official map server path.
+- Real S3 control, lease acquisition, measured laser calibration, real map save/load, and vehicle navigation remain hardware acceptance gates; no real motion was enabled.
+
+### Continuation verification and artifact completion
+
+- Added rosbag recording to the desktop-compatible `p1_mapping.launch.py`
+  path, with a timestamped URI supplied by `mapping_session.ps1`.
+- Extended the console save action to call both `save_p1_map.sh` and
+  `save_p1_posegraph.sh`; the active rosbag is finalized when the session
+  stops.
+- Added a default-unchecked GUI measured-extrinsics confirmation and editable
+  laser XYZ/RPY fields. Direct launch files retain the same fail-closed gate.
+- Re-ran Docker build, complete symlinked colcon build/test, and verbose test
+  result after the launch changes: `129 tests, 0 errors, 0 failures, 0 skipped`.
+- Re-ran PowerShell AST parsing, Compose config validation, all six launch
+  `--show-args` checks, shell syntax checks for mapping helpers, and default
+  mapping/navigation rejection checks; all passed.
+- Normal mapping-container cleanup now uses `docker stop -t 10` before
+  removal, preserving rosbag2 finalization on Stop/Clear.
+
+### Continuation verification errors
+
+| Error | Attempt | Resolution |
+| --- | --- | --- |
+| Nested PowerShell/bash quoting caused the first combined launch smoke command to terminate before ROS execution | 1 | Replaced the combined shell script with direct per-launch invocations and captured expected non-zero gate exit codes explicitly |
+| Hidden PowerShell GUI smoke had no discoverable top-level window handle | 1 | Re-ran the smoke with a visible test process, verified the `Smart Car Mapping` window, and closed only that process cleanly |

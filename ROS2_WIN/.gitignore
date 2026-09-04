@@ -9,3 +9,11 @@
 *.pyc
 docker/mapping_console.status
 docker/mapping_console.log
+# Machine-local ROS Motion Gateway authentication material.
+config/private/
+
+# Local ROS bags, maps, evidence, and task planning notes
+bags/
+evidence/
+maps/
+.planning/

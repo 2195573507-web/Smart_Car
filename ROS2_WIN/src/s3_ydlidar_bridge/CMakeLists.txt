@@ -9,13 +9,8 @@ add_compile_options(-Wall -Wextra -Wpedantic)
 find_package(ament_cmake REQUIRED)
 find_package(builtin_interfaces REQUIRED)
 find_package(diagnostic_msgs REQUIRED)
-find_package(geometry_msgs REQUIRED)
-find_package(nav_msgs REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
-find_package(std_msgs REQUIRED)
-find_package(smartcar_state_bridge REQUIRED)
-find_package(tf2_ros REQUIRED)
 find_package(Threads REQUIRED)
 
 set(YDLIDAR_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ydlidar_sdk)
@@ -69,31 +64,15 @@ target_include_directories(s3_ydlidar_bridge_core PUBLIC
   $<BUILD_INTERFACE:${YDLIDAR_GENERATED_DIR}>
 )
 ament_target_dependencies(s3_ydlidar_bridge_core
-  builtin_interfaces diagnostic_msgs geometry_msgs nav_msgs rclcpp sensor_msgs
-  std_msgs)
-
-# ament_export_targets creates a namespaced imported target for the state
-# package.  Do not pass the package to ament_target_dependencies here: that
-# macro also discovers the package's executable target, which is not a link
-# dependency for this gateway library.
-if(TARGET smartcar_state_bridge::smartcar_state_bridge_core)
-  set(SMARTCAR_STATE_CORE_TARGET smartcar_state_bridge::smartcar_state_bridge_core)
-elseif(TARGET smartcar_state_bridge_core)
-  set(SMARTCAR_STATE_CORE_TARGET smartcar_state_bridge_core)
-else()
-  message(FATAL_ERROR
-    "smartcar_state_bridge core target was not exported by the state package")
-endif()
+  builtin_interfaces diagnostic_msgs rclcpp sensor_msgs)
 
 target_link_libraries(s3_ydlidar_bridge_core ydlidar_sdk)
 
 add_executable(s3_ydlidar_bridge_node src/main.cpp src/bridge_node.cpp)
 target_include_directories(s3_ydlidar_bridge_node PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/include)
-ament_target_dependencies(s3_ydlidar_bridge_node diagnostic_msgs rclcpp sensor_msgs
-  geometry_msgs nav_msgs std_msgs tf2_ros)
-target_link_libraries(s3_ydlidar_bridge_node
-  s3_ydlidar_bridge_core ${SMARTCAR_STATE_CORE_TARGET})
+ament_target_dependencies(s3_ydlidar_bridge_node diagnostic_msgs rclcpp sensor_msgs)
+target_link_libraries(s3_ydlidar_bridge_node s3_ydlidar_bridge_core)
 
 install(TARGETS s3_ydlidar_bridge_node
   DESTINATION lib/${PROJECT_NAME})
@@ -159,6 +138,5 @@ if(BUILD_TESTING)
   add_launch_test(test/test_default_safety.py TIMEOUT 30)
 endif()
 
-ament_export_dependencies(builtin_interfaces diagnostic_msgs geometry_msgs nav_msgs
-  rclcpp sensor_msgs std_msgs smartcar_state_bridge tf2_ros)
+ament_export_dependencies(builtin_interfaces diagnostic_msgs rclcpp sensor_msgs)
 ament_package()

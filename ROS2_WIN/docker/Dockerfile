@@ -19,6 +19,16 @@ RUN apt-get update \
       ros-humble-launch-testing-ros \
       ros-humble-nav2-lifecycle-manager \
       ros-humble-nav2-map-server \
+      ros-humble-nav2-msgs \
+      ros-humble-navigation2 \
+      ros-humble-nav2-bringup \
+      ros-humble-nav2-amcl \
+      ros-humble-nav2-planner \
+      ros-humble-nav2-controller \
+      ros-humble-nav2-bt-navigator \
+      ros-humble-nav2-behaviors \
+      ros-humble-nav2-waypoint-follower \
+      ros-humble-dwb-critics \
       ros-humble-rqt \
       ros-humble-rqt-common-plugins \
       ros-humble-robot-localization \

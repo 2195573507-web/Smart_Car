@@ -408,3 +408,56 @@ has reconnected to S3, and publishes only `/scan` plus diagnostics. A
 pre-existing slam_toolbox process was not started or used by this turn;
 mapping remains ineligible because live odom is absent and the laser extrinsic
 is still provisional.
+
+## 16. Automatic mapping and navigation increment (2026-09-03)
+
+This increment remains inside `ROS2_WIN`. The existing `s3_ydlidar_bridge` is
+still the sole TCP-8765 radar/telemetry owner; no second listener or firmware,
+STM32, iOS, Common, or SRP change was introduced.
+
+### Host implementation
+
+- `smartcar_state_bridge` decodes the reviewed S3RD type-2 SRP v4
+  `CHASSIS_STATE (0x15)` payload. The bridge publishes `/odom` and the dynamic
+  `odom -> base_link` transform only after its live telemetry, odometry,
+  identity, freshness, epoch, and sequence gates pass.
+- `smartcar_description` supplies `base_link`, `laser_frame`, the chassis
+  footprint geometry, and launch-configurable laser extrinsics. Mapping and
+  navigation refuse startup unless `laser_extrinsics_measured:=true`.
+- `mapping.launch.py`/`p1_mapping.launch.py` run `slam_toolbox`, RViz, and an
+  observation-only rosbag. The desktop console uses unique bag names and its
+  save action writes the Nav2 `.yaml`/`.pgm` map plus slam_toolbox
+  `.posegraph`/`.data` graph under one prefix.
+- `navigation.launch.py` runs map server, AMCL, Nav2 planner/controller, and
+  the goal confirmation node. RViz `SetGoal` only creates a pending goal and a
+  `ComputePathToPose` preview. The explicit `start` service is the only path
+  to `NavigateToPose`; cancel, health loss, action failure, and completion
+  publish a zero command.
+- `smartcar_motion_gateway` is the only TCP-8766 listener. It consumes only
+  `/nav2/cmd_vel`, emits at 20 Hz, clamps to `0.10 m/s` and `0.30 rad/s`, and
+  sends only when `enable_motion`, `protocol_ready`, fresh scan/odom/TF, and
+  `/smartcar/s3_lease` are all valid. Defaults keep both motion and protocol
+  readiness false.
+
+### Verification boundary
+
+The current host/container verification passes:
+
+```text
+docker compose build                                  PASS
+docker compose run --rm ros2-dev colcon build ...     PASS
+docker compose run --rm ros2-dev colcon test          PASS
+docker compose run --rm ros2-dev colcon test-result   PASS
+Summary: 129 tests, 0 errors, 0 failures, 0 skipped
+```
+
+PowerShell AST parsing, Compose configuration, launch `--show-args` for all
+mapping/navigation entry points, shell syntax checks for map/posegraph/bag
+helpers, and default measured-extrinsics rejection also pass.
+
+This is not a real-device acceptance report. The requested external
+`DOCS/protocol/ros-motion-control-v1.md` is absent; the local compatibility
+record therefore keeps `protocol_ready=false`. No released S3 lease/control
+capture, measured laser calibration, real map save/load, or vehicle motion was
+accepted in this run. Those require a separate hardware test with explicit
+operator approval and the live health gates enabled.

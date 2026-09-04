@@ -5,6 +5,7 @@ import launch
 import launch_ros.actions
 import launch_testing.actions
 import rclpy
+from diagnostic_msgs.msg import DiagnosticArray
 
 
 def generate_test_description():
@@ -63,3 +64,26 @@ class TestDefaultSafety(unittest.TestCase):
 
     def test_default_has_no_dynamic_tf_publisher(self):
         self.assertEqual(self.publishers_from_bridge("/tf"), [])
+
+    def test_default_marks_chassis_metrics_not_applicable(self):
+        received = []
+        subscription = self.node.create_subscription(
+            DiagnosticArray, "/diagnostics", received.append, 10
+        )
+        try:
+            deadline = time.monotonic() + 3.0
+            while not received and time.monotonic() < deadline:
+                rclpy.spin_once(self.node, timeout_sec=0.1)
+        finally:
+            self.node.destroy_subscription(subscription)
+
+        self.assertNotEqual(received, [])
+        status = next(
+            entry
+            for entry in received[-1].status
+            if entry.name == "s3_ydlidar_bridge"
+        )
+        values = {entry.key: entry.value for entry in status.values}
+        self.assertEqual(values["chassis_frames"], "not_applicable")
+        self.assertEqual(values["chassis_decode_status"], "not_applicable")
+        self.assertEqual(values["chassis_updates_accepted"], "not_applicable")

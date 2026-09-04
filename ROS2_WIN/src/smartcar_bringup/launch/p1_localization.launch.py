@@ -9,7 +9,7 @@ publishers are never started together.
 from launch import LaunchDescription
 from launch.conditions import IfCondition, LaunchConfigurationNotEquals
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, OpaqueFunction
 from launch.substitutions import (
     LaunchConfiguration,
     PathJoinSubstitution,
@@ -18,6 +18,12 @@ from launch.substitutions import (
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
+
+
+def _require_measured(context):
+    if LaunchConfiguration("laser_extrinsics_measured").perform(context).lower() != "true":
+        raise RuntimeError("navigation requires measured laser extrinsics; set laser_extrinsics_measured:=true")
+    return []
 
 
 def generate_launch_description():
@@ -50,6 +56,7 @@ def generate_launch_description():
 
     return LaunchDescription([
         DeclareLaunchArgument("use_sim_time", default_value="false"),
+        DeclareLaunchArgument("laser_extrinsics_measured", default_value="false"),
         DeclareLaunchArgument("posegraph", default_value=""),
         DeclareLaunchArgument("map_yaml", default_value=""),
         DeclareLaunchArgument("use_rviz", default_value="false"),
@@ -59,6 +66,7 @@ def generate_launch_description():
         DeclareLaunchArgument("enable_live_odom", default_value="false"),
         DeclareLaunchArgument("publish_odom", default_value="false"),
         DeclareLaunchArgument("publish_tf", default_value="false"),
+        OpaqueFunction(function=_require_measured),
         DeclareLaunchArgument(
             "laser_xyz", default_value="0.200 0.000 0.155",
             description="Provisional or measured base_link to laser_frame xyz in metres",

@@ -14,12 +14,19 @@
   <exec_depend>slam_toolbox</exec_depend>
   <exec_depend>rviz2</exec_depend>
   <exec_depend>nav2_map_server</exec_depend>
+  <exec_depend>nav2_bringup</exec_depend>
+  <exec_depend>nav2_msgs</exec_depend>
+  <exec_depend>action_msgs</exec_depend>
   <exec_depend>nav2_lifecycle_manager</exec_depend>
   <exec_depend>nav2_util</exec_depend>
   <exec_depend>ros2bag</exec_depend>
   <exec_depend>s3_ydlidar_bridge</exec_depend>
   <exec_depend>smartcar_state_bridge</exec_depend>
   <exec_depend>smartcar_description</exec_depend>
+  <exec_depend>std_srvs</exec_depend>
+  <exec_depend>smartcar_motion_gateway</exec_depend>
+  <exec_depend>smartcar_auto_exploration</exec_depend>
+  <test_depend>ament_cmake_pytest</test_depend>
 
   <export>
     <build_type>ament_cmake</build_type>

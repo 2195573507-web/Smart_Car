@@ -361,7 +361,7 @@ TEST(S3Protocol, AcceptsOpaqueMessageTypeWithoutYdlidarPayloadValidation) {
   EXPECT_EQ(extractor.counters().opaque_frames, 1U);
 }
 
-TEST(S3Protocol, RoutesTypeTwoSrpChassisFrameAsOpaqueOnly) {
+TEST(S3Protocol, RejectsTypeTwoChassisFrameWithoutExplicitAllowList) {
   const std::vector<uint8_t> srp_chassis{
       0xAAU, 0x55U, 0x18U, 0x00U, 0x00U, 0x2AU, 0x15U, 0x02U, 0x01U,
       0x04U, 0x00U, 0x00U, 0xE8U, 0x03U, 0x00U, 0x00U, 0x00U, 0x00U,
@@ -369,22 +369,17 @@ TEST(S3Protocol, RoutesTypeTwoSrpChassisFrameAsOpaqueOnly) {
       0x43U, 0x00U, 0x00U, 0x48U, 0x41U, 0x7FU, 0xC0U, 0x0DU, 0x0AU,
   };
   s3_ydlidar_bridge::S3ProtocolConfig config;
-  config.opaque_message_types = {2U};
   s3_ydlidar_bridge::S3FrameExtractor extractor(config);
   const auto outer = makeS3Frame(srp_chassis, 46U, 1U, 2U);
 
   size_t consumed = 0U;
   s3_ydlidar_bridge::ReceivedFrame decoded;
   ASSERT_EQ(extractor.extract(outer, consumed, decoded),
-            s3_ydlidar_bridge::ExtractStatus::kFrameReady);
+            s3_ydlidar_bridge::ExtractStatus::kInvalid);
   EXPECT_EQ(consumed, outer.size());
-  EXPECT_EQ(decoded.message_type, 2U);
-  EXPECT_TRUE(decoded.isOpaque());
-  EXPECT_FALSE(decoded.isRawYdlidar());
-  EXPECT_FALSE(decoded.zero_packet);
-  EXPECT_EQ(decoded.payload, srp_chassis);
   EXPECT_EQ(extractor.counters().raw_frames, 0U);
-  EXPECT_EQ(extractor.counters().opaque_frames, 1U);
+  EXPECT_EQ(extractor.counters().opaque_frames, 0U);
+  EXPECT_EQ(extractor.counters().type_errors, 1U);
 }
 
 TEST(S3Protocol, OpaqueConvenienceAllowListAcceptsShortPayload) {

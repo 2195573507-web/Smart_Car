@@ -1,6 +1,9 @@
 [CmdletBinding()]
 param(
-  [switch]$StrictLiveGate
+  [switch]$StrictLiveGate,
+  [switch]$LaserExtrinsicsMeasured,
+  [string]$LaserXyz = '0.200 0.000 0.155',
+  [string]$LaserRpy = '0.000 0.000 0.000'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -71,7 +74,7 @@ function Start-VcxSrv {
 $form = New-Object System.Windows.Forms.Form
 $form.Text = 'Smart Car Mapping'
 $form.StartPosition = 'CenterScreen'
-$form.ClientSize = New-Object System.Drawing.Size(560, 300)
+$form.ClientSize = New-Object System.Drawing.Size(560, 500)
 $form.FormBorderStyle = 'FixedDialog'
 $form.MaximizeBox = $false
 $form.Font = New-Object System.Drawing.Font('Segoe UI', 10)
@@ -96,7 +99,7 @@ $startButton.Size = New-Object System.Drawing.Size(244, 46)
 $form.Controls.Add($startButton)
 
 $saveButton = New-Object System.Windows.Forms.Button
-$saveButton.Text = 'Save Map'
+$saveButton.Text = 'Save Map + Pose Graph'
 $saveButton.Location = New-Object System.Drawing.Point(292, 98)
 $saveButton.Size = New-Object System.Drawing.Size(244, 46)
 $form.Controls.Add($saveButton)
@@ -113,19 +116,101 @@ $stopButton.Location = New-Object System.Drawing.Point(368, 158)
 $stopButton.Size = New-Object System.Drawing.Size(168, 46)
 $form.Controls.Add($stopButton)
 
+$laserMeasuredCheck = New-Object System.Windows.Forms.CheckBox
+$laserMeasuredCheck.Text = 'Measured laser extrinsics confirmed'
+$laserMeasuredCheck.Checked = $LaserExtrinsicsMeasured
+$laserMeasuredCheck.Location = New-Object System.Drawing.Point(24, 216)
+$laserMeasuredCheck.Size = New-Object System.Drawing.Size(500, 24)
+$form.Controls.Add($laserMeasuredCheck)
+
+$laserXyzLabel = New-Object System.Windows.Forms.Label
+$laserXyzLabel.Text = 'Laser XYZ (m)'
+$laserXyzLabel.Location = New-Object System.Drawing.Point(24, 248)
+$laserXyzLabel.Size = New-Object System.Drawing.Size(88, 24)
+$form.Controls.Add($laserXyzLabel)
+
+$laserXyzText = New-Object System.Windows.Forms.TextBox
+$laserXyzText.Text = $LaserXyz
+$laserXyzText.Location = New-Object System.Drawing.Point(116, 244)
+$laserXyzText.Size = New-Object System.Drawing.Size(420, 28)
+$form.Controls.Add($laserXyzText)
+
+$laserRpyLabel = New-Object System.Windows.Forms.Label
+$laserRpyLabel.Text = 'Laser RPY (rad)'
+$laserRpyLabel.Location = New-Object System.Drawing.Point(24, 282)
+$laserRpyLabel.Size = New-Object System.Drawing.Size(88, 24)
+$form.Controls.Add($laserRpyLabel)
+
+$laserRpyText = New-Object System.Windows.Forms.TextBox
+$laserRpyText.Text = $LaserRpy
+$laserRpyText.Location = New-Object System.Drawing.Point(116, 278)
+$laserRpyText.Size = New-Object System.Drawing.Size(420, 28)
+$form.Controls.Add($laserRpyText)
+
+$autoStartButton = New-Object System.Windows.Forms.Button
+$autoStartButton.Text = 'Start Auto Mapping'
+$autoStartButton.Location = New-Object System.Drawing.Point(24, 322)
+$autoStartButton.Size = New-Object System.Drawing.Size(244, 42)
+$form.Controls.Add($autoStartButton)
+
+$autoStopButton = New-Object System.Windows.Forms.Button
+$autoStopButton.Text = 'Stop Auto Mapping'
+$autoStopButton.Location = New-Object System.Drawing.Point(292, 322)
+$autoStopButton.Size = New-Object System.Drawing.Size(244, 42)
+$form.Controls.Add($autoStopButton)
+
+$autoSpeedLabel = New-Object System.Windows.Forms.Label
+$autoSpeedLabel.Text = 'Auto speed (m/s)'
+$autoSpeedLabel.Location = New-Object System.Drawing.Point(24, 380)
+$autoSpeedLabel.Size = New-Object System.Drawing.Size(130, 24)
+$form.Controls.Add($autoSpeedLabel)
+
+$autoSpeed = New-Object System.Windows.Forms.NumericUpDown
+$autoSpeed.DecimalPlaces = 2
+$autoSpeed.Increment = [decimal]0.01
+$autoSpeed.Minimum = [decimal]0.02
+$autoSpeed.Maximum = [decimal]0.08
+$autoSpeed.Value = [decimal]0.05
+$autoSpeed.Location = New-Object System.Drawing.Point(158, 376)
+$autoSpeed.Size = New-Object System.Drawing.Size(110, 28)
+$form.Controls.Add($autoSpeed)
+
+$robotRadiusLabel = New-Object System.Windows.Forms.Label
+$robotRadiusLabel.Text = 'Measured robot radius (m)'
+$robotRadiusLabel.Location = New-Object System.Drawing.Point(292, 380)
+$robotRadiusLabel.Size = New-Object System.Drawing.Size(180, 24)
+$form.Controls.Add($robotRadiusLabel)
+
+$robotRadius = New-Object System.Windows.Forms.NumericUpDown
+$robotRadius.DecimalPlaces = 3
+$robotRadius.Increment = [decimal]0.005
+$robotRadius.Minimum = [decimal]0.000
+$robotRadius.Maximum = [decimal]2.000
+$robotRadius.Value = [decimal]0.000
+$robotRadius.Location = New-Object System.Drawing.Point(474, 376)
+$robotRadius.Size = New-Object System.Drawing.Size(62, 28)
+$form.Controls.Add($robotRadius)
+
 $logButton = New-Object System.Windows.Forms.Button
 $logButton.Text = 'Open Session Log'
-$logButton.Location = New-Object System.Drawing.Point(24, 232)
+$logButton.Location = New-Object System.Drawing.Point(24, 440)
 $logButton.Size = New-Object System.Drawing.Size(160, 36)
 $form.Controls.Add($logButton)
 
 function Set-Controls([bool]$Busy) {
   $startButton.Enabled = -not $Busy
+  $laserMeasuredCheck.Enabled = -not $Busy
+  $laserXyzText.Enabled = -not $Busy
+  $laserRpyText.Enabled = -not $Busy
   $liveMappingReady = $false
   try { $liveMappingReady = Test-LiveMappingReady } catch { $liveMappingReady = $false }
   $saveButton.Enabled = (-not $Busy) -and $liveMappingReady
   $clearButton.Enabled = -not $Busy
   $stopButton.Enabled = -not $Busy
+  $autoSpeed.Enabled = -not $Busy
+  $robotRadius.Enabled = -not $Busy
+  $autoStartButton.Enabled = (-not $Busy) -and $liveMappingReady -and ($robotRadius.Value -gt 0)
+  $autoStopButton.Enabled = (-not $Busy) -and (Test-MappingRunning)
 }
 
 function Start-Worker([string]$Action) {
@@ -133,12 +218,24 @@ function Start-Worker([string]$Action) {
   Set-Controls $true
   $state.Text = "$Action in progress"
   $strictArgument = if ($StrictLiveGate) { ' -StrictLiveGate' } else { '' }
-  $arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$workerScript`" -Action $Action$strictArgument -StatusFile `"$statusFile`" -LogFile `"$logFile`""
+  $measurementArgument = if ($laserMeasuredCheck.Checked) { ' -LaserExtrinsicsMeasured' } else { '' }
+  $xyz = $laserXyzText.Text.Trim()
+  $rpy = $laserRpyText.Text.Trim()
+  $autoSpeedValue = $autoSpeed.Value.ToString([Globalization.CultureInfo]::InvariantCulture)
+  $robotRadiusValue = $robotRadius.Value.ToString([Globalization.CultureInfo]::InvariantCulture)
+  $arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$workerScript`" -Action $Action$strictArgument$measurementArgument -LaserXyz `"$xyz`" -LaserRpy `"$rpy`" -AutoSpeed $autoSpeedValue -RobotRadius $robotRadiusValue -StatusFile `"$statusFile`" -LogFile `"$logFile`""
   $script:worker = Start-Process -FilePath 'powershell.exe' -ArgumentList $arguments -WindowStyle Hidden -PassThru
 }
 
 $startButton.Add_Click({
   try {
+    if (-not $laserMeasuredCheck.Checked) {
+      [System.Windows.Forms.MessageBox]::Show(
+        'Mapping requires measured laser extrinsics. Confirm the checkbox after entering the measured XYZ and RPY values.',
+        'Measured Extrinsics Required', 'OK', 'Warning'
+      ) | Out-Null
+      return
+    }
     $owners = Get-PortOwners
     if ($owners.Count -gt 0) {
       $message = "Mapping replaces the current TCP-8765 bridge: $($owners -join ', ').`r`nIt enables read-only telemetry, odometry, and TF only for this mapping session. Continue?"
@@ -153,6 +250,9 @@ $startButton.Add_Click({
 })
 
 $saveButton.Add_Click({ Start-Worker 'Save' })
+
+$autoStartButton.Add_Click({ Start-Worker 'AutoStart' })
+$autoStopButton.Add_Click({ Start-Worker 'AutoStop' })
 
 $clearButton.Add_Click({
   $message = 'This stops the current SLAM session, moves saved .pgm, .yaml, .posegraph, and .data files from ROS2_WIN\\maps to the Recycle Bin, then starts a new empty mapping session. Continue?'
@@ -197,7 +297,16 @@ $timer.Add_Tick({
 })
 $timer.Start()
 
-$form.Add_Shown({ Set-Controls $false })
+$form.Add_Shown({
+  $initialStatus = if (Test-MappingRunning) {
+    'A mapping session is already running. Start Mapping will restart it.'
+  } else {
+    'Ready'
+  }
+  Set-Content -LiteralPath $statusFile -Value $initialStatus -Encoding utf8
+  $state.Text = $initialStatus
+  Set-Controls $false
+})
 $form.Add_FormClosing({
   param($sender, $event)
   if ($script:worker -and -not $script:worker.HasExited) {

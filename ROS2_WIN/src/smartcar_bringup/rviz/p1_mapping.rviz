@@ -41,6 +41,13 @@ Visualization Manager:
         Value: /scan
       Use rainbow: false
       Use Fixed Frame: true
+    - Class: rviz_default_plugins/Path
+      Enabled: true
+      Name: GoalPreview
+      Topic: /smartcar/goal_preview
+      Color: 255; 170; 0
+      Line Style: Lines
+      Line Width: 0.03
     - Class: rviz_default_plugins/TF
       Enabled: true
       Frame Timeout: 15
@@ -61,6 +68,10 @@ Visualization Manager:
     - Class: rviz_default_plugins/Interact
     - Class: rviz_default_plugins/MoveCamera
     - Class: rviz_default_plugins/Select
+    - Class: rviz_default_plugins/SetInitialPose
+      Topic: /initialpose
+    - Class: rviz_default_plugins/SetGoal
+      Topic: /goal_pose
   Views:
     Current:
       Class: rviz_default_plugins/TopDownOrtho

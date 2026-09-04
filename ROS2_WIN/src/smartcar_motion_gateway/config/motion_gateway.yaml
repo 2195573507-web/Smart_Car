@@ -1,0 +1,17 @@
+smartcar_motion_gateway:
+  ros__parameters:
+    enable_motion: false
+    protocol_ready: true
+    listen_address: 0.0.0.0
+    listen_port: 8766
+    # An untracked Windows-local file supplies a raw ASCII PSK line at launch.
+    # Empty or malformed local configuration disables the authenticated listener.
+    psk_config_path: "/ws/config/private/ros_motion_gateway.psk"
+    nav_cmd_topic: /nav2/cmd_vel
+    safe_cmd_topic: /cmd_vel_safe
+    health_timeout_ms: 500
+    command_timeout_ms: 250
+    command_period_ms: 50
+    heartbeat_period_ms: 50
+    enable_status_odom: true
+    publish_status_tf: true

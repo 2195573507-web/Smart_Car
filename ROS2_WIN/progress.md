@@ -476,3 +476,69 @@
   Independent `/odom` and TF probes timed out, so no mapping-ready claim was
   made. An explicit `Stop` then removed that session and restored one
   false-gated `smartcar-mapping-safe` bridge.
+
+## 2026-09-03 automatic navigation increment
+
+- Added the scoped `smartcar_motion_gateway` package. It owns TCP 8766,
+  encodes the local SCBP-shaped velocity frame, runs at 20 Hz, clamps to
+  `0.10 m/s` and `0.30 rad/s`, and never sends unless both explicit motion
+  gates plus scan/odom/TF/lease health are true.
+- Added the local ROS motion-control compatibility record because the
+  requested external `DOCS/protocol/ros-motion-control-v1.md` is absent. The
+  gateway therefore keeps `protocol_ready=false` by default and does not
+  claim a released S3 firmware contract.
+- Added saved-map Nav2 launch with `map_server`, AMCL, planner, controller,
+  and lifecycle managers. Nav2 controller output is scoped to `/nav2/cmd_vel`
+  before the motion gateway; arbitrary `/cmd_vel` is not consumed by the
+  gateway.
+- RViz `SetGoal` now requests `ComputePathToPose` and publishes the returned
+  `nav_msgs/Path` as `/smartcar/goal_preview`. Only the `~/start` Trigger calls
+  `NavigateToPose`; `~/cancel`, health loss, action rejection, and failure
+  clear state and publish a zero command.
+- Added frame validation for `laser_frame`, `odom -> base_link`, and finite
+  odometry samples. Added a one-shot zero frame when a previously active
+  command loses health or freshness.
+- Added package-level goal confirmation pytest coverage for pending/start/
+  cancel/preview semantics and exported `ament_cmake_pytest` dependency.
+- Fresh Compose project `smartcar_ros2_final2` passed image build, forced
+  reconfigure build, test, and verbose result: `129 tests, 0 errors, 0
+  failures, 0 skipped`. No real motion, S3 lease, measured extrinsic, or
+  vehicle mapping/navigation acceptance was run.
+- Updated the desktop mapping worker and console to carry explicit
+  `-LaserExtrinsicsMeasured`, `-LaserXyz`, and `-LaserRpy` inputs. They default
+  to the safe rejected state, so an operator cannot bypass the calibration
+  gate through the legacy P1 entry point.
+
+## 2026-09-03 continuation verification
+
+- Re-ran PowerShell AST parsing for `docker/mapping_session.ps1` and
+  `docker/open_mapping_console.ps1`; both reported zero parse errors after the
+  laser-extrinsics argument quoting change.
+- Re-ran the requested Docker checks from `ROS2_WIN/docker`: image build,
+  symlinked `colcon build`, `colcon test`, and verbose test results all passed.
+- Current result is `129 tests, 0 errors, 0 failures, 0 skipped` across five
+  ROS packages. Docker reported only pre-existing orphan-container warnings;
+  no cleanup was performed.
+- No live S3 control lease, released 8766 wire contract, measured laser
+  extrinsics, real map save/load, or vehicle navigation acceptance was run.
+
+## 2026-09-03 mapping artifact completion
+
+- Extended the desktop `p1_mapping.launch.py` path to record observation-only
+  rosbag topics to a timestamped `/ws/bags/mapping_YYYYMMDD_HHMMSS` URI.
+- The mapping console's save action now requires its existing live-ready gate,
+  then saves both the Nav2 `.yaml`/`.pgm` map and slam_toolbox
+  `.posegraph`/`.data` graph with one prefix. The active rosbag is finalized
+  when the mapping container stops.
+- Updated the operator label and design record to reflect all three artifact
+  classes; no control topic is recorded or published by the mapping workflow.
+- Added a default-unchecked GUI confirmation for measured laser extrinsics plus
+  editable XYZ/RPY fields. The desktop Start action refuses to launch until
+  the operator confirms measured values; launch-level rejection remains in
+  place for direct invocations.
+- Started the updated WinForms console in a visible PowerShell process,
+  observed the `Smart Car Mapping` window, and closed only that test process
+  cleanly. The new controls did not raise an event-loop or close-time error.
+- Changed named-container cleanup to stop for up to 10 seconds before removal,
+  allowing rosbag2 and slam_toolbox to flush metadata instead of using a
+  force-remove SIGKILL on normal Stop/Clear transitions.

@@ -135,6 +135,32 @@ description running; it does not synthesize ROS data. Use the console's
 explicit Stop/Clear actions for cleanup. To request the previous fail-closed
 timeout behavior explicitly, launch the script with `-StrictLiveGate`.
 
+## Automatic navigation host workflow
+
+`mapping.launch.py` and `p1_mapping.launch.py` start `slam_toolbox`, the
+single TCP-8765 radar/telemetry owner, robot description, RViz, and an
+observation-only rosbag. The desktop console creates a timestamped bag and
+the **Save Map + Pose Graph** action saves matching `.yaml`/`.pgm` and
+`.posegraph`/`.data` artifacts under `maps/` after the live scan/odom/TF gate
+is healthy.
+
+`navigation.launch.py` starts the saved-map `map_server`, AMCL, Nav2 planner
+and controller, RViz, and `smartcar_motion_gateway`. The controller's final
+smoothed output is remapped to `/nav2/cmd_vel`; the gateway does not consume
+arbitrary `/cmd_vel`, owns the only TCP-8766 listener, and clamps output to
+`0.10 m/s` and `0.30 rad/s`. RViz `SetGoal` publishes a pending goal and a
+`/smartcar/goal_preview` path. Only the `smartcar_goal_confirmation/start`
+service calls `NavigateToPose`; cancel, health loss, failure, and completion
+publish zero velocity.
+
+Both mapping and navigation reject startup unless
+`laser_extrinsics_measured:=true` is explicitly supplied. Motion also remains
+disabled unless `enable_motion:=true`, `protocol_ready:=true`, fresh `/scan`,
+`/odom`, `odom -> base_link` TF, and `/smartcar/s3_lease` are all healthy. The
+requested released S3 motion-control document is absent, so the local
+compatibility record keeps `protocol_ready=false` by default and no real
+8766 wire-compatibility claim is made.
+
 Run the live PoC receiver from `ROS2_WIN/docker`:
 
 ```bash

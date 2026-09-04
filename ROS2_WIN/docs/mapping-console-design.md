@@ -20,7 +20,9 @@ its false-gated safe state when mapping stops.
 ## Operator Flow
 
 1. Double-click **Smart Car Mapping** on the desktop.
-2. Select **Start Mapping**. The console stops only the current TCP-8765
+2. Enter measured laser XYZ/RPY values and select **Measured laser extrinsics
+   confirmed**. The checkbox is clear by default; without it, **Start
+   Mapping** refuses to launch. The console then stops only the current TCP-8765
    bridge after confirmation, builds the mounted ROS workspace if needed, and
    starts one named `smartcar-mapping-session` container with live odom/TF
    gates enabled only for the mapping session.
@@ -30,8 +32,10 @@ its false-gated safe state when mapping stops.
    `/scan`, `/odom`, and `odom -> base_link` TF. If they are incomplete, it
    shows `实时里程计/TF未就绪，暂不能建图` and leaves the full mapping
    container running so RViz and SLAM remain available for diagnosis.
-4. Select **Save Map** to save a timestamped `.pgm` and `.yaml` pair under
-   `maps/`.
+4. Select **Save Map + Pose Graph** to save a timestamped `.pgm`/`.yaml` map
+   pair and the `.posegraph`/`.data` `slam_toolbox` graph under `maps/`.
+   The mapping launch records `/scan`, `/odom`, TF, `/map`, and diagnostics to
+   a timestamped rosbag under `bags/`; stopping the session finalizes it.
 5. Select **Clear Saved Maps And Reset SLAM** to confirm, stop the active
    mapping session, move map artifacts (`.pgm`, `.yaml`, `.posegraph`,
    `.data`) from `maps/` to the Windows Recycle Bin, then start a fresh SLAM

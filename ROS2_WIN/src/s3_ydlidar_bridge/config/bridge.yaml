@@ -14,11 +14,11 @@ s3_ydlidar_bridge:
     s3_allowed_flags_mask: 1
     s3_expected_device_id: 1
     s3_expected_stream_id: 1
-    # SRP v4 chassis state is the reviewed opaque type. Recognizing type 2 at
-    # the outer dispatcher does not authorize live consumption or publication;
-    # the four independent safety gates below remain false by default.
-    s3_opaque_message_types: [2]
-    # 0 = raw YDLIDAR, 1 = opaque for s3_expected_message_type.
+    # TCP 8765 admits only the radar S3RD type and publishes only /scan.
+    # STATUS 0x15 is accepted exclusively by smartcar_motion_gateway on 8766.
+    # Omit the optional opaque-type list to retain its empty integer-array
+    # default. A YAML null is parsed as a string by ROS 2 Humble.
+    # 0 = raw YDLIDAR.
     s3_expected_message_policy: 0
     s3_opaque_min_payload_bytes: 0
     s3_min_payload_bytes: 10
@@ -39,34 +39,3 @@ s3_ydlidar_bridge:
     ydlidar_intensities: false
     stale_after_ms: 500
     zero_packet_timeout_ms: 1000
-
-    # Embedded read-only state adapters. The gateway is the only process that
-    # owns the TCP connection. SRP v4 type 2 is locally reviewed, but live
-    # odometry stays disabled pending STM/S3 captures and disconnect testing.
-    allow_live_telemetry: false
-    allow_offline_fixtures: true
-    enable_live_odom: false
-    publish_odom: false
-    publish_tf: false
-    odom_topic: /odom
-    odom_frame_id: odom
-    odom_child_frame_id: base_link
-    require_outer_sequence: true
-    track_width_m: 0.193
-    wheel_diameter_m: 0.065
-    wheel_speed_sign: [1.0, 1.0, 1.0, 1.0]
-    sample_tick_period_s: 0.001
-    min_dt_s: 0.000001
-    max_dt_s: 1.0
-    stale_timeout_ms: 500
-    wheel_fifo_depth: 32
-    require_source_freshness: true
-    allow_sequence_wrap: true
-    allow_tick_wrap: true
-    telemetry_max_payload_bytes: 267
-    # Both identities must be concrete before allow_live_telemetry can admit
-    # a wheel sample. -1 deliberately keeps live wheel telemetry rejected.
-    telemetry_expected_source_id: -1
-    telemetry_expected_destination_id: -1
-    # The state bridge only has a reviewed decoder for SCBP wheel status 0x0210.
-    telemetry_wheel_message_type: 528

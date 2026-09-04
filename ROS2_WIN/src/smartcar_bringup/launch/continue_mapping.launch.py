@@ -3,13 +3,19 @@
 from typing import List
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, OpaqueFunction
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
+
+
+def _require_measured(context):
+    if LaunchConfiguration("laser_extrinsics_measured").perform(context).lower() != "true":
+        raise RuntimeError("mapping requires measured laser extrinsics; set laser_extrinsics_measured:=true")
+    return []
 
 
 def generate_launch_description():
@@ -36,6 +42,9 @@ def generate_launch_description():
             "use_sim_time", default_value="false",
             description="Use /clock only for a bag replay; false for live operation",
         ),
+        DeclareLaunchArgument("laser_extrinsics_measured", default_value="false"),
+        DeclareLaunchArgument("laser_xyz", default_value="0.200 0.000 0.155"),
+        DeclareLaunchArgument("laser_rpy", default_value="0.000 0.000 0.000"),
         DeclareLaunchArgument("transport", default_value="unconfigured"),
         DeclareLaunchArgument("replay_file", default_value=""),
         DeclareLaunchArgument(
@@ -55,9 +64,14 @@ def generate_launch_description():
         DeclareLaunchArgument("enable_live_odom", default_value="false"),
         DeclareLaunchArgument("publish_odom", default_value="false"),
         DeclareLaunchArgument("publish_tf", default_value="false"),
+        OpaqueFunction(function=_require_measured),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(description_launch),
-            launch_arguments={"use_sim_time": use_sim_time}.items(),
+            launch_arguments={
+                "use_sim_time": use_sim_time,
+                "laser_xyz": LaunchConfiguration("laser_xyz"),
+                "laser_rpy": LaunchConfiguration("laser_rpy"),
+            }.items(),
         ),
         Node(
             package="s3_ydlidar_bridge",
