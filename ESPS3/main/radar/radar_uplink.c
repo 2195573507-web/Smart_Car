@@ -12,14 +12,10 @@
 #include <sys/time.h>
 #include <unistd.h>
 
-#include "esp_event.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
-#include "esp_netif.h"
 #include "esp_timer.h"
-#include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
-#include "freertos/event_groups.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "lwip/inet.h"
@@ -32,18 +28,13 @@
 #include "s3_ble.h"
 #include "smartcar_service.h"
 #include "smartcar_debug_config.h"
+#include "smartcar_wifi_sta.h"
 
 /* 雷达 Wi-Fi/TCP 上行实现；创建人：待确认（当前维护人：Zhiqin）。 */
 
 #include "sdkconfig.h"
-#if CONFIG_SMARTCAR_RADAR_UPLINK_ENABLED
-#include "radar_wifi_credentials.h"
-#endif
-
 static const char *TAG = "RADAR_UPLINK";
 
-#define RADAR_UPLINK_WIFI_CONNECTED BIT0
-#define RADAR_UPLINK_WIFI_ROTATE BIT1
 #define RADAR_UPLINK_TASK_STACK_SIZE 6144U
 #define RADAR_UPLINK_TASK_PRIORITY 4U
 /* Notifications wake the sender; this timeout still services Wi-Fi state. */
@@ -51,11 +42,10 @@ static const char *TAG = "RADAR_UPLINK";
 /* Drain a bounded burst after a TCP stall without holding the UART FIFO lock. */
 #define RADAR_UPLINK_BURST_MAX_FRAMES 4U
 #define RADAR_UPLINK_CONNECT_TIMEOUT_MS 500U
+#define RADAR_UPLINK_TCP_PORT "8765"
 #define RADAR_UPLINK_RETRY_INITIAL_MS 500U
 #define RADAR_UPLINK_RETRY_MAX_MS 10000U
 #define RADAR_UPLINK_RETRY_YIELD_TICKS 1U
-#define RADAR_UPLINK_WIFI_SSID_MAX_LEN 32U
-#define RADAR_UPLINK_WIFI_PASSWORD_MAX_LEN 64U
 #define RADAR_UPLINK_TELEMETRY_WHEEL_FIFO_DEPTH 32U
 /* Candidate operational limits; tune only after a real capture. */
 #define RADAR_UPLINK_MAX_RADAR_DEQUEUE_AGE_MS 500U
@@ -121,12 +111,9 @@ static void radar_uplink_ble_log(smartcar_log_level_t level,
 #endif
 
 #if CONFIG_SMARTCAR_RADAR_UPLINK_ENABLED
-static EventGroupHandle_t s_wifi_events;
 static TaskHandle_t s_uplink_task;
 static bool s_initialized;
-static bool s_wifi_started;
 static int s_socket = -1;
-static size_t s_wifi_credential_index;
 static radar_telemetry_queue_t s_telemetry_queue;
 static radar_telemetry_entry_t *s_telemetry_wheel_entries;
 static radar_telemetry_entry_t s_telemetry_chassis_entry;
@@ -399,6 +386,11 @@ static bool radar_uplink_telemetry_sink(uint16_t message_id,
 {
     radar_telemetry_queue_push_result_t result;
 
+    /* CHASSIS_STATE has a frozen ROS STATUS route on TCP 8766. It must never
+     * enter the experimental S3RD telemetry envelope on TCP 8765. */
+    if (message_id == SRP_MSG_ID_CHASSIS_STATE) {
+        return false;
+    }
     telemetry_observability_note_sink(message_id);
     if (context != &s_telemetry_queue || !s_telemetry_queue_ready ||
         s_telemetry_mutex == NULL) {
@@ -482,93 +474,6 @@ static void radar_uplink_get_telemetry_stats(
 }
 
 /**
- * @brief  返回当前轮转索引对应的 Wi-Fi 凭据条目。
- * @author 创建人：待确认（当前维护人：Zhiqin）。
- * @date   2026-08-31（函数契约补充）。
- * 传入参数：无。
- * @return 指向静态 radar_wifi_credentials 表的借用只读指针。
- * 调用方式：凭据列表通过 validate_wifi_credentials() 且索引由初始化/advance 维护后调用；不检查计数或索引。
- * 线程约束：仅上行任务读取，指针在固件生命周期内有效；禁止并发修改凭据表或在日志中输出密码。
- */
-static const radar_wifi_credential_t *current_wifi_credential(void)
-{
-    return &radar_wifi_credentials[s_wifi_credential_index];
-}
-
-/**
- * @brief  将当前 Wi-Fi 凭据索引循环推进到下一项。
- * @author 创建人：待确认（当前维护人：Zhiqin）。
- * @date   2026-08-31（函数契约补充）。
- * 传入参数：无。
- * @return 无。
- * 调用方式：上行任务处理断线轮转或配置失败时调用；调用前必须已确认凭据数量大于 0。
- * 线程约束：修改模块级索引、无锁；只允许单一上行任务调用，禁止 ISR 或事件回调直接修改。
- */
-static void advance_wifi_credential(void)
-{
-    s_wifi_credential_index =
-        (s_wifi_credential_index + 1U) % RADAR_WIFI_CREDENTIAL_COUNT;
-}
-
-/**
- * @brief  验证编译期 Wi-Fi 凭据表非空且每项 SSID/密码长度合法。
- * @author 创建人：待确认（当前维护人：Zhiqin）。
- * @date   2026-08-31（函数契约补充）。
- * 传入参数：无。
- * @return 全部条目有效时为 ESP_OK；列表为空、字段为空或超过 ESP-IDF 上限时为 ESP_ERR_INVALID_ARG。
- * 调用方式：radar_uplink_init() 在访问当前凭据或配置 Wi-Fi 前调用；不验证主机、端口或网络可达性。
- * 线程约束：启动任务只读扫描并调用 strlen/日志，不阻塞网络；禁止 ISR，凭据内容不得并发修改。
- */
-static esp_err_t validate_wifi_credentials(void)
-{
-    if (RADAR_WIFI_CREDENTIAL_COUNT == 0U) {
-        ESP_LOGE(TAG, "WIFI CREDENTIAL LIST EMPTY");
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    for (size_t index = 0U; index < RADAR_WIFI_CREDENTIAL_COUNT; ++index) {
-        const radar_wifi_credential_t *credential = &radar_wifi_credentials[index];
-        if (credential->ssid == NULL || credential->password == NULL ||
-            credential->ssid[0] == '\0' || credential->password[0] == '\0') {
-            ESP_LOGE(TAG, "WIFI CREDENTIAL %u INCOMPLETE", (unsigned)(index + 1U));
-            return ESP_ERR_INVALID_ARG;
-        }
-        if (strlen(credential->ssid) > RADAR_UPLINK_WIFI_SSID_MAX_LEN ||
-            strlen(credential->password) > RADAR_UPLINK_WIFI_PASSWORD_MAX_LEN) {
-            ESP_LOGE(TAG, "WIFI CREDENTIAL %u FIELD TOO LONG", (unsigned)(index + 1U));
-            return ESP_ERR_INVALID_ARG;
-        }
-    }
-    return ESP_OK;
-}
-
-/**
- * @brief  将指定凭据复制到 ESP-IDF STA 配置并提交给 Wi-Fi 驱动。
- * @author 创建人：待确认（当前维护人：Zhiqin）。
- * @date   2026-08-31（函数契约补充）。
- * @param  index radar_wifi_credentials 的零基索引，必须小于条目数量。
- * @return 索引越界为 ESP_ERR_INVALID_ARG；否则返回 esp_wifi_set_config() 的结果。
- * 调用方式：初始启动或上行任务断线轮转时调用；默认依赖凭据已通过 validate_wifi_credentials()。
- * 线程约束：普通任务调用 Wi-Fi 驱动 API，可能受驱动内部同步影响；禁止 ISR 或多任务并发配置 STA。
- * 所有权约束：SSID/密码复制到局部零初始化配置，驱动提交后不借用原字符串指针。
- */
-static esp_err_t apply_wifi_credential(size_t index)
-{
-    if (index >= RADAR_WIFI_CREDENTIAL_COUNT) {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    const radar_wifi_credential_t *credential = &radar_wifi_credentials[index];
-    wifi_config_t config = {0};
-    const size_t ssid_length = strlen(credential->ssid);
-    const size_t password_length = strlen(credential->password);
-
-    memcpy(config.sta.ssid, credential->ssid, ssid_length);
-    memcpy(config.sta.password, credential->password, password_length);
-    return esp_wifi_set_config(WIFI_IF_STA, &config);
-}
-
-/**
  * @brief  关闭当前 TCP socket 并把模块句柄复位为无效值。
  * @author 创建人：待确认（当前维护人：Zhiqin）。
  * @date   2026-08-31（函数契约补充）。
@@ -583,58 +488,6 @@ static void close_socket(void)
         shutdown(s_socket, SHUT_RDWR);
         close(s_socket);
         s_socket = -1;
-    }
-}
-
-/**
- * @brief  处理 Wi-Fi STA 断开事件，清连接位、请求凭据轮转并唤醒上行任务。
- * @author 创建人：待确认（当前维护人：Zhiqin）。
- * @date   2026-08-31（函数契约补充）。
- * @param  arg 注册事件处理器时传入的上下文，当前为 NULL 并被忽略。
- * @param  event_base 事件基；仅处理 WIFI_EVENT。
- * @param  event_id 事件编号；仅处理 WIFI_EVENT_STA_DISCONNECTED。
- * @param  event_data ESP-IDF 事件数据，当前不读取，仅在回调期间有效。
- * @return 无；其他事件不动作。
- * 调用方式：由 ESP 事件循环任务同步回调；仅修改 EventGroup 位并通知 worker，不直接重连或关闭 socket。
- * 线程约束：不是 ISR，但处于共享事件循环上下文；不得长时间阻塞，
- *           s_wifi_events 必须已创建且保持有效。
- */
-static void wifi_event_handler(void *arg,
-                               esp_event_base_t event_base,
-                               int32_t event_id,
-                               void *event_data)
-{
-    (void)arg;
-    (void)event_data;
-    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        xEventGroupClearBits(s_wifi_events, RADAR_UPLINK_WIFI_CONNECTED);
-        xEventGroupSetBits(s_wifi_events, RADAR_UPLINK_WIFI_ROTATE);
-        notify_uplink_task();
-    }
-}
-
-/**
- * @brief  处理 STA 获得 IP 事件，置 Wi-Fi 已连接位并唤醒上行任务。
- * @author 创建人：待确认（当前维护人：Zhiqin）。
- * @date   2026-08-31（函数契约补充）。
- * @param  arg 注册事件处理器时传入的上下文，当前为 NULL 并被忽略。
- * @param  event_base 事件基；仅处理 IP_EVENT。
- * @param  event_id 事件编号；仅处理 IP_EVENT_STA_GOT_IP。
- * @param  event_data 获得 IP 的事件数据，当前不读取，仅在回调期间有效。
- * @return 无；其他事件不动作。
- * 调用方式：由 ESP 事件循环任务同步回调；获得 IP 只触发 worker 尝试 TCP，不代表对端已连接。
- * 线程约束：不是 ISR，但处于共享事件循环上下文；不得阻塞，s_wifi_events 必须已创建且有效。
- */
-static void ip_event_handler(void *arg,
-                             esp_event_base_t event_base,
-                             int32_t event_id,
-                             void *event_data)
-{
-    (void)arg;
-    (void)event_data;
-    if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
-        xEventGroupSetBits(s_wifi_events, RADAR_UPLINK_WIFI_CONNECTED);
-        notify_uplink_task();
     }
 }
 
@@ -663,7 +516,7 @@ static int connect_endpoint(void)
     hints.ai_socktype = SOCK_STREAM;
     hints.ai_protocol = IPPROTO_TCP;
     if (getaddrinfo(CONFIG_SMARTCAR_RADAR_UPLINK_HOST,
-                    CONFIG_SMARTCAR_RADAR_UPLINK_PORT_STRING,
+                    RADAR_UPLINK_TCP_PORT,
                     &hints,
                     &result) != 0 || result == NULL) {
         return -1;
@@ -1160,7 +1013,6 @@ static void radar_uplink_task(void *context)
     uint32_t pending_sequence = 0U;
     uint32_t pending_radar_frame_sequence = 0U;
     uint32_t retry_ms = RADAR_UPLINK_RETRY_INITIAL_MS;
-    uint32_t wifi_retry_ms = RADAR_UPLINK_RETRY_INITIAL_MS;
     bool wifi_connected_logged = false;
     bool pending_packet = false;
     bool pending_zero_packet = false;
@@ -1168,7 +1020,6 @@ static void radar_uplink_task(void *context)
     bool radar_sequence_valid = false;
     uint32_t last_radar_sequence = 0U;
     bool telemetry_turn = false;
-    bool credential_rotated = false;
     radar_uplink_pending_kind_t pending_kind = RADAR_UPLINK_PENDING_NONE;
     radar_telemetry_entry_t telemetry_entry;
     radar_uplink_tx_state_t tx_state = {0};
@@ -1177,20 +1028,7 @@ static void radar_uplink_task(void *context)
     for (;;) {
         (void)ulTaskNotifyTake(pdFALSE, pdMS_TO_TICKS(RADAR_UPLINK_WAIT_MS));
         radar_uplink_log_telemetry_observability();
-        credential_rotated = false;
-        EventBits_t bits = xEventGroupGetBits(s_wifi_events);
-        if ((xEventGroupClearBits(s_wifi_events, RADAR_UPLINK_WIFI_ROTATE) &
-             RADAR_UPLINK_WIFI_ROTATE) != 0U) {
-            advance_wifi_credential();
-            credential_rotated = true;
-            ESP_LOGW(TAG,
-                     "WIFI DISCONNECTED; NEXT SSID=%s",
-                     current_wifi_credential()->ssid);
-            radar_uplink_ble_log(SMARTCAR_LOG_LEVEL_WARN,
-                                 "WIFI DISCONNECTED; NEXT SSID=%s",
-                                 current_wifi_credential()->ssid);
-        }
-        if ((bits & RADAR_UPLINK_WIFI_CONNECTED) == 0U) {
+        if (!smartcar_wifi_sta_is_connected()) {
             wifi_connected_logged = false;
             close_socket();
             if (pending_packet &&
@@ -1206,37 +1044,12 @@ static void radar_uplink_task(void *context)
             pending_kind = RADAR_UPLINK_PENDING_NONE;
             radar_sequence_valid = false;
             telemetry_turn = false;
-            if (s_wifi_started) {
-                if (credential_rotated) {
-                    esp_err_t config_ret = apply_wifi_credential(s_wifi_credential_index);
-                    if (config_ret != ESP_OK) {
-                        ESP_LOGW(TAG,
-                                 "WIFI CONFIG FAILED SSID=%s err=%s",
-                                 current_wifi_credential()->ssid,
-                                 esp_err_to_name(config_ret));
-                        radar_uplink_ble_log(SMARTCAR_LOG_LEVEL_WARN,
-                                             "WIFI CONFIG FAILED SSID=%s err=%s",
-                                             current_wifi_credential()->ssid,
-                                             esp_err_to_name(config_ret));
-                        advance_wifi_credential();
-                        radar_uplink_delay_with_telemetry_log(wifi_retry_ms);
-                        continue;
-                    }
-                }
-                (void)esp_wifi_connect();
-                radar_uplink_delay_with_telemetry_log(wifi_retry_ms);
-                wifi_retry_ms = wifi_retry_ms < RADAR_UPLINK_RETRY_MAX_MS / 2U
-                                    ? wifi_retry_ms * 2U
-                                    : RADAR_UPLINK_RETRY_MAX_MS;
-            }
             continue;
         }
         if (!wifi_connected_logged) {
             radar_uplink_ble_log(SMARTCAR_LOG_LEVEL_INFO, "WIFI CONNECTED");
             wifi_connected_logged = true;
         }
-        wifi_retry_ms = RADAR_UPLINK_RETRY_INITIAL_MS;
-
         if (s_socket < 0) {
             s_socket = connect_endpoint();
             if (s_socket < 0) {
@@ -1418,76 +1231,17 @@ esp_err_t radar_uplink_init(void)
     if (s_initialized) {
         return ESP_ERR_INVALID_STATE;
     }
-    if (validate_wifi_credentials() != ESP_OK ||
-        CONFIG_SMARTCAR_RADAR_UPLINK_HOST[0] == '\0' ||
-        CONFIG_SMARTCAR_RADAR_UPLINK_PORT_STRING[0] == '\0') {
+    if (CONFIG_SMARTCAR_RADAR_UPLINK_HOST[0] == '\0') {
         ESP_LOGE(TAG, "CONFIG INCOMPLETE; DISABLED");
         radar_uplink_ble_log(SMARTCAR_LOG_LEVEL_ERROR, "CONFIG INCOMPLETE; DISABLED");
         return ESP_ERR_INVALID_ARG;
     }
 
-    esp_err_t ret = esp_netif_init();
-    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
-        radar_uplink_ble_log(SMARTCAR_LOG_LEVEL_ERROR,
-                             "NETIF INIT FAILED err=%s", esp_err_to_name(ret));
-        return ret;
-    }
-    ret = esp_event_loop_create_default();
-    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
-        radar_uplink_ble_log(SMARTCAR_LOG_LEVEL_ERROR,
-                             "EVENT LOOP INIT FAILED err=%s", esp_err_to_name(ret));
-        return ret;
-    }
-    esp_netif_t *netif = esp_netif_create_default_wifi_sta();
-    if (netif == NULL) {
-        radar_uplink_ble_log(SMARTCAR_LOG_LEVEL_ERROR, "WIFI NETIF CREATE FAILED");
-        return ESP_ERR_NO_MEM;
-    }
-    const wifi_init_config_t wifi_init = WIFI_INIT_CONFIG_DEFAULT();
-    ret = esp_wifi_init(&wifi_init);
-    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
-        radar_uplink_ble_log(SMARTCAR_LOG_LEVEL_ERROR,
-                             "WIFI INIT FAILED err=%s", esp_err_to_name(ret));
-        return ret;
-    }
-
-    s_wifi_events = xEventGroupCreate();
-    if (s_wifi_events == NULL) {
-        radar_uplink_ble_log(SMARTCAR_LOG_LEVEL_ERROR, "WIFI EVENT GROUP FAILED");
-        return ESP_ERR_NO_MEM;
-    }
-    ret = esp_event_handler_register(WIFI_EVENT,
-                                     ESP_EVENT_ANY_ID,
-                                     &wifi_event_handler,
-                                     NULL);
-    if (ret == ESP_OK) {
-        ret = esp_event_handler_register(IP_EVENT,
-                                         IP_EVENT_STA_GOT_IP,
-                                         &ip_event_handler,
-                                         NULL);
-    }
-    if (ret == ESP_OK) {
-        ret = esp_wifi_set_mode(WIFI_MODE_STA);
-    }
-    if (ret == ESP_OK) {
-        ret = apply_wifi_credential(s_wifi_credential_index);
-    }
-    if (ret == ESP_OK) {
-        ret = esp_wifi_start();
-    }
+    esp_err_t ret = smartcar_wifi_sta_start();
     if (ret != ESP_OK) {
         radar_uplink_ble_log(SMARTCAR_LOG_LEVEL_ERROR,
-                             "WIFI SETUP FAILED err=%s", esp_err_to_name(ret));
+                             "WIFI STA OWNER FAILED err=%s", esp_err_to_name(ret));
         return ret;
-    }
-    s_wifi_started = true;
-    ret = esp_wifi_connect();
-    if (ret != ESP_OK) {
-        /* The worker keeps the retry/backoff path alive for transient Wi-Fi
-         * state errors instead of failing the rest of S3 startup. */
-        ESP_LOGW(TAG, "WIFI CONNECT START DEFERRED: %s", esp_err_to_name(ret));
-        radar_uplink_ble_log(SMARTCAR_LOG_LEVEL_WARN,
-                             "WIFI CONNECT START DEFERRED: %s", esp_err_to_name(ret));
     }
 
     radar_telemetry_observability_init(&s_telemetry_observability);
@@ -1521,12 +1275,9 @@ esp_err_t radar_uplink_init(void)
     radar_uart_set_frame_notification_task(s_uplink_task);
     s_initialized = true;
     ESP_LOGI(TAG, "READY TCP uplink");
-    ESP_LOGI(TAG, "S3_TELEM_TCP_READY chassis=0x15 outer=2");
     ESP_LOGI(TAG, "%s src=%s", RADAR_UPLINK_TELEMETRY_FEATURE_ID,
              SMARTCAR_TELEMETRY_SOURCE_SHA8);
     radar_uplink_ble_log(SMARTCAR_LOG_LEVEL_INFO, "READY TCP uplink");
-    radar_uplink_ble_log(SMARTCAR_LOG_LEVEL_INFO,
-                         "S3_TELEM_TCP_READY chassis=0x15 outer=2");
     radar_uplink_ble_log(SMARTCAR_LOG_LEVEL_INFO, "%s src=%s",
                          RADAR_UPLINK_TELEMETRY_FEATURE_ID,
                          SMARTCAR_TELEMETRY_SOURCE_SHA8);
@@ -1548,6 +1299,6 @@ bool radar_uplink_is_running(void)
 #if !CONFIG_SMARTCAR_RADAR_UPLINK_ENABLED
     return false;
 #else
-    return s_initialized && s_wifi_started && s_uplink_task != NULL;
+    return s_initialized && s_uplink_task != NULL;
 #endif
 }

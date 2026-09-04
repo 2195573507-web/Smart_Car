@@ -33,6 +33,33 @@ typedef bool (*smartcar_service_telemetry_sink_t)(
     uint32_t ingress_timestamp_ms,
     void *context);
 
+/** Additional non-owning telemetry consumer; same callback contract as the primary sink. */
+esp_err_t smartcar_service_add_telemetry_sink(
+    smartcar_service_telemetry_sink_t sink,
+    void *context);
+
+/** Called in the service task when a local safety event revokes ROS motion authority. */
+typedef void (*smartcar_service_ros_safety_callback_t)(void *context);
+
+esp_err_t smartcar_service_set_ros_safety_callback(
+    smartcar_service_ros_safety_callback_t callback,
+    void *context);
+
+/** Latest-only ROS motion intent delivered to the service task. */
+typedef struct {
+    float linear_m_s;
+    float angular_rad_s;
+    uint32_t session_id;
+    uint32_t lease_id;
+    uint32_t sequence;
+    uint16_t ttl_ms;
+} smartcar_service_ros_motion_command_t;
+
+esp_err_t smartcar_service_ros_motion_submit(
+    const smartcar_service_ros_motion_command_t *command);
+esp_err_t smartcar_service_ros_motion_set_lease(bool active);
+esp_err_t smartcar_service_ros_motion_stop(void);
+
 /**
  * @brief 注册遥测下游接收器。
  * @author 创建人：待确认（当前维护人：Zhiqin）。

@@ -2,8 +2,12 @@
 #include <math.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 #include "chassis_odometry.h"
+#include "chassis_state_payload.h"
+#include "srp_registry.h"
+#include "srp_wire.h"
 
 #define TEST_PI_F 3.14159265358979323846f
 
@@ -61,12 +65,12 @@ static void test_projection_and_reverse_distance(void)
 }
 
 /**
- * @brief 验证超过 200 ms 的样本间隔使状态失效，以及后续更新时间和显式 invalidate 后的重新锚定。
+ * @brief 验证超过 200 ms 的样本间隔使状态失效，以及恢复样本只重新锚定。
  * @author 创建人：待确认（当前维护人：Zhiqin）。
  * @date 2026-08-31（函数契约补充）。
  * 传入参数：无。
  * @return 返回值：无（void）；失效、保留位置、后续积分或重新锚定语义不符时 assert 终止。
- * 调用方式：由 main() 调用；构造 250 ms 间隔，再以 50 ms 样本继续并显式清除时间 anchor。
+ * 调用方式：由 main() 调用；构造 250 ms 间隔，再检查下一条样本不跨失效区间积分。
  * 线程约束：单线程 host 状态机测试，无锁且不覆盖状态任务并发或真实时间源抖动。
  */
 static void test_stale_gap_and_reanchor(void)
@@ -83,6 +87,15 @@ static void test_stale_gap_and_reanchor(void)
     assert(!state.valid);
     assert_near(state.x_mm, 5.0f, 0.0001f);
     assert(chassis_odometry_update(&state, speeds, 0.0f, 350U) ==
+           CHASSIS_ODOMETRY_RESULT_ANCHORED);
+    assert_near(state.x_mm, 5.0f, 0.0001f);
+
+    assert(chassis_odometry_update(&state, speeds, 0.0f, 340U) ==
+           CHASSIS_ODOMETRY_RESULT_INVALID);
+    assert(!state.valid);
+    assert(chassis_odometry_update(&state, speeds, 0.0f, 390U) ==
+           CHASSIS_ODOMETRY_RESULT_ANCHORED);
+    assert(chassis_odometry_update(&state, speeds, 0.0f, 440U) ==
            CHASSIS_ODOMETRY_RESULT_UPDATED);
     assert_near(state.x_mm, 10.0f, 0.0001f);
 
@@ -146,6 +159,68 @@ static void test_timestamp_wrap_and_nonfinite_rejection(void)
 }
 
 /**
+ * @brief 验证重复 MotorBoard sequence 不会触发第二次消费，并允许自然回绕。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-09-03（host 覆盖补充）。
+ * @return 无；序号消费门语义不符时 assert 终止测试进程。
+ */
+static void test_wheel_sequence_stall_gate(void)
+{
+    uint32_t last_sequence = 0U;
+    bool have_last_sequence = false;
+
+    assert(chassis_state_sequence_is_new(7U, last_sequence,
+                                         have_last_sequence));
+    last_sequence = 7U;
+    have_last_sequence = true;
+    assert(!chassis_state_sequence_is_new(7U, last_sequence,
+                                          have_last_sequence));
+    assert(chassis_state_sequence_is_new(8U, last_sequence,
+                                         have_last_sequence));
+    assert(chassis_state_sequence_is_new(0U, UINT32_MAX, true));
+}
+
+/**
+ * @brief 验证 CHASSIS_STATE 24 字节布局、有效位掩码、保留字段和有限值拒绝。
+ * @author 创建人：待确认（当前维护人：Zhiqin）。
+ * @date 2026-09-03（host 覆盖补充）。
+ * @return 无；字段、位或非法状态不符时 assert 终止测试进程。
+ */
+static void test_chassis_state_payload_validity(void)
+{
+    chassis_odometry_state_t state = {
+        .x_mm = 1000.0f,
+        .y_mm = -500.0f,
+        .yaw_rad = TEST_PI_F,
+        .total_distance_m = 12.5f,
+        .last_sample_timestamp_ms = 0U,
+        .has_time_anchor = true,
+        .valid = true,
+    };
+    uint8_t payload[SRP_PAYLOAD_CHASSIS_STATE_SIZE];
+    uint8_t flags = (uint8_t)(SRP_CHASSIS_STATE_FLAG_ODOMETRY_VALID | 0x80U);
+
+    (void)memset(payload, 0xA5, sizeof(payload));
+    assert(chassis_state_pack_payload(payload, sizeof(payload), &state, flags,
+                                      1000U));
+    assert(payload[0] == SRP_CHASSIS_STATE_SCHEMA);
+    assert(payload[1] == SRP_CHASSIS_STATE_FLAG_ODOMETRY_VALID);
+    assert(payload[2] == 0U && payload[3] == 0U);
+    assert(srp_wire_read_u32_le(&payload[4]) == 1000U);
+    assert(srp_wire_read_f32_le(&payload[8]) == 1000.0f);
+    assert(srp_wire_read_f32_le(&payload[12]) == -500.0f);
+    assert_near(srp_wire_read_f32_le(&payload[16]), 180.0f, 0.0001f);
+    assert(srp_wire_read_f32_le(&payload[20]) == 12.5f);
+    assert(chassis_state_pack_payload(payload, sizeof(payload), &state, 0U,
+                                      0U));
+    assert(payload[1] == 0U);
+
+    state.total_distance_m = -1.0f;
+    assert(!chassis_state_pack_payload(payload, sizeof(payload), &state, 0U,
+                                       0U));
+}
+
+/**
  * @brief 顺序执行底盘里程计投影、失鲜、原地旋转、回绕和非有限输入测试。
  * @author 创建人：待确认（当前维护人：Zhiqin）。
  * @date 2026-08-31（函数契约补充）。
@@ -160,5 +235,7 @@ int main(void)
     test_stale_gap_and_reanchor();
     test_in_place_turn_has_zero_translation();
     test_timestamp_wrap_and_nonfinite_rejection();
+    test_wheel_sequence_stall_gate();
+    test_chassis_state_payload_validity();
     return 0;
 }

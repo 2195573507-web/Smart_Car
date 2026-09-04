@@ -1,0 +1,170 @@
+{
+  "protocol": "ROS Motion Control v1",
+  "protocol_sha256": "a47416178e98a5679cb0e270c3eadb9bccb144d77005e89b6e1664727308eae2",
+  "test_hmac_key_hex": "00112233445566778899aabbccddeeff102132435465768798a9babcbddceeff",
+  "test_hmac_key_note": "Public test input only; not a deployment credential.",
+  "valid_frames": [
+    {
+      "name": "hello",
+      "expected": "decode_ok",
+      "type": 1,
+      "session_id": "0x12345678",
+      "sequence": "0x00000001",
+      "lease_id": "0x00000000",
+      "ttl_ms": 0,
+      "payload_hex": "",
+      "hmac_sha256_16_hex": "976e70a571e177a432b5803b485abaf7",
+      "crc16_ccitt_false_hex": "a11e",
+      "frame_hex": "524d01010100000078563412010000000000000000000000976e70a571e177a432b5803b485abaf7a11e"
+    },
+    {
+      "name": "hello_ack",
+      "expected": "decode_ok",
+      "type": 2,
+      "session_id": "0x12345678",
+      "sequence": "0xfffffffe",
+      "lease_id": "0x00000000",
+      "ttl_ms": 0,
+      "payload_hex": "",
+      "hmac_sha256_16_hex": "240f5699357517f3a0a5823fd0aa6e36",
+      "crc16_ccitt_false_hex": "3dd0",
+      "frame_hex": "524d01020100000078563412feffffff0000000000000000240f5699357517f3a0a5823fd0aa6e363dd0"
+    },
+    {
+      "name": "lease_request",
+      "expected": "decode_ok",
+      "type": 3,
+      "session_id": "0x12345678",
+      "sequence": "0xffffffff",
+      "lease_id": "0x0badf00d",
+      "ttl_ms": 220,
+      "payload_hex": "",
+      "hmac_sha256_16_hex": "74b11431475778f4cd028083a00dc969",
+      "crc16_ccitt_false_hex": "41bc",
+      "frame_hex": "524d01030100000078563412ffffffff0df0ad0bdc00000074b11431475778f4cd028083a00dc96941bc"
+    },
+    {
+      "name": "lease_response",
+      "expected": "decode_ok",
+      "type": 4,
+      "session_id": "0x12345678",
+      "sequence": "0x00000002",
+      "lease_id": "0x0badf00d",
+      "ttl_ms": 220,
+      "payload_hex": "00dc00",
+      "hmac_sha256_16_hex": "6e7bf473560f9271228351342479e060",
+      "crc16_ccitt_false_hex": "d129",
+      "frame_hex": "524d01040100030078563412020000000df0ad0bdc00000000dc006e7bf473560f9271228351342479e060d129"
+    },
+    {
+      "name": "motion_cmd",
+      "expected": "decode_ok",
+      "type": 5,
+      "session_id": "0x12345678",
+      "sequence": "0x00000000",
+      "lease_id": "0x0badf00d",
+      "ttl_ms": 220,
+      "linear_v_m_s": 0.1,
+      "angular_w_rad_s": -0.3,
+      "payload_hex": "cdcccc3d9a9999be",
+      "hmac_sha256_16_hex": "52e40ac618964442f971ad01d84d1b05",
+      "crc16_ccitt_false_hex": "bf9c",
+      "frame_hex": "524d01050100080078563412000000000df0ad0bdc000000cdcccc3d9a9999be52e40ac618964442f971ad01d84d1b05bf9c"
+    },
+    {
+      "name": "stop",
+      "expected": "decode_ok",
+      "type": 6,
+      "session_id": "0x12345678",
+      "sequence": "0x00000001",
+      "lease_id": "0x0badf00d",
+      "ttl_ms": 0,
+      "payload_hex": "",
+      "hmac_sha256_16_hex": "581b009c69214d11186933413b3ea2a0",
+      "crc16_ccitt_false_hex": "5e2e",
+      "frame_hex": "524d01060100000078563412010000000df0ad0b00000000581b009c69214d11186933413b3ea2a05e2e"
+    },
+    {
+      "name": "status",
+      "expected": "decode_ok",
+      "type": 7,
+      "session_id": "0x12345678",
+      "sequence": "0x00000003",
+      "lease_id": "0x0badf00d",
+      "ttl_ms": 0,
+      "payload_hex": "03",
+      "hmac_sha256_16_hex": "1c06d8c6973e89a9fcaf53df48fab5c5",
+      "crc16_ccitt_false_hex": "952b",
+      "frame_hex": "524d01070100010078563412030000000df0ad0b00000000031c06d8c6973e89a9fcaf53df48fab5c5952b"
+    },
+    {
+      "name": "error",
+      "expected": "decode_ok",
+      "type": 8,
+      "session_id": "0x12345678",
+      "sequence": "0x00000004",
+      "lease_id": "0x00000000",
+      "ttl_ms": 0,
+      "payload_hex": "05",
+      "hmac_sha256_16_hex": "ee02cd0fc63b18cb2d94c7a201cd72a5",
+      "crc16_ccitt_false_hex": "051c",
+      "frame_hex": "524d0108010001007856341204000000000000000000000005ee02cd0fc63b18cb2d94c7a201cd72a5051c"
+    },
+    {
+      "name": "heartbeat",
+      "expected": "decode_ok",
+      "type": 9,
+      "session_id": "0x12345678",
+      "sequence": "0x00000002",
+      "lease_id": "0x0badf00d",
+      "ttl_ms": 0,
+      "payload_hex": "",
+      "hmac_sha256_16_hex": "03bf8f2dc19f2753b7d9413f2fa01846",
+      "crc16_ccitt_false_hex": "07ac",
+      "frame_hex": "524d01090100000078563412020000000df0ad0b0000000003bf8f2dc19f2753b7d9413f2fa0184607ac"
+    }
+  ],
+  "invalid_frames": [
+    {
+      "name": "invalid_crc",
+      "expected": "decode_bad_crc",
+      "frame_hex": "524d01050100080078563412000000000df0ad0bdc000000cdcccc3d9a9999be52e40ac618964442f971ad01d84d1b05bf9d"
+    },
+    {
+      "name": "invalid_hmac",
+      "expected": "decode_bad_auth",
+      "frame_hex": "524d01050100080078563412000000000df0ad0bdc000000cdcccc3d9a9999be53e40ac618964442f971ad01d84d1b059b34"
+    },
+    {
+      "name": "old_sequence",
+      "expected": "state_reject_duplicate_or_older",
+      "session_id": "0x12345678",
+      "sequence": "0x00000000",
+      "lease_id": "0x0badf00d",
+      "ttl_ms": 220,
+      "frame_hex": "524d01050100080078563412000000000df0ad0bdc000000cdcccc3d9a9999be52e40ac618964442f971ad01d84d1b05bf9c"
+    },
+    {
+      "name": "wrong_session",
+      "expected": "state_reject_session",
+      "session_id": "0x87654321",
+      "sequence": "0x00000001",
+      "lease_id": "0x0badf00d",
+      "ttl_ms": 220,
+      "frame_hex": "524d01050100080021436587010000000df0ad0bdc000000cdcccc3d9a9999be71efcd27f8d1b87c6fd8bc2ae92a599c4afc"
+    },
+    {
+      "name": "over_speed",
+      "expected": "state_reject_speed_limit",
+      "linear_v_m_s": 0.101,
+      "angular_w_rad_s": 0.3,
+      "frame_hex": "524d01050100080078563412010000000df0ad0bdc00000017d9ce3d9a99993e49a2491c03dc9b257d2989e13f6817a0a1eb"
+    },
+    {
+      "name": "expired",
+      "expected": "state_reject_at_deadline",
+      "ttl_ms": 20,
+      "frame_hex": "524d01050100080078563412010000000df0ad0b14000000cdcccc3d9a9999bed7520c025e84eb7e67b5da3d313adb20ec9f"
+    }
+  ]
+}

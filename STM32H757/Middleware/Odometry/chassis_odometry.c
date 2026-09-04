@@ -68,7 +68,8 @@ chassis_odometry_result_t chassis_odometry_update(
     state->yaw_rad = primary_yaw_rad;
     if (elapsed_ms == 0U ||
         elapsed_ms > CHASSIS_ODOMETRY_MAX_SAMPLE_INTERVAL_MS) {
-        state->valid = false;
+        /* 丢失/回退时间后，恢复样本只能建立新基线，不能跨失效区间积分。 */
+        chassis_odometry_invalidate(state);
         return CHASSIS_ODOMETRY_RESULT_INVALID;
     }
 

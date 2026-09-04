@@ -1,3 +1,21 @@
+menu "Shared Wi-Fi STA"
+
+config SMARTCAR_WIFI_STA_SSID
+    string "Wi-Fi SSID"
+    default ""
+    help
+        Local station credential shared by the radar uplink and ROS motion
+        gateway. Do not commit deployment values.
+
+config SMARTCAR_WIFI_STA_PASSWORD
+    string "Wi-Fi password"
+    default ""
+    help
+        Local station credential shared by the radar uplink and ROS motion
+        gateway. Do not commit deployment values.
+
+endmenu
+
 menu "YDLIDAR X3PRO radar test configuration"
 
 comment "UART1 RX GPIO44 and M_CTR PWM GPIO4 are fixed in main/radar/radar_uart.h; STM UART2 uses GPIO17/18"
@@ -12,14 +30,10 @@ config SMARTCAR_RADAR_UPLINK_ENABLED
 
 if SMARTCAR_RADAR_UPLINK_ENABLED
 
-comment "Wi-Fi SSID/password list: edit main/radar/radar_wifi_credentials.h"
+comment "Radar and ROS motion share the SmartCar Wi-Fi STA owner"
 
 config SMARTCAR_RADAR_UPLINK_HOST
     string "Windows bridge host"
-    default ""
-
-config SMARTCAR_RADAR_UPLINK_PORT_STRING
-    string "Windows bridge TCP port"
     default ""
 
 config SMARTCAR_RADAR_UPLINK_DEVICE_ID
@@ -29,6 +43,41 @@ config SMARTCAR_RADAR_UPLINK_DEVICE_ID
 config SMARTCAR_RADAR_UPLINK_STREAM_ID
     int "Radar stream ID"
     default 1
+
+endif
+
+endmenu
+
+menu "ROS motion control gateway"
+
+config ROS_MOTION_GATEWAY_ENABLED
+    bool "Enable dedicated ROS motion gateway"
+    default n
+    help
+        Enable the S3 active TCP client for the dedicated ROS motion control
+        session on port 8766. Keep disabled until host, Wi-Fi, PSK and bench
+        safety validation are available. The gateway and radar uplink share
+        the single SmartCar Wi-Fi STA owner.
+
+if ROS_MOTION_GATEWAY_ENABLED
+
+config ROS_MOTION_GATEWAY_HOST
+    string "Windows ROS gateway host"
+    default ""
+
+config ROS_MOTION_GATEWAY_PSK
+    string "ROS motion pre-shared key"
+    default ""
+
+config ROS_MOTION_LINEAR_LIMIT_MM_S
+    int "Linear speed limit in mm/s"
+    range 1 1000
+    default 100
+
+config ROS_MOTION_ANGULAR_LIMIT_MRAD_S
+    int "Angular speed limit in mrad/s"
+    range 1 3000
+    default 300
 
 endif
 

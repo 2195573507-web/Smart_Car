@@ -8,6 +8,7 @@
 #include "radar/radar_uart.h"
 #include "radar/radar_uplink.h"
 #include "radar_control.h"
+#include "ros_motion_gateway.h"
 #include "s3_ble.h"
 #include "smartcar_service.h"
 #include "smartcar_debug_config.h"
@@ -97,9 +98,21 @@ void app_main(void)
 #endif
 
     if (stm_uart_ret == ESP_OK) {
+        esp_err_t ros_motion_bind_ret = ros_motion_gateway_bind_service();
+        if (ros_motion_bind_ret != ESP_OK) {
+            ESP_LOGE(TAG, "ROS motion gateway service bind failed: %s",
+                     esp_err_to_name(ros_motion_bind_ret));
+        }
         esp_err_t service_ret = smartcar_service_init();
         if (service_ret != ESP_OK) {
             ESP_LOGE(TAG, "SmartCar service init failed: %s", esp_err_to_name(service_ret));
+        }
+        if (service_ret == ESP_OK && ros_motion_bind_ret == ESP_OK) {
+            esp_err_t ros_motion_ret = ros_motion_gateway_init();
+            if (ros_motion_ret != ESP_OK) {
+                ESP_LOGE(TAG, "ROS motion gateway init failed: %s",
+                         esp_err_to_name(ros_motion_ret));
+            }
         }
     }
 

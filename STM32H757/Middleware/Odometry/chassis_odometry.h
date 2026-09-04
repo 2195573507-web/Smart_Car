@@ -61,8 +61,8 @@ void chassis_odometry_invalidate(chassis_odometry_state_t *state);
  * @param primary_yaw_rad 主 AHRS 航向，单位 rad，必须有限；本模块直接用于本周期 cos/sin。
  * @param sample_timestamp_ms 轮速到达的 CM7 单调毫秒时间戳，按 uint32 无符号差值处理回绕。
  * @return 首次/失效后建立时间基线返回 ANCHORED；有效 1..200 ms 间隔积分返回 UPDATED；
- *         参数、状态、计算或间隔无效返回 INVALID。间隔为 0/过大时已更新 timestamp/yaw，
- *         保留 has_time_anchor=true 但置 valid=false；其他输入/计算失败通常清 anchor。
+ *         参数、状态或间隔无效返回 INVALID。间隔为 0/过大时清除时间 anchor/valid，
+ *         下一条样本只能重新锚定；其他输入/计算失败通常也清 anchor。
  * 调用方式：状态任务只对新的 wheel sequence 调用；返回非 UPDATED 时不得宣称产生位移增量。
  * 线程约束：纯 float/math 状态更新、不加锁；同一 state 单 owner，禁止 ISR 或并发读写。
  */

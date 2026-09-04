@@ -90,3 +90,5 @@ cc -std=c11 -Wall -Wextra -Werror \
 ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 \
 UBSAN_OPTIONS=halt_on_error=1 \
     "$BUILD_DIR/test_radar_telemetry_queue_sanitized"
+
+"$RADAR_DIR/../../components/ros_motion_gateway/tests/run_host_tests.sh"

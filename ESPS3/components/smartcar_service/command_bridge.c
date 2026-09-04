@@ -137,6 +137,16 @@ static uint32_t s_baud_change_value;
 static uint64_t s_baud_change_due_us;
 static smartcar_service_telemetry_sink_t s_telemetry_sink;
 static void *s_telemetry_sink_context;
+static smartcar_service_telemetry_sink_t s_telemetry_sink_secondary;
+static void *s_telemetry_sink_secondary_context;
+static smartcar_service_ros_safety_callback_t s_ros_safety_callback;
+static void *s_ros_safety_callback_context;
+static QueueHandle_t s_ros_motion_queue;
+static StaticQueue_t s_ros_motion_queue_storage;
+static uint8_t s_ros_motion_queue_buffer[sizeof(smartcar_service_ros_motion_command_t)];
+static volatile bool s_ros_lease_requested;
+static volatile bool s_ros_stop_requested;
+static bool s_ros_lease_active;
 
 static uint8_t s_ble_rx_queue_buffer[
     SMARTCAR_SERVICE_BLE_RX_QUEUE_DEPTH * sizeof(smartcar_ble_rx_item_t)]
@@ -174,6 +184,8 @@ static uint8_t s_app_last_ack_stage;
 static uint32_t s_app_last_ack_sequence;
 
 static void cancel_motion_transactions(void);
+static void command_bridge_send_zero_wheel_speed(void);
+static void command_bridge_clear_ros_motion_authority(void);
 static void app_command_on_frame(const sc_app_frame_view_t *input_frame,
                                  void *context);
 static void app_command_on_error(int error, const uint8_t *data,
@@ -330,6 +342,86 @@ esp_err_t smartcar_service_set_telemetry_sink(
     return ESP_OK;
 }
 
+esp_err_t smartcar_service_add_telemetry_sink(
+    smartcar_service_telemetry_sink_t sink,
+    void *context)
+{
+    if (sink == NULL) {
+        if (context != NULL) {
+            return ESP_ERR_INVALID_ARG;
+        }
+    }
+    if (s_link_ready != 0U || s_telemetry_sink_secondary != NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    s_telemetry_sink_secondary = sink;
+    s_telemetry_sink_secondary_context = context;
+    return ESP_OK;
+}
+
+esp_err_t smartcar_service_set_ros_safety_callback(
+    smartcar_service_ros_safety_callback_t callback,
+    void *context)
+{
+    if (callback == NULL && context != NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (s_link_ready != 0U) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    s_ros_safety_callback = callback;
+    s_ros_safety_callback_context = context;
+    return ESP_OK;
+}
+
+esp_err_t smartcar_service_ros_motion_submit(
+    const smartcar_service_ros_motion_command_t *command)
+{
+    if (command == NULL || s_ros_motion_queue == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (xQueueOverwrite(s_ros_motion_queue, command) != pdPASS) {
+        return ESP_FAIL;
+    }
+    return ESP_OK;
+}
+
+esp_err_t smartcar_service_ros_motion_set_lease(bool active)
+{
+    __atomic_store_n(&s_ros_lease_requested, active, __ATOMIC_RELEASE);
+    if (!active) {
+        __atomic_store_n(&s_ros_stop_requested, true, __ATOMIC_RELEASE);
+    }
+    return ESP_OK;
+}
+
+esp_err_t smartcar_service_ros_motion_stop(void)
+{
+    __atomic_store_n(&s_ros_stop_requested, true, __ATOMIC_RELEASE);
+    __atomic_store_n(&s_ros_lease_requested, false, __ATOMIC_RELEASE);
+    return ESP_OK;
+}
+
+/* Service-task only: revoke ROS before a local safety action or link recovery.
+ * A queued command must never become valid again after the next handshake. */
+static void command_bridge_clear_ros_motion_authority(void)
+{
+    const bool had_ros_lease =
+        s_ros_lease_active ||
+        __atomic_exchange_n(&s_ros_lease_requested, false, __ATOMIC_ACQ_REL);
+
+    s_ros_lease_active = false;
+    if (s_ros_motion_queue != NULL) {
+        (void)xQueueReset(s_ros_motion_queue);
+    }
+    /* A BLE-only stop must not tear down a pre-lease ROS session: that session
+     * is also the exclusive STATUS/0x15 telemetry path. Once ROS has requested
+     * or obtained authority, local safety revocation still closes it. */
+    if (had_ros_lease && s_ros_safety_callback != NULL) {
+        s_ros_safety_callback(s_ros_safety_callback_context);
+    }
+}
+
 /**
  * @brief 严格解析 SYS_CONFIG TLV，并提取唯一且在协议白名单内的 UART 波特率。
  * @author 创建人：待确认（当前维护人：Zhiqin）。
@@ -390,7 +482,8 @@ static uint64_t now_us(void)
  * @author 创建人：待确认（当前维护人：Zhiqin）。
  * @date 2026-08-31（函数契约补充）。
  * @param reason 只在调用期间用于日志的零结尾原因；允许 NULL。
- * @return 返回值：无（void）；恢复后进入 UART_READY 并重新探测，旧运动事务不重放；本函数不直接发送零速或证明车辆已停。
+ * @return 返回值：无（void）；恢复后进入 UART_READY 并重新探测，旧运动事务不重放；
+ *         先提交紧急 0x06 零速，但不证明 STM、MotorBoard 或车辆已经停止。
  * 调用方式：服务任务在 UART 断流、BUS_OFF 或版本不匹配时调用；同时撤销运动目标，
  *            且不会把旧帧留在恢复后的发送队列中。
  * 线程约束：会 flush UART、修改 parser/link/会话全局状态，只允许 smartcar_service owner 调用；
@@ -415,6 +508,10 @@ static void command_bridge_restart_sync(const char *reason)
     s_motion_pending_target.valid = false;
     s_motion_pending_scale.valid = false;
     cancel_motion_transactions();
+    command_bridge_clear_ros_motion_authority();
+    s_ble_stop_cleanup_active = true;
+    command_bridge_send_zero_wheel_speed();
+    s_ble_stop_cleanup_active = false;
     ESP_LOGW(TAG, "SRP sync recovery reason=%s; probing STM32 again",
              reason == NULL ? "unknown" : reason);
 }
@@ -492,6 +589,10 @@ static void command_bridge_enter_sync_timeout(void)
     s_motion_pending_target.valid = false;
     s_motion_pending_scale.valid = false;
     cancel_motion_transactions();
+    command_bridge_clear_ros_motion_authority();
+    s_ble_stop_cleanup_active = true;
+    command_bridge_send_zero_wheel_speed();
+    s_ble_stop_cleanup_active = false;
     s_last_sync_timeout_notify_us = timeout_at;
     s_next_sync_us = timeout_at +
                      ((uint64_t)SMARTCAR_SERVICE_SYNC_TIMEOUT_RETRY_MS * UINT64_C(1000));
@@ -671,6 +772,8 @@ static void command_bridge_bus_off(void *context)
     s_bus_off_recovery_pending = true;
     s_bus_off_recovery_at_us = now_us() +
         ((uint64_t)SMARTCAR_SERVICE_BUS_OFF_RECOVERY_MS * UINT64_C(1000));
+    command_bridge_clear_ros_motion_authority();
+    __atomic_store_n(&s_ros_stop_requested, true, __ATOMIC_RELEASE);
     ESP_LOGE(TAG, "BUS_OFF: UART2 receive queue flushed");
 }
 
@@ -727,6 +830,18 @@ static bool relay_dual_attitude(const srp_frame_t *frame)
             (void)s_telemetry_sink(SRP_MSG_ID_ATTITUDE, encoded, encoded_length,
                                     (uint32_t)(now_us() / UINT64_C(1000)),
                                     s_telemetry_sink_context);
+        }
+    }
+    if (s_telemetry_sink_secondary != NULL) {
+        uint8_t encoded[SRP_MAX_FRAME_SIZE];
+        uint16_t encoded_length = 0U;
+
+        if (srp_encode_frame(frame, encoded, sizeof(encoded),
+                             &encoded_length) == SRP_CODEC_OK) {
+            (void)s_telemetry_sink_secondary(
+                SRP_MSG_ID_ATTITUDE, encoded, encoded_length,
+                (uint32_t)(now_us() / UINT64_C(1000)),
+                s_telemetry_sink_secondary_context);
         }
     }
     if (!s3_ble_is_ready()) {
@@ -868,7 +983,7 @@ static void relay_telemetry(const srp_frame_t *frame, uint16_t message_id)
     default:
         return;
     }
-    if (s_telemetry_sink != NULL &&
+    if ((s_telemetry_sink != NULL || s_telemetry_sink_secondary != NULL) &&
         (message_id == SRP_MSG_ID_WHEEL_SPEED_STATUS ||
          message_id == SRP_MSG_ID_CHASSIS_STATE ||
          message_id == SRP_MSG_ID_IMU_TELEMETRY)) {
@@ -877,9 +992,17 @@ static void relay_telemetry(const srp_frame_t *frame, uint16_t message_id)
 
         if (srp_encode_frame(frame, encoded, sizeof(encoded),
                              &encoded_length) == SRP_CODEC_OK) {
-            (void)s_telemetry_sink(message_id, encoded, encoded_length,
-                                    (uint32_t)(now_us() / UINT64_C(1000)),
-                                    s_telemetry_sink_context);
+            if (s_telemetry_sink != NULL) {
+                (void)s_telemetry_sink(message_id, encoded, encoded_length,
+                                        (uint32_t)(now_us() / UINT64_C(1000)),
+                                        s_telemetry_sink_context);
+            }
+            if (s_telemetry_sink_secondary != NULL) {
+                (void)s_telemetry_sink_secondary(
+                    message_id, encoded, encoded_length,
+                    (uint32_t)(now_us() / UINT64_C(1000)),
+                    s_telemetry_sink_secondary_context);
+            }
         }
     }
     (void)notify_app_frame(app_type, frame->payload, frame->length);
@@ -1463,12 +1586,19 @@ static bool motion_command_is_zero_target(const smartcar_motion_command_t *comma
                srp_wire_read_u32_le(&command->payload[8]) ==
                    SRP_CHASSIS_HEADING_FLAGS_NONE;
     }
-    return command->message_id == SRP_MSG_ID_WHEEL_SPEED_CMD &&
-           command->length == SRP_PAYLOAD_WHEEL_SPEED_CMD_SIZE &&
-           srp_wire_read_f32_array_le(command->payload, command->length,
-                                       speeds, 4U) &&
-           fabsf(speeds[0]) <= 0.001f && fabsf(speeds[1]) <= 0.001f &&
-           fabsf(speeds[2]) <= 0.001f && fabsf(speeds[3]) <= 0.001f;
+    if (command->message_id == SRP_MSG_ID_WHEEL_SPEED_CMD) {
+        return command->length == SRP_PAYLOAD_WHEEL_SPEED_CMD_SIZE &&
+               srp_wire_read_f32_array_le(command->payload, command->length,
+                                           speeds, 4U) &&
+               fabsf(speeds[0]) <= 0.001f && fabsf(speeds[1]) <= 0.001f &&
+               fabsf(speeds[2]) <= 0.001f && fabsf(speeds[3]) <= 0.001f;
+    }
+    if (command->message_id == SRP_MSG_ID_CHASSIS_SPEED_CMD) {
+        return command->length == SRP_PAYLOAD_CHASSIS_SPEED_CMD_SIZE &&
+               srp_wire_read_f32_le(&command->payload[0]) == 0.0f &&
+               srp_wire_read_f32_le(&command->payload[4]) == 0.0f;
+    }
+    return false;
 }
 
 /**
@@ -1730,6 +1860,9 @@ static bool queue_motion_command(uint8_t app_type, uint16_t message_id,
                                  const smartcar_app_command_meta_t *meta)
 {
     smartcar_motion_command_t command = {0};
+    const bool ros_lease_pending_or_active =
+        s_ros_lease_active ||
+        __atomic_load_n(&s_ros_lease_requested, __ATOMIC_ACQUIRE);
 
     if (payload == NULL || length > sizeof(command.payload)) {
         return false;
@@ -1746,7 +1879,13 @@ static bool queue_motion_command(uint8_t app_type, uint16_t message_id,
     command.message_id = message_id;
     command.length = length;
     (void)memcpy(command.payload, payload, length);
+    if (ros_lease_pending_or_active && !motion_command_is_zero_target(&command)) {
+        return false;
+    }
     if (motion_command_is_zero_target(&command)) {
+        if (ros_lease_pending_or_active) {
+            command_bridge_clear_ros_motion_authority();
+        }
         s_motion_pending_target.valid = false;
         s_motion_pending_scale.valid = false;
         return send_motion_stop(&command);
@@ -1758,6 +1897,41 @@ static bool queue_motion_command(uint8_t app_type, uint16_t message_id,
         return true;
     }
     return start_motion_command(&command);
+}
+
+static void command_bridge_process_ros_motion(void)
+{
+    smartcar_service_ros_motion_command_t ros_command;
+
+    if (__atomic_exchange_n(&s_ros_stop_requested, false, __ATOMIC_ACQ_REL)) {
+        command_bridge_clear_ros_motion_authority();
+        s_motion_pending_target.valid = false;
+        s_motion_pending_scale.valid = false;
+        cancel_motion_transactions();
+        s_ble_stop_cleanup_active = true;
+        command_bridge_send_zero_wheel_speed();
+        s_ble_stop_cleanup_active = false;
+    }
+    if (__atomic_exchange_n(&s_ros_lease_requested, false, __ATOMIC_ACQ_REL)) {
+        s_ros_lease_active = true;
+    }
+    if (!s_ros_lease_active || s_ros_motion_queue == NULL ||
+        xQueueReceive(s_ros_motion_queue, &ros_command, 0U) != pdPASS) {
+        return;
+    }
+    {
+        uint8_t payload[SRP_PAYLOAD_CHASSIS_SPEED_CMD_SIZE] = {0U};
+        const float linear_mm_s = ros_command.linear_m_s * 1000.0f;
+
+        srp_wire_write_f32_le(&payload[0], linear_mm_s);
+        srp_wire_write_f32_le(&payload[4], ros_command.angular_rad_s);
+        if (srp_link_send(&s_link, SRP_PRIORITY_COMMAND, SRP_NODE_STM32H757,
+                          SRP_MSG_ID_CHASSIS_SPEED_CMD, SRP_FLAG_STREAM_DATA,
+                          payload, sizeof(payload),
+                          (uint32_t)(now_us() / UINT64_C(1000)), NULL, NULL) != 0) {
+            __atomic_store_n(&s_ros_stop_requested, true, __ATOMIC_RELEASE);
+        }
+    }
 }
 
 /**
@@ -1795,10 +1969,19 @@ static void command_bridge_send_zero_wheel_speed(void)
     const float speeds[4] = {0.0f, 0.0f, 0.0f, 0.0f};
     int heading_result;
     int wheel_result;
+    int chassis_result;
 
     s_motion_pending_target.valid = false;
     s_motion_pending_scale.valid = false;
     cancel_motion_transactions();
+    srp_wire_write_f32_array_le(payload, speeds, 4U);
+    /* 0x06 is the ROS motion contract. It must leave before the legacy
+     * heading/wheel stops, whose UART transactions can block independently. */
+    chassis_result = srp_link_send(
+        &s_link, SRP_PRIORITY_EMERGENCY, SRP_NODE_STM32H757,
+        SRP_MSG_ID_CHASSIS_SPEED_CMD, SRP_FLAG_STREAM_DATA, payload,
+        SRP_PAYLOAD_CHASSIS_SPEED_CMD_SIZE,
+        (uint32_t)(now_us() / UINT64_C(1000)), NULL, NULL);
     /* Local disconnect/session safety must clear the CM7 heading controller
      * using the same SRP command as the App stop path. */
     heading_result = srp_link_send(
@@ -1806,16 +1989,15 @@ static void command_bridge_send_zero_wheel_speed(void)
         SRP_MSG_ID_CHASSIS_HEADING_CMD, SRP_FLAG_ACK_REQUIRED,
         heading_payload, sizeof(heading_payload),
         (uint32_t)(now_us() / UINT64_C(1000)), NULL, NULL);
-    srp_wire_write_f32_array_le(payload, speeds, 4U);
     wheel_result = srp_link_send(&s_link, SRP_PRIORITY_COMMAND,
                                  SRP_NODE_STM32H757, SRP_MSG_ID_WHEEL_SPEED_CMD,
                                  SRP_FLAG_STREAM_DATA, payload, sizeof(payload),
                                  (uint32_t)(now_us() / UINT64_C(1000)), NULL, NULL);
-    if (heading_result != 0 || wheel_result != 0) {
-        ESP_LOGE(TAG, "BLE disconnect stop frame send failed heading=%d wheel=%d",
-                 heading_result, wheel_result);
+    if (heading_result != 0 || wheel_result != 0 || chassis_result != 0) {
+        ESP_LOGE(TAG, "safety stop frame send failed heading=%d wheel=%d chassis=%d",
+                 heading_result, wheel_result, chassis_result);
     } else {
-        ESP_LOGI(TAG, "BLE disconnect stop frames queued heading=0x17 wheel=0x02");
+        ESP_LOGI(TAG, "safety stop frames queued heading=0x17 wheel=0x02 chassis=0x06");
     }
 }
 
@@ -2130,6 +2312,8 @@ static void smartcar_service_task(void *context)
         }
         if (s_ble_disconnect_stop_pending) {
             s_ble_disconnect_stop_pending = false;
+            command_bridge_clear_ros_motion_authority();
+            __atomic_store_n(&s_ros_stop_requested, false, __ATOMIC_RELEASE);
             s_ble_stop_cleanup_active = true;
             /* The stop boundary owns all App parser/session/motion state. Drop
              * every queued byte before accepting a new HELLO/session. */
@@ -2144,6 +2328,7 @@ static void smartcar_service_task(void *context)
              * This keeps the safety frame ahead of any post-event traffic. */
             continue;
         }
+        command_bridge_process_ros_motion();
         command_bridge_sync_step(now_us());
         if (command_bridge_ble_stop_requested()) {
             continue;
@@ -2325,6 +2510,15 @@ esp_err_t smartcar_service_init(void)
     s_stack_hwm_valid = false;
     s_bus_off_recovery_pending = false;
     s_bus_off_latched = false;
+    s_ros_lease_requested = false;
+    s_ros_stop_requested = false;
+    s_ros_lease_active = false;
+    s_ros_motion_queue = xQueueCreateStatic(
+        1U, sizeof(smartcar_service_ros_motion_command_t),
+        s_ros_motion_queue_buffer, &s_ros_motion_queue_storage);
+    if (s_ros_motion_queue == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
     s_ble_rx_queue = xQueueCreateStatic(SMARTCAR_SERVICE_BLE_RX_QUEUE_DEPTH,
                                         sizeof(smartcar_ble_rx_item_t),
                                         s_ble_rx_queue_buffer,
@@ -2334,8 +2528,13 @@ esp_err_t smartcar_service_init(void)
     }
     srp_link_init(&s_link, &link_config);
     srp_parser_init(&s_parser, command_bridge_parsed_frame,
-                     command_bridge_on_parser_error, NULL);
+                    command_bridge_on_parser_error, NULL);
     s_link_ready = 1U;
+    /* A fresh S3 process has no ROS lease. Submit the same emergency 0x06
+     * boundary before the service task can admit any new command. */
+    s_ble_stop_cleanup_active = true;
+    command_bridge_send_zero_wheel_speed();
+    s_ble_stop_cleanup_active = false;
 #if !SMARTCAR_BMI323_DEBUG_ONLY
     radar_calibration_manager_init();
     radar_calibration_manager_set_transport(command_bridge_send_radar_pwm_ready, NULL);

@@ -13,6 +13,7 @@ idf_component_register(
     REQUIRES freertos log nvs_flash esp_driver_gpio esp_driver_ledc esp_driver_uart
              esp_event esp_netif esp_wifi lwip
              stm_uart smartcar_protocol smartcar_service s3_ble smartcar_log radar_control
+             ros_motion_gateway smartcar_wifi_sta
 )
 
 set(_smartcar_telemetry_identity_sources
